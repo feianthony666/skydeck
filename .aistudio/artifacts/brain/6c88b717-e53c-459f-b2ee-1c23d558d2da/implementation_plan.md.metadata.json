@@ -1,0 +1,6 @@
+{
+  "summary": "Revised implementation plan adding direct Flightradar24 web feed (data-cloud.flightradar24.com/zones/fcgi/feed.js & clickhandler) plus AirNav/VariFlight web adapters and OpenSky/adsb.lol/adsb.fi fallback for rich live Chinese airspace and global coverage.",
+  "updatedAt": "2026-11-17T05:50:00.815184283Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
