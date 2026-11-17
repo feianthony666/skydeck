@@ -115,18 +115,37 @@ export default defineConfig(() => {
         },
       }),
       {
-        name: 'copy-unbundled-src-assets',
+        name: 'skydeck-strip-raw-guard',
+        transformIndexHtml: {
+          order: 'pre',
+          handler(html: string): string {
+            return html.replace(/\s*<script[^>]*data-skydeck-raw-guard[^>]*>[\s\S]*?<\/script>/gi, '');
+          },
+        },
+      },
+      {
+        name: 'skydeck-static-github-pages',
         apply: 'build',
-        closeBundle(error?: Error): void {
-          if (error) {
-            return;
-          }
-          const distDir = path.resolve(import.meta.dirname, 'dist');
-          const srcAssets = path.resolve(import.meta.dirname, 'src/assets');
-          const distAssets = path.resolve(distDir, 'src/assets');
-          if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
-            fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
-          }
+        enforce: 'post',
+        closeBundle: {
+          order: 'post',
+          handler(error?: Error): void {
+            if (error) {
+              return;
+            }
+            const distDir = path.resolve(import.meta.dirname, 'dist');
+            const docsDir = path.resolve(import.meta.dirname, 'docs');
+            const srcAssets = path.resolve(import.meta.dirname, 'src/assets');
+            const distAssets = path.resolve(distDir, 'src/assets');
+            if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
+              fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+            }
+            if (fs.existsSync(distDir)) {
+              fs.writeFileSync(path.join(distDir, '.nojekyll'), '');
+              fs.rmSync(docsDir, {recursive: true, force: true});
+              fs.cpSync(distDir, docsDir, {recursive: true, force: true});
+            }
+          },
         },
       },
     ],
