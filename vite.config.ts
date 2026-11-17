@@ -7,6 +7,7 @@ import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
+    base: '/skydeck/', // added repo name for github pages deployment
     plugins: [
       react(),
       tailwindcss(),
