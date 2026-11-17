@@ -7,6 +7,7 @@ import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
+    base: '/skydeck/',
     plugins: [
       react(),
       tailwindcss(),
@@ -14,30 +15,30 @@ export default defineConfig(() => {
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
-          id: '/',
+          id: '/skydeck/',
           name: 'SkyDeck Flight Deck & Radar',
           short_name: 'SkyDeck',
           description: 'Live ADS-B radar, Chinese & global web feeds, ACARS stream, 3D flight deck & aircraft liveries, airport taxi feed, and weather-coupled flight planner.',
           theme_color: '#080D16',
           background_color: '#080D16',
           display: 'standalone',
-          start_url: '/',
-          scope: '/',
+          start_url: '/skydeck/',
+          scope: '/skydeck/',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: '/skydeck/pwa-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/skydeck/pwa-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: '/skydeck/pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -59,7 +60,7 @@ export default defineConfig(() => {
                   maxAgeSeconds: 60 * 60 * 24 * 14,
                 },
                 cacheableResponse: {
-                  statuses: [0, 200],
+                  statuses:,
                 },
               },
             },
@@ -73,7 +74,7 @@ export default defineConfig(() => {
                   maxAgeSeconds: 60 * 60 * 24 * 14,
                 },
                 cacheableResponse: {
-                  statuses: [0, 200],
+                  statuses:,
                 },
               },
             },
@@ -88,7 +89,7 @@ export default defineConfig(() => {
                   maxAgeSeconds: 60 * 60,
                 },
                 cacheableResponse: {
-                  statuses: [0, 200],
+                  statuses:,
                 },
               },
             },
@@ -102,7 +103,7 @@ export default defineConfig(() => {
                   maxAgeSeconds: 60 * 60 * 24 * 365,
                 },
                 cacheableResponse: {
-                  statuses: [0, 200],
+                  statuses:,
                 },
               },
             },
