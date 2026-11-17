@@ -5,7 +5,16 @@ import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
-export default defineConfig(() => {
+export default defineConfig(({command}) => {
+  const rootDir = import.meta.dirname;
+  if (command === 'build') {
+    const tplPath = path.resolve(rootDir, 'index.template.html');
+    const indexPath = path.resolve(rootDir, 'index.html');
+    if (fs.existsSync(tplPath)) {
+      fs.copyFileSync(tplPath, indexPath);
+    }
+  }
+
   return {
     base: './',
     plugins: [
@@ -115,35 +124,79 @@ export default defineConfig(() => {
         },
       }),
       {
-        name: 'skydeck-strip-raw-guard',
+        name: 'skydeck-dev-template-html',
+        apply: 'serve',
         transformIndexHtml: {
           order: 'pre',
-          handler(html: string): string {
-            return html.replace(/\s*<script[^>]*data-skydeck-raw-guard[^>]*>[\s\S]*?<\/script>/gi, '');
+          handler(): string {
+            const tplPath = path.resolve(rootDir, 'index.template.html');
+            if (fs.existsSync(tplPath)) {
+              return fs.readFileSync(tplPath, 'utf-8');
+            }
+            return '';
           },
         },
       },
       {
         name: 'skydeck-static-github-pages',
         apply: 'build',
-        enforce: 'post',
         closeBundle: {
           order: 'post',
           handler(error?: Error): void {
             if (error) {
               return;
             }
-            const distDir = path.resolve(import.meta.dirname, 'dist');
-            const docsDir = path.resolve(import.meta.dirname, 'docs');
-            const srcAssets = path.resolve(import.meta.dirname, 'src/assets');
+            const distDir = path.resolve(rootDir, 'dist');
+            const docsDir = path.resolve(rootDir, 'docs');
+            const srcAssets = path.resolve(rootDir, 'src/assets');
             const distAssets = path.resolve(distDir, 'src/assets');
             if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
               fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
             }
+            if (fs.existsSync(docsDir)) {
+              fs.rmSync(docsDir, {recursive: true, force: true});
+            }
             if (fs.existsSync(distDir)) {
               fs.writeFileSync(path.join(distDir, '.nojekyll'), '');
-              fs.rmSync(docsDir, {recursive: true, force: true});
-              fs.cpSync(distDir, docsDir, {recursive: true, force: true});
+
+              // Clean stale workbox-*.js and assets/ at root before syncing compiled static bundle
+              for (const entry of fs.readdirSync(rootDir)) {
+                if (/^workbox-[a-f0-9]+\.js$/i.test(entry)) {
+                  fs.rmSync(path.join(rootDir, entry), {force: true});
+                }
+              }
+              const rootAssetsDir = path.join(rootDir, 'assets');
+              if (fs.existsSync(rootAssetsDir)) {
+                fs.rmSync(rootAssetsDir, {recursive: true, force: true});
+              }
+
+              // Mirror built static entry and assets directly to repo root so GitHub Pages serves at /skydeck/
+              const staticFiles = [
+                'index.html',
+                '.nojekyll',
+                'manifest.webmanifest',
+                'sw.js',
+                'icon.svg',
+                'apple-touch-icon.png',
+                'pwa-192x192.png',
+                'pwa-512x512.png',
+                'pwa-maskable-512x512.png',
+              ];
+              for (const file of staticFiles) {
+                const srcFile = path.join(distDir, file);
+                if (fs.existsSync(srcFile)) {
+                  fs.copyFileSync(srcFile, path.join(rootDir, file));
+                }
+              }
+              for (const entry of fs.readdirSync(distDir)) {
+                if (/^workbox-[a-f0-9]+\.js$/i.test(entry)) {
+                  fs.copyFileSync(path.join(distDir, entry), path.join(rootDir, entry));
+                }
+              }
+              const distAssetsDir = path.join(distDir, 'assets');
+              if (fs.existsSync(distAssetsDir)) {
+                fs.cpSync(distAssetsDir, rootAssetsDir, {recursive: true, force: true});
+              }
             }
           },
         },
@@ -151,7 +204,7 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(import.meta.dirname, '.'),
+        '@': path.resolve(rootDir, '.'),
       },
     },
     server: {
