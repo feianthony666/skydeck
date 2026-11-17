@@ -28,6 +28,867 @@
   </head>
   <body class="bg-[#bcd8f8] text-[#13233a] dark:bg-[#080D16] dark:text-[#E2E8F0] antialiased overflow-hidden selection:bg-[#13233a]/15 dark:selection:bg-sky-500/30">
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <!-- SKYDECK_STATIC_RUNTIME_START -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+    <style data-skydeck-static>
+      :root {
+        --sd-bg: #bcd8f8;
+        --sd-fg: #13233a;
+        --sd-card: rgba(242, 247, 254, 0.94);
+        --sd-sec: #d7e8fc;
+        --sd-border: rgba(19, 35, 58, 0.14);
+        --sd-muted: #3a5577;
+        --sd-accent: #13233a;
+        --sd-accent-fg: #ffffff;
+      }
+      html.dark {
+        --sd-bg: #080d16;
+        --sd-fg: #e2e8f0;
+        --sd-card: rgba(18, 22, 31, 0.94);
+        --sd-sec: #1a202c;
+        --sd-border: rgba(255, 255, 255, 0.1);
+        --sd-muted: #94a3b8;
+        --sd-accent: #38bdf8;
+        --sd-accent-fg: #080d16;
+      }
+      html, body, #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        font-family: 'Google Sans', system-ui, sans-serif;
+        background: var(--sd-bg);
+        color: var(--sd-fg);
+      }
+      .sd-shell {
+        position: relative;
+        width: 100vw;
+        height: 100dvh;
+        overflow: hidden;
+      }
+      #sd-map {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        background: #d9e8fa;
+      }
+      html.dark #sd-map {
+        background: #0b0e14;
+      }
+      .sd-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        height: 32px;
+        padding: 0 12px;
+        border-radius: 9999px;
+        border: 1px solid var(--sd-border);
+        background: var(--sd-sec);
+        color: var(--sd-fg);
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .sd-btn:hover {
+        filter: brightness(0.96);
+      }
+      .sd-btn.active {
+        background: var(--sd-accent);
+        color: var(--sd-accent-fg);
+        border-color: transparent;
+      }
+      .sd-legend {
+        position: fixed;
+        top: 12px;
+        right: 52px;
+        z-index: 450;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px;
+        border-radius: 9999px;
+        background: var(--sd-card);
+        border: 1px solid var(--sd-border);
+        backdrop-filter: blur(12px);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10.5px;
+        color: var(--sd-muted);
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.14);
+        transition: all 260ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .sd-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 9999px;
+        display: inline-block;
+      }
+      .sd-sidebar {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        bottom: 78px;
+        width: min(370px, calc(100vw - 24px));
+        z-index: 520;
+        background: var(--sd-card);
+        border: 1px solid var(--sd-border);
+        border-radius: 20px;
+        backdrop-filter: blur(16px);
+        box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1), opacity 240ms ease;
+      }
+      .sd-sidebar.hidden {
+        transform: translateX(-110%);
+        opacity: 0;
+        pointer-events: none;
+      }
+      .sd-dock-wrap {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        right: 12px;
+        z-index: 550;
+        display: flex;
+        justify-content: center;
+        align-items: flex-end;
+        pointer-events: none;
+      }
+      .sd-dock {
+        pointer-events: auto;
+        max-width: calc(100vw - 24px);
+        background: var(--sd-card);
+        border: 1px solid var(--sd-border);
+        border-radius: 9999px;
+        padding: 6px 10px;
+        backdrop-filter: blur(16px);
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        transition: all 280ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .sd-dock.collapsed {
+        transform: translateY(140%);
+        opacity: 0;
+        pointer-events: none;
+      }
+      .sd-dock-show {
+        position: fixed;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 560;
+        pointer-events: auto;
+      }
+      .sd-input, .sd-select {
+        height: 32px;
+        border-radius: 9999px;
+        border: 1px solid var(--sd-border);
+        background: var(--sd-sec);
+        color: var(--sd-fg);
+        padding: 0 12px;
+        font-size: 12px;
+        font-family: 'Google Sans', system-ui, sans-serif;
+        outline: none;
+      }
+      .sd-popover {
+        position: fixed;
+        bottom: 64px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(340px, calc(100vw - 24px));
+        max-height: 70dvh;
+        overflow-y: auto;
+        z-index: 600;
+        background: var(--sd-card);
+        border: 1px solid var(--sd-border);
+        border-radius: 18px;
+        padding: 14px;
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 44px rgba(15, 23, 42, 0.28);
+        transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .sd-popover.hidden {
+        opacity: 0;
+        transform: translate(-50%, 10px) scale(0.96);
+        pointer-events: none;
+      }
+      .sd-grid-2 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .sd-grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .sd-mono {
+        font-family: 'JetBrains Mono', monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      .skydeck-plane-icon, .skydeck-airport-label, .skydeck-runway-num, .skydeck-taxi-badge {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+      }
+      @media (max-width: 640px) {
+        .sd-legend { display: none; }
+        .sd-dock { border-radius: 20px; padding: 8px; }
+        .sd-sidebar {
+          top: auto;
+          bottom: 76px;
+          max-height: 58dvh;
+          left: 8px;
+          width: calc(100vw - 16px);
+        }
+      }
+    </style>
+
+    <div class="sd-shell" id="sd-static-app">
+      <div id="sd-map"></div>
+
+      <div class="sd-legend" aria-label="GeoFS Altitude Scale">
+        <span><i class="sd-dot" style="background:#FACC15"></i> 0k</span>
+        <span><i class="sd-dot" style="background:#22C55E"></i> 10k</span>
+        <span><i class="sd-dot" style="background:#2563EB"></i> 25k</span>
+        <span><i class="sd-dot" style="background:#7C5CBF"></i> 30k</span>
+        <span><i class="sd-dot" style="background:#BE185D"></i> 40k</span>
+        <span><i class="sd-dot" style="background:#F472B6"></i> 50k+</span>
+        <span><i class="sd-dot" style="background:#F9D949"></i> ACFT</span>
+        <span id="sd-count-pill" style="font-weight:700;color:var(--sd-fg)">Syncing…</span>
+      </div>
+
+      <aside class="sd-sidebar hidden" id="sd-sidebar"></aside>
+
+      <div class="sd-popover hidden" id="sd-settings-popover">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <div>
+            <div style="font-size:12px;font-weight:700;">Radar & Overlay Settings</div>
+            <div style="font-size:11px;color:var(--sd-muted);">Static Live Mode</div>
+          </div>
+          <button type="button" class="sd-btn" id="sd-settings-close">Close</button>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:4px;">
+            <span>Airplane Size</span>
+            <span class="sd-mono" id="sd-size-val">20 px</span>
+          </div>
+          <input id="sd-size-range" type="range" min="14" max="34" step="2" value="20" style="width:100%;" />
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <div style="font-size:11.5px;font-weight:600;margin-bottom:6px;">Flown Paths (FOV Only)</div>
+          <div class="sd-grid-3" id="sd-path-modes">
+            <button type="button" class="sd-btn active" data-path="all">All</button>
+            <button type="button" class="sd-btn" data-path="selected">Selected</button>
+            <button type="button" class="sd-btn" data-path="off">Off</button>
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <div style="font-size:11.5px;font-weight:600;margin-bottom:6px;">Schedule Timezone</div>
+          <div class="sd-grid-3" id="sd-tz-modes">
+            <button type="button" class="sd-btn active" data-tz="airport">Airport</button>
+            <button type="button" class="sd-btn" data-tz="local">My Local</button>
+            <button type="button" class="sd-btn" data-tz="utc">UTC</button>
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <div style="font-size:11.5px;font-weight:600;margin-bottom:6px;">Basemap</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;" id="sd-basemaps">
+            <button type="button" class="sd-btn active" data-map="auto">Auto</button>
+            <button type="button" class="sd-btn" data-map="light">Light</button>
+            <button type="button" class="sd-btn" data-map="dark">Dark</button>
+            <button type="button" class="sd-btn" data-map="osm">OSM</button>
+            <button type="button" class="sd-btn" data-map="satellite">Satellite</button>
+          </div>
+        </div>
+
+        <div class="sd-grid-2" id="sd-toggles">
+          <button type="button" class="sd-btn active" data-toggle="locate">Locate Me</button>
+          <button type="button" class="sd-btn" data-toggle="labels">Plane Labels</button>
+          <button type="button" class="sd-btn active" data-toggle="metar">METAR Colors</button>
+          <button type="button" class="sd-btn active" data-toggle="ground">Ground Traffic</button>
+        </div>
+      </div>
+
+      <div class="sd-dock-wrap">
+        <div class="sd-dock" id="sd-dock">
+          <span style="font-weight:700;font-size:12.5px;padding:0 6px;">SkyDeck</span>
+          <input id="sd-search" class="sd-input" style="width:140px;" placeholder="Callsign / SQK / IATA" />
+          <select id="sd-region" class="sd-select" aria-label="Region">
+            <option value="cn">China</option>
+            <option value="asia">East Asia</option>
+            <option value="eu">Europe</option>
+            <option value="na">N. America</option>
+            <option value="global">Global</option>
+          </select>
+          <button type="button" class="sd-btn" id="sd-locate-btn">Locate</button>
+          <button type="button" class="sd-btn active" data-phase="all">All</button>
+          <button type="button" class="sd-btn" data-phase="air">Air</button>
+          <button type="button" class="sd-btn" data-phase="ground">GND</button>
+          <button type="button" class="sd-btn" id="sd-settings-btn">Settings</button>
+          <button type="button" class="sd-btn" id="sd-theme-btn" style="width:84px;">Light</button>
+          <button type="button" class="sd-btn" id="sd-dock-hide">Hide</button>
+        </div>
+      </div>
+      <button type="button" class="sd-btn sd-dock-show" id="sd-dock-show" style="display:none;">Show Dock</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script data-skydeck-static>
+      (function () {
+        if (!window.L) return;
+        const HUBS = [
+          {icao:'ZBAA',iata:'PEK',name:'Beijing Capital',city:'Beijing',lat:40.0799,lon:116.6031,tz:'Asia/Shanghai',tier:1},
+          {icao:'ZBAD',iata:'PKX',name:'Beijing Daxing',city:'Beijing',lat:39.5098,lon:116.4105,tz:'Asia/Shanghai',tier:1},
+          {icao:'ZSPD',iata:'PVG',name:'Shanghai Pudong',city:'Shanghai',lat:31.1443,lon:121.8083,tz:'Asia/Shanghai',tier:1},
+          {icao:'ZGGG',iata:'CAN',name:'Guangzhou Baiyun',city:'Guangzhou',lat:23.3924,lon:113.2988,tz:'Asia/Shanghai',tier:1},
+          {icao:'ZGSZ',iata:'SZX',name:'Shenzhen Baoan',city:'Shenzhen',lat:22.6393,lon:113.8107,tz:'Asia/Shanghai',tier:1},
+          {icao:'ZUUU',iata:'CTU',name:'Chengdu Shuangliu',city:'Chengdu',lat:30.5785,lon:103.9471,tz:'Asia/Shanghai',tier:1},
+          {icao:'VHHH',iata:'HKG',name:'Hong Kong Intl',city:'Hong Kong',lat:22.3080,lon:113.9185,tz:'Asia/Hong_Kong',tier:1},
+          {icao:'RJTT',iata:'HND',name:'Tokyo Haneda',city:'Tokyo',lat:35.5494,lon:139.7798,tz:'Asia/Tokyo',tier:1},
+          {icao:'WSSS',iata:'SIN',name:'Singapore Changi',city:'Singapore',lat:1.3644,lon:103.9915,tz:'Asia/Singapore',tier:1},
+          {icao:'EGLL',iata:'LHR',name:'London Heathrow',city:'London',lat:51.4700,lon:-0.4543,tz:'Europe/London',tier:1},
+          {icao:'LFPG',iata:'CDG',name:'Paris Charles de Gaulle',city:'Paris',lat:49.0097,lon:2.5479,tz:'Europe/Paris',tier:1},
+          {icao:'EDDF',iata:'FRA',name:'Frankfurt',city:'Frankfurt',lat:50.0379,lon:8.5622,tz:'Europe/Berlin',tier:1},
+          {icao:'OMDB',iata:'DXB',name:'Dubai Intl',city:'Dubai',lat:25.2532,lon:55.3657,tz:'Asia/Dubai',tier:1},
+          {icao:'KJFK',iata:'JFK',name:'New York JFK',city:'New York',lat:40.6413,lon:-73.7781,tz:'America/New_York',tier:1},
+          {icao:'KLAX',iata:'LAX',name:'Los Angeles Intl',city:'Los Angeles',lat:33.9416,lon:-118.4085,tz:'America/Los_Angeles',tier:1},
+          {icao:'KSFO',iata:'SFO',name:'San Francisco Intl',city:'San Francisco',lat:37.6213,lon:-122.3790,tz:'America/Los_Angeles',tier:1},
+        ];
+        const REGIONS = {
+          cn: {center:[35.2, 108.5], zoom:5},
+          asia: {center:[31.0, 121.0], zoom:5},
+          eu: {center:[49.5, 9.0], zoom:5},
+          na: {center:[39.0, -96.0], zoom:4},
+          global: {center:[24.0, 20.0], zoom:3},
+        };
+        const GEOFS = [
+          {alt:0,rgb:[250,204,21]},
+          {alt:10000,rgb:[34,197,94]},
+          {alt:25000,rgb:[37,99,235]},
+          {alt:30000,rgb:[124,92,191]},
+          {alt:40000,rgb:[190,24,93]},
+          {alt:50000,rgb:[244,114,182]},
+        ];
+        function altColor(ft) {
+          const a = Math.max(0, ft || 0);
+          if (a >= 50000) return 'rgb(244,114,182)';
+          for (let i = 0; i < GEOFS.length - 1; i++) {
+            if (a >= GEOFS[i].alt && a <= GEOFS[i + 1].alt) {
+              const t = (a - GEOFS[i].alt) / (GEOFS[i + 1].alt - GEOFS[i].alt);
+              const r = Math.round(GEOFS[i].rgb[0] + (GEOFS[i + 1].rgb[0] - GEOFS[i].rgb[0]) * t);
+              const g = Math.round(GEOFS[i].rgb[1] + (GEOFS[i + 1].rgb[1] - GEOFS[i].rgb[1]) * t);
+              const b = Math.round(GEOFS[i].rgb[2] + (GEOFS[i + 1].rgb[2] - GEOFS[i].rgb[2]) * t);
+              return `rgb(${r},${g},${b})`;
+            }
+          }
+          return '#FACC15';
+        }
+
+        const state = {
+          theme: 'light',
+          basemap: 'auto',
+          planeSize: 20,
+          pathMode: 'all',
+          tzMode: 'airport',
+          phase: 'all',
+          locate: true,
+          labels: false,
+          metar: true,
+          ground: true,
+          search: '',
+          selectedFlightId: null,
+          selectedAirport: null,
+          flights: [],
+          airports: [...HUBS],
+          globalAirports: null,
+          trails: new Map(),
+          pool: new Map(),
+          surfaceKey: '',
+          zooming: false,
+        };
+
+        const map = L.map('sd-map', {center:[39.9, 116.4], zoom:6, minZoom:3, maxZoom:18, zoomControl:false, preferCanvas:true});
+        L.control.zoom({position:'topright'}).addTo(map);
+        const renderer = L.canvas({padding:0.25});
+        const surfaceLayer = L.layerGroup().addTo(map);
+        const pathLayer = L.layerGroup().addTo(map);
+        const airportLayer = L.layerGroup().addTo(map);
+        const trailLayer = L.layerGroup().addTo(map);
+        const userLayer = L.layerGroup().addTo(map);
+        const flightLayer = L.layerGroup().addTo(map);
+        let baseLayers = [];
+
+        function setBasemap() {
+          baseLayers.forEach((l) => map.removeLayer(l));
+          baseLayers = [];
+          const eff = state.basemap === 'auto' ? (state.theme === 'dark' ? 'dark' : 'light') : state.basemap;
+          if (eff === 'satellite') {
+            baseLayers.push(L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:18}));
+            baseLayers.push(L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {maxZoom:16,opacity:0.85}));
+          } else if (eff === 'osm') {
+            baseLayers.push(L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}));
+          } else if (eff === 'dark') {
+            baseLayers.push(L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {maxZoom:16}));
+            baseLayers.push(L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {maxZoom:16,opacity:0.9}));
+          } else {
+            baseLayers.push(L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {maxZoom:16}));
+            baseLayers.push(L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {maxZoom:16,opacity:0.92}));
+          }
+          baseLayers.forEach((l) => { l.addTo(map); l.bringToBack(); });
+          if (baseLayers.length > 1) baseLayers[0].bringToBack();
+        }
+        setBasemap();
+
+        function makePlaneIcon(f, isSel, trk) {
+          const sz = Math.max(12, Math.min(40, isSel ? state.planeSize + 6 : f.onGround ? Math.max(12, state.planeSize - 4) : state.planeSize));
+          const fill = isSel ? '#F59E0B' : '#F9D949';
+          const stroke = isSel ? '#ffffff' : (state.theme === 'dark' ? '#0B0E14' : '#13233a');
+          const lbl = (state.labels || isSel)
+            ? `<span style="margin-left:5px;padding:1px 7px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;white-space:nowrap;background:#F9D949;color:#13233a;border:1px solid ${isSel ? '#ffffff' : 'rgba(19,35,58,0.45)'};box-shadow:0 1px 4px rgba(19,35,58,0.28);">${f.callsign}${f.onGround ? ' GND' : ' FL' + Math.round(f.alt / 100)}</span>`
+            : '';
+          return L.divIcon({
+            className: 'skydeck-plane-icon',
+            iconSize: [sz, sz],
+            iconAnchor: [sz / 2, sz / 2],
+            html: `<div style="position:relative;width:${sz}px;height:${sz}px;display:flex;align-items:center;"><div class="skydeck-plane-rot" style="width:${sz}px;height:${sz}px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transform:rotate(${trk.toFixed(1)}deg);"><svg viewBox="0 0 24 24" width="${sz}" height="${sz}" fill="${fill}" stroke="${stroke}" stroke-width="1.35"><path d="M12 2L14.2 9.2L21 13V15L14.2 13V18.5L17 20.5V22L12 20.8L7 22V20.5L9.8 18.5V13L3 15V13L9.8 9.2L12 2Z"/></svg></div>${lbl}</div>`
+          });
+        }
+
+        function smoothChain(raw, f, b) {
+          const pts = [];
+          for (const p of raw) {
+            const prev = pts[pts.length - 1];
+            if (prev) {
+              const d = Math.hypot(p.lat - prev.lat, p.lon - prev.lon);
+              if (d < 0.0002 || d > 0.32) continue;
+            }
+            pts.push(p);
+          }
+          const last = pts[pts.length - 1];
+          if (!last || Math.hypot(f.lat - last.lat, f.lon - last.lon) < 0.32) {
+            pts.push({lat:f.lat, lon:f.lon, alt:f.alt});
+          }
+          if (pts.length < 2) return [];
+          const inFov = [];
+          let cur = [];
+          for (const p of pts) {
+            if (b.contains([p.lat, p.lon])) cur.push(p);
+            else { if (cur.length >= 2) inFov.push(cur); cur = []; }
+          }
+          if (cur.length >= 2) inFov.push(cur);
+          return inFov.map((c) => {
+            let arr = c;
+            for (let pass = 0; pass < 2 && arr.length >= 3; pass++) {
+              const next = [arr[0]];
+              for (let i = 0; i < arr.length - 1; i++) {
+                next.push({lat:0.75*arr[i].lat+0.25*arr[i+1].lat, lon:0.75*arr[i].lon+0.25*arr[i+1].lon, alt:0.75*arr[i].alt+0.25*arr[i+1].alt});
+                next.push({lat:0.25*arr[i].lat+0.75*arr[i+1].lat, lon:0.25*arr[i].lon+0.75*arr[i+1].lon, alt:0.25*arr[i].alt+0.75*arr[i+1].alt});
+              }
+              next.push(arr[arr.length - 1]);
+              arr = next;
+            }
+            return arr;
+          });
+        }
+
+        function drawGradient(pts, layer, weight, op) {
+          for (let i = 1; i < pts.length; i++) {
+            L.polyline([[pts[i-1].lat, pts[i-1].lon], [pts[i].lat, pts[i].lon]], {
+              renderer, color: altColor((pts[i-1].alt + pts[i].alt) * 0.5), weight, opacity: op, interactive: false
+            }).addTo(layer);
+          }
+        }
+
+        function renderFlights() {
+          pathLayer.clearLayers();
+          trailLayer.clearLayers();
+          const b = map.getBounds();
+          const q = state.search.trim().toUpperCase();
+          const visible = state.flights.filter((f) => {
+            if (!state.ground && f.onGround) return false;
+            if (state.phase === 'air' && f.onGround) return false;
+            if (state.phase === 'ground' && !f.onGround) return false;
+            if (q && !(f.callsign.includes(q) || f.icao24.toUpperCase().includes(q) || (f.squawk||'').includes(q) || (f.reg||'').toUpperCase().includes(q))) return false;
+            return true;
+          });
+          document.getElementById('sd-count-pill').textContent = visible.length + ' ACFT';
+          const active = new Set();
+          const nowMs = performance.now();
+
+          for (const f of visible) {
+            active.add(f.id);
+            const isSel = state.selectedFlightId === f.id;
+            const inView = b.contains([f.lat, f.lon]);
+            if (state.pathMode !== 'off' && inView && ((state.pathMode === 'all' && !f.onGround) || isSel)) {
+              const raw = state.trails.get(f.icao24) || [];
+              const chains = smoothChain(raw.slice(-24), f, b);
+              for (const c of chains) drawGradient(c, isSel ? trailLayer : pathLayer, isSel ? 3.4 : 2.1, isSel ? 0.96 : 0.84);
+            }
+            const vKey = `${isSel}-${state.planeSize}-${state.labels}-${state.theme}-${f.onGround}-${f.callsign}-${Math.round(f.alt/500)}`;
+            const pooled = state.pool.get(f.id);
+            if (pooled) {
+              const changed = Math.abs(f.lat - pooled.tLat) > 1e-6 || Math.abs(f.lon - pooled.tLon) > 1e-6 || Math.abs(f.track - pooled.tTrack) > 0.2;
+              pooled.flight = f;
+              if (changed) {
+                const jump = Math.hypot(f.lat - pooled.rLat, f.lon - pooled.rLon);
+                pooled.fLat = jump > 1.2 ? f.lat : pooled.rLat;
+                pooled.fLon = jump > 1.2 ? f.lon : pooled.rLon;
+                pooled.fTrack = jump > 1.2 ? f.track : pooled.rTrack;
+                if (jump > 1.2) { pooled.rLat = f.lat; pooled.rLon = f.lon; pooled.marker.setLatLng([f.lat, f.lon]); }
+                pooled.tLat = f.lat; pooled.tLon = f.lon; pooled.tTrack = f.track;
+                pooled.bStart = nowMs; pooled.bDur = 1500; pooled.uMs = nowMs;
+              }
+              pooled.marker.setZIndexOffset(isSel ? 1000 : f.onGround ? 10 : 120);
+              if (pooled.vKey !== vKey) {
+                pooled.vKey = vKey;
+                pooled.marker.setIcon(makePlaneIcon(f, isSel, pooled.rTrack));
+              }
+            } else {
+              const m = L.marker([f.lat, f.lon], {icon: makePlaneIcon(f, isSel, f.track), zIndexOffset: isSel ? 1000 : f.onGround ? 10 : 120});
+              m.on('click', () => selectFlight(state.pool.get(f.id)?.flight || f));
+              m.addTo(flightLayer);
+              state.pool.set(f.id, {marker:m, vKey, flight:f, rLat:f.lat, rLon:f.lon, rTrack:f.track, fLat:f.lat, fLon:f.lon, fTrack:f.track, tLat:f.lat, tLon:f.lon, tTrack:f.track, bStart:nowMs, bDur:0, uMs:nowMs});
+            }
+          }
+          for (const [id, entry] of state.pool.entries()) {
+            if (!active.has(id)) { flightLayer.removeLayer(entry.marker); state.pool.delete(id); }
+          }
+        }
+
+        // Smooth 60fps plane glide & heading rotation loop
+        let lastFrame = 0;
+        function animate(now) {
+          requestAnimationFrame(animate);
+          if (state.zooming || now - lastFrame < 24) return;
+          lastFrame = now;
+          const b = map.getBounds().pad(0.25);
+          for (const e of state.pool.values()) {
+            if (!b.contains([e.tLat, e.tLon])) continue;
+            const t = e.bDur > 0 ? Math.min(1, Math.max(0, (now - e.bStart) / e.bDur)) : 1;
+            const ease = 1 - Math.pow(1 - t, 3);
+            const glideMax = e.flight.onGround ? 4.5 : 9;
+            const glideSec = Math.min(glideMax, Math.max(0, (now - e.uMs) / 1000));
+            let exLat = e.tLat, exLon = e.tLon;
+            if (e.flight.spd > (e.flight.onGround ? 4 : 25) && glideSec > 0.05) {
+              const distNm = e.flight.spd * (glideSec / 3600);
+              exLat += (distNm / 60) * Math.cos(e.tTrack * Math.PI / 180);
+              exLon += ((distNm / 60) * Math.sin(e.tTrack * Math.PI / 180)) / Math.max(0.15, Math.cos(e.tLat * Math.PI / 180));
+            }
+            const nLat = e.fLat + (exLat - e.fLat) * ease;
+            const nLon = e.fLon + (exLon - e.fLon) * ease;
+            const dTrk = ((e.tTrack - e.fTrack + 540) % 360) - 180;
+            const nTrk = (e.fTrack + dTrk * ease + 360) % 360;
+            if (Math.abs(nLat - e.rLat) > 1e-6 || Math.abs(nLon - e.rLon) > 1e-6) {
+              e.rLat = nLat; e.rLon = nLon;
+              e.marker.setLatLng([nLat, nLon]);
+            }
+            if (Math.abs(((nTrk - e.rTrack + 540) % 360) - 180) > 0.25) {
+              e.rTrack = nTrk;
+              const r = e.marker.getElement()?.querySelector('.skydeck-plane-rot');
+              if (r) r.style.transform = `rotate(${nTrk.toFixed(1)}deg)`;
+            }
+          }
+        }
+        requestAnimationFrame(animate);
+
+        function renderAirports() {
+          airportLayer.clearLayers();
+          const b = map.getBounds();
+          const z = map.getZoom();
+          const source = state.globalAirports || HUBS;
+          const visible = source.filter((a) => {
+            if (!b.contains([a.lat, a.lon])) return false;
+            if (a.tier === 1) return true;
+            if (a.tier === 2) return z >= 6;
+            return z >= 8;
+          }).slice(0, 90);
+          for (const ap of visible) {
+            const isSel = state.selectedAirport && state.selectedAirport.icao === ap.icao;
+            const label = ap.iata || ap.icao;
+            const sz = isSel ? 13 : ap.tier === 1 ? 10 : 8;
+            const icon = L.divIcon({
+              className: 'skydeck-airport-label',
+              iconSize: [70, 20],
+              iconAnchor: [sz / 2, 10],
+              html: `<div style="display:inline-flex;align-items:center;cursor:pointer;"><div style="width:${sz}px;height:${sz}px;border-radius:9999px;background:${isSel ? '#F59E0B' : '#13233a'};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div><span style="margin-left:4px;padding:1px 6px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;background:${isSel ? '#13233a' : 'rgba(242,247,254,0.95)'};color:${isSel ? '#fff' : '#13233a'};border:1px solid rgba(19,35,58,0.25);">${label}</span></div>`
+            });
+            const mk = L.marker([ap.lat, ap.lon], {icon, zIndexOffset: isSel ? 650 : 200});
+            mk.on('click', () => selectAirport(ap));
+            mk.addTo(airportLayer);
+          }
+        }
+
+        async function selectFlight(f) {
+          state.selectedFlightId = f.id;
+          state.selectedAirport = null;
+          renderFlights();
+          const sb = document.getElementById('sd-sidebar');
+          sb.classList.remove('hidden');
+          sb.innerHTML = `<div style="padding:14px;overflow-y:auto;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><div><div style="font-size:16px;font-weight:700;">${f.callsign}</div><div class="sd-mono" style="font-size:11px;color:var(--sd-muted);">${f.icao24.toUpperCase()} · ${f.type || 'ACFT'} · SQK ${f.squawk || '----'}</div></div><button type="button" class="sd-btn" id="sd-close-sb">Close</button></div><div id="sd-photo-box" style="width:100%;aspect-ratio:16/9;background:#0f172a;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:12px;color:#94a3b8;font-size:11px;">Loading aircraft photo…</div><div class="sd-grid-2" style="gap:8px;font-size:12px;"><div style="padding:8px;border-radius:10px;background:var(--sd-sec);"><div style="font-size:10px;color:var(--sd-muted);">Altitude</div><div class="sd-mono" style="font-weight:700;">${f.onGround ? 'GND' : f.alt.toLocaleString() + ' ft'}</div></div><div style="padding:8px;border-radius:10px;background:var(--sd-sec);"><div style="font-size:10px;color:var(--sd-muted);">Ground Speed</div><div class="sd-mono" style="font-weight:700;">${Math.round(f.spd)} kt</div></div><div style="padding:8px;border-radius:10px;background:var(--sd-sec);"><div style="font-size:10px;color:var(--sd-muted);">Heading / Track</div><div class="sd-mono" style="font-weight:700;">${Math.round(f.track)}°</div></div><div style="padding:8px;border-radius:10px;background:var(--sd-sec);"><div style="font-size:10px;color:var(--sd-muted);">Squawk / Reg</div><div class="sd-mono" style="font-weight:700;">${f.squawk || '----'} · ${f.reg || 'N/A'}</div></div></div></div>`;
+          document.getElementById('sd-close-sb').onclick = () => { state.selectedFlightId = null; sb.classList.add('hidden'); renderFlights(); };
+          try {
+            const r = await fetch(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(f.icao24)}`);
+            if (r.ok) {
+              const d = await r.json();
+              const p = d.photos && d.photos[0];
+              const src = p && (p.thumbnail_large?.src || p.thumbnail?.src);
+              const box = document.getElementById('sd-photo-box');
+              if (box && src) {
+                box.innerHTML = `<img src="${src}" alt="${f.callsign}" style="width:100%;height:100%;object-fit:contain;" />`;
+              } else if (box) {
+                box.textContent = 'No photo available';
+              }
+            }
+          } catch {
+            const box = document.getElementById('sd-photo-box');
+            if (box) box.textContent = 'Photo lookup unavailable';
+          }
+        }
+
+        async function selectAirport(ap) {
+          state.selectedAirport = ap;
+          state.selectedFlightId = null;
+          renderAirports();
+          const sb = document.getElementById('sd-sidebar');
+          sb.classList.remove('hidden');
+          const nearby = state.flights.filter((f) => Math.hypot(f.lat - ap.lat, f.lon - ap.lon) < 1.2).slice(0, 60);
+          const fmtTime = (ep) => {
+            const d = new Date(ep * 1000);
+            if (state.tzMode === 'utc') return d.toISOString().slice(11, 16) + 'Z';
+            if (state.tzMode === 'local') return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});
+            try { return d.toLocaleTimeString([], {timeZone: ap.tz || 'UTC', hour:'2-digit', minute:'2-digit', hour12:false}); } catch { return d.toISOString().slice(11, 16) + 'Z'; }
+          };
+          sb.innerHTML = `<div style="padding:14px;overflow-y:auto;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><div><div style="font-size:16px;font-weight:700;">${ap.iata || ap.icao} · ${ap.name}</div><div class="sd-mono" style="font-size:11px;color:var(--sd-muted);">${ap.icao} · ${ap.city || ''}</div></div><button type="button" class="sd-btn" id="sd-close-sb">Close</button></div><div id="sd-metar-box" class="sd-mono" style="padding:8px;border-radius:10px;background:var(--sd-sec);font-size:11px;margin-bottom:10px;">Loading METAR…</div><div style="font-size:12px;font-weight:700;margin-bottom:6px;">Sector Traffic (${nearby.length} tracked)</div><div style="display:flex;flex-direction:column;gap:5px;">${nearby.map((f)=>`<div style="display:flex;justify-content:space-between;padding:6px 8px;border-radius:10px;background:var(--sd-sec);font-size:11.5px;"><span class="sd-mono" style="font-weight:700;">${f.callsign}</span><span class="sd-mono">${f.onGround ? 'GND' : 'FL'+Math.round(f.alt/100)} · ${fmtTime(Math.floor(Date.now()/1000))}</span></div>`).join('') || '<div style="font-size:11.5px;color:var(--sd-muted);">Zoom near airport sector to inspect live arrivals & departures.</div>'}</div></div>`;
+          document.getElementById('sd-close-sb').onclick = () => { state.selectedAirport = null; sb.classList.add('hidden'); renderAirports(); };
+          try {
+            const r = await fetch(`https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(ap.icao)}&format=json`);
+            if (r.ok) {
+              const d = await r.json();
+              const box = document.getElementById('sd-metar-box');
+              if (box) box.textContent = (Array.isArray(d) && d[0]?.rawOb) ? d[0].rawOb : 'No live METAR for station';
+            }
+          } catch {
+            const box = document.getElementById('sd-metar-box');
+            if (box) box.textContent = 'METAR feed unavailable';
+          }
+        }
+
+        let fetching = false;
+        async function pollFlights() {
+          if (fetching) return;
+          fetching = true;
+          try {
+            const c = map.getCenter();
+            const b = map.getBounds();
+            const radNm = Math.min(250, Math.max(40, Math.round(Math.hypot(b.getNorth() - b.getSouth(), b.getEast() - b.getWest()) * 35)));
+            const out = new Map();
+            const [lolRes, fiRes] = await Promise.allSettled([
+              fetch(`https://api.adsb.lol/v2/lat/${c.lat.toFixed(3)}/lon/${c.lng.toFixed(3)}/dist/${radNm}`),
+              fetch(`https://opendata.adsb.fi/api/v2/lat/${c.lat.toFixed(3)}/lon/${c.lng.toFixed(3)}/dist/${Math.min(radNm, 250)}`),
+            ]);
+            for (const res of [lolRes, fiRes]) {
+              if (res.status === 'fulfilled' && res.value.ok) {
+                const json = await res.value.json();
+                for (const ac of (json.ac || [])) {
+                  if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') continue;
+                  const hex = String(ac.hex || '').toLowerCase();
+                  if (!hex || out.has(hex)) continue;
+                  const alt = ac.alt_baro === 'ground' ? 0 : Number(ac.alt_baro ?? ac.alt_geom ?? 0);
+                  const f = {
+                    id: hex,
+                    icao24: hex,
+                    callsign: String(ac.flight || ac.r || hex).trim().toUpperCase(),
+                    reg: ac.r || '',
+                    type: ac.t || '',
+                    squawk: ac.squawk ? String(ac.squawk) : '',
+                    lat: ac.lat,
+                    lon: ac.lon,
+                    alt,
+                    spd: Number(ac.gs ?? 0),
+                    track: Number(ac.track ?? 0),
+                    onGround: ac.alt_baro === 'ground' || alt < 50,
+                  };
+                  out.set(hex, f);
+                  const arr = state.trails.get(hex) || [];
+                  const last = arr[arr.length - 1];
+                  if (!last || Math.hypot(f.lat - last.lat, f.lon - last.lon) > 0.0005) {
+                    arr.push({lat:f.lat, lon:f.lon, alt:f.alt});
+                    if (arr.length > 48) arr.shift();
+                    state.trails.set(hex, arr);
+                  }
+                }
+              }
+            }
+            if (out.size === 0) {
+              try {
+                const r = await fetch(`https://opensky-network.org/api/states/all?lamin=${Math.max(-85,b.getSouth()).toFixed(2)}&lomin=${Math.max(-180,b.getWest()).toFixed(2)}&lamax=${Math.min(85,b.getNorth()).toFixed(2)}&lomax=${Math.min(180,b.getEast()).toFixed(2)}`);
+                if (r.ok) {
+                  const j = await r.json();
+                  for (const s of (j.states || []).slice(0, 350)) {
+                    if (typeof s[6] !== 'number' || typeof s[5] !== 'number') continue;
+                    const hex = String(s[0] || '').toLowerCase();
+                    const alt = typeof s[7] === 'number' ? Math.round(s[7] * 3.28084) : 0;
+                    const f = {
+                      id: hex, icao24: hex, callsign: String(s[1] || hex).trim().toUpperCase(),
+                      reg: '', type: '', squawk: s[14] ? String(s[14]) : '',
+                      lat: s[6], lon: s[5], alt, spd: typeof s[9] === 'number' ? Math.round(s[9] * 1.94384) : 0,
+                      track: typeof s[10] === 'number' ? s[10] : 0, onGround: Boolean(s[8]),
+                    };
+                    out.set(hex, f);
+                  }
+                }
+              } catch {}
+            }
+            if (out.size > 0) {
+              state.flights = Array.from(out.values());
+              renderFlights();
+            }
+          } finally {
+            fetching = false;
+          }
+        }
+
+        // Load full OurAirports directory asynchronously so every airport can be clicked
+        fetch('https://davidmegginson.github.io/ourairports-data/airports.csv')
+          .then((r) => r.ok ? r.text() : '')
+          .then((csv) => {
+            if (!csv) return;
+            const lines = csv.split(/\r?\n/);
+            const parsed = [...HUBS];
+            const seen = new Set(HUBS.map((h) => h.icao));
+            for (let i = 1; i < lines.length; i++) {
+              const cols = lines[i].split(',');
+              if (cols.length < 15) continue;
+              const type = cols[2]?.replace(/"/g, '');
+              if (type !== 'large_airport' && type !== 'medium_airport') continue;
+              const icao = (cols[1] || '').replace(/"/g, '').toUpperCase();
+              if (!icao || seen.has(icao)) continue;
+              const lat = Number(cols[4]); const lon = Number(cols[5]);
+              if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+              seen.add(icao);
+              parsed.push({
+                icao, iata: (cols[13] || '').replace(/"/g, ''), name: (cols[3] || '').replace(/"/g, ''),
+                city: (cols[10] || '').replace(/"/g, ''), lat, lon, tier: type === 'large_airport' ? 1 : 2
+              });
+            }
+            state.globalAirports = parsed;
+            renderAirports();
+          }).catch(() => {});
+
+        async function updateRunways() {
+          const z = map.getZoom();
+          if (z < 12) { surfaceLayer.clearLayers(); state.surfaceKey = ''; return; }
+          const c = map.getCenter();
+          const key = `${c.lat.toFixed(2)},${c.lng.toFixed(2)}`;
+          if (key === state.surfaceKey) return;
+          state.surfaceKey = key;
+          try {
+            const q = `[out:json][timeout:8];(way["aeroway"~"runway|taxiway|apron"](around:5500,${c.lat.toFixed(4)},${c.lng.toFixed(4)}););out body;>;out skel qt;`;
+            const res = await fetch('https://overpass-api.de/api/interpreter', {method:'POST', body:q});
+            if (!res.ok) return;
+            const data = await res.json();
+            const nodes = new Map();
+            for (const el of data.elements || []) if (el.type === 'node') nodes.set(el.id, [el.lat, el.lon]);
+            surfaceLayer.clearLayers();
+            for (const el of data.elements || []) {
+              if (el.type !== 'way' || !el.nodes) continue;
+              const coords = el.nodes.map((id) => nodes.get(id)).filter(Boolean);
+              if (coords.length < 2) continue;
+              const aw = el.tags?.aeroway;
+              if (aw === 'apron') L.polygon(coords, {renderer, color:'#334155', weight:1, fillColor:'#475569', fillOpacity:0.6, interactive:false}).addTo(surfaceLayer);
+              else if (aw === 'taxiway') {
+                L.polyline(coords, {renderer, color:'#475569', weight:6, opacity:0.9, interactive:false}).addTo(surfaceLayer);
+                L.polyline(coords, {renderer, color:'#f59e0b', weight:1.2, opacity:0.75, interactive:false}).addTo(surfaceLayer);
+              } else if (aw === 'runway') {
+                L.polyline(coords, {renderer, color:'#0f172a', weight:16, opacity:1, lineCap:'butt', interactive:false}).addTo(surfaceLayer);
+                L.polyline(coords, {renderer, color:'#f8fafc', weight:1.5, dashArray:'8 8', opacity:0.9, interactive:false}).addTo(surfaceLayer);
+              }
+            }
+          } catch {}
+        }
+
+        map.on('zoomstart', () => { state.zooming = true; });
+        map.on('zoomend', () => { state.zooming = false; });
+        map.on('moveend', () => { renderAirports(); renderFlights(); updateRunways(); pollFlights(); });
+
+        function locateMe() {
+          if (!state.locate) return;
+          userLayer.clearLayers();
+          const setPt = (lat, lon) => {
+            map.setView([lat, lon], 8, {animate:true});
+            L.circleMarker([lat, lon], {radius:6, color:'#fff', weight:2, fillColor:'#0284C7', fillOpacity:1}).addTo(userLayer);
+          };
+          if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition((p) => setPt(p.coords.latitude, p.coords.longitude), () => {
+              fetch('https://ipapi.co/json/').then((r) => r.json()).then((d) => { if (d.latitude && d.longitude) setPt(d.latitude, d.longitude); }).catch(() => {});
+            }, {timeout:5000});
+          }
+        }
+        locateMe();
+
+        // UI bindings
+        document.getElementById('sd-search').oninput = (e) => { state.search = e.target.value; renderFlights(); };
+        document.getElementById('sd-region').onchange = (e) => { const r = REGIONS[e.target.value]; if (r) map.setView(r.center, r.zoom, {animate:true}); };
+        document.getElementById('sd-locate-btn').onclick = () => locateMe();
+        document.querySelectorAll('[data-phase]').forEach((btn) => {
+          btn.onclick = () => {
+            state.phase = btn.dataset.phase;
+            document.querySelectorAll('[data-phase]').forEach((b) => b.classList.toggle('active', b === btn));
+            renderFlights();
+          };
+        });
+        document.getElementById('sd-theme-btn').onclick = (e) => {
+          state.theme = state.theme === 'light' ? 'dark' : 'light';
+          document.documentElement.classList.toggle('dark', state.theme === 'dark');
+          e.target.textContent = state.theme === 'light' ? 'Light' : 'Night';
+          setBasemap(); renderFlights();
+        };
+        const pop = document.getElementById('sd-settings-popover');
+        document.getElementById('sd-settings-btn').onclick = () => pop.classList.toggle('hidden');
+        document.getElementById('sd-settings-close').onclick = () => pop.classList.add('hidden');
+        document.getElementById('sd-size-range').oninput = (e) => {
+          state.planeSize = Number(e.target.value);
+          document.getElementById('sd-size-val').textContent = state.planeSize + ' px';
+          for (const entry of state.pool.values()) entry.vKey = '';
+          renderFlights();
+        };
+        document.querySelectorAll('[data-path]').forEach((b) => { b.onclick = () => { state.pathMode = b.dataset.path; document.querySelectorAll('[data-path]').forEach((x) => x.classList.toggle('active', x === b)); renderFlights(); }; });
+        document.querySelectorAll('[data-tz]').forEach((b) => { b.onclick = () => { state.tzMode = b.dataset.tz; document.querySelectorAll('[data-tz]').forEach((x) => x.classList.toggle('active', x === b)); if (state.selectedAirport) selectAirport(state.selectedAirport); }; });
+        document.querySelectorAll('[data-map]').forEach((b) => { b.onclick = () => { state.basemap = b.dataset.map; document.querySelectorAll('[data-map]').forEach((x) => x.classList.toggle('active', x === b)); setBasemap(); }; });
+        document.querySelectorAll('[data-toggle]').forEach((b) => {
+          b.onclick = () => {
+            const k = b.dataset.toggle;
+            state[k] = !state[k];
+            b.classList.toggle('active', state[k]);
+            if (k === 'locate' && !state.locate) userLayer.clearLayers();
+            for (const entry of state.pool.values()) entry.vKey = '';
+            renderFlights();
+          };
+        });
+        document.getElementById('sd-dock-hide').onclick = () => { document.getElementById('sd-dock').classList.add('collapsed'); document.getElementById('sd-dock-show').style.display = 'inline-flex'; pop.classList.add('hidden'); };
+        document.getElementById('sd-dock-show').onclick = () => { document.getElementById('sd-dock').classList.remove('collapsed'); document.getElementById('sd-dock-show').style.display = 'none'; };
+
+        renderAirports();
+        pollFlights();
+        setInterval(pollFlights, 6000);
+      })();
+    </script>
+    <!-- SKYDECK_STATIC_RUNTIME_END -->
   </body>
 </html>

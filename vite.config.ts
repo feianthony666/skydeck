@@ -15,6 +15,18 @@ export default defineConfig(() => {
       tailwindcss(),
       viteSingleFile(),
       {
+        name: 'skydeck-vite-entry-swap',
+        transformIndexHtml: {
+          order: 'pre',
+          handler(html: string): string {
+            return html.replace(
+              /<!-- SKYDECK_STATIC_RUNTIME_START -->[\s\S]*?<!-- SKYDECK_STATIC_RUNTIME_END -->/,
+              '<script type="module" src="/src/main.tsx"></script>',
+            );
+          },
+        },
+      },
+      {
         name: 'skydeck-dev-hmr-guard',
         apply: 'serve',
         transform(code: string, id: string) {
