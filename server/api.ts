@@ -529,37 +529,25 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=${page}&limit=100`;
 
   try {
-    const [depRes1, depRes2, arrRes1, arrRes2] = await Promise.all([
-      fetch(makeBoardUrl('departures', 1), {
+    const boardPages = [1, 2, 3, 4, 5];
+    const fetchPage = (mode: 'departures' | 'arrivals', page: number) =>
+      fetch(makeBoardUrl(mode, page), {
         headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
         signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
-      fetch(makeBoardUrl('departures', 2), {
-        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
-        signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
-      fetch(makeBoardUrl('arrivals', 1), {
-        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
-        signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
-      fetch(makeBoardUrl('arrivals', 2), {
-        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
-        signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
+      }).catch(() => null);
+    const [depResponses, arrResponses] = await Promise.all([
+      Promise.all(boardPages.map((page) => fetchPage('departures', page))),
+      Promise.all(boardPages.map((page) => fetchPage('arrivals', page))),
     ]);
 
     type Fr24ApResp = {result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}};
-    const [depJson1, depJson2, arrJson1, arrJson2] = await Promise.all([
-      safeJson<Fr24ApResp>(depRes1),
-      safeJson<Fr24ApResp>(depRes2),
-      safeJson<Fr24ApResp>(arrRes1),
-      safeJson<Fr24ApResp>(arrRes2),
+    const [depJsons, arrJsons] = await Promise.all([
+      Promise.all(depResponses.map((res) => safeJson<Fr24ApResp>(res))),
+      Promise.all(arrResponses.map((res) => safeJson<Fr24ApResp>(res))),
     ]);
 
-    const pdDep1 = depJson1?.result?.response?.airport?.pluginData ?? {};
-    const pdDep2 = depJson2?.result?.response?.airport?.pluginData ?? {};
-    const pdArr1 = arrJson1?.result?.response?.airport?.pluginData ?? {};
-    const pdArr2 = arrJson2?.result?.response?.airport?.pluginData ?? {};
+    const pdDep1 = depJsons[0]?.result?.response?.airport?.pluginData ?? {};
+    const pdArr1 = arrJsons[0]?.result?.response?.airport?.pluginData ?? {};
     const details = ((pdDep1.details ?? pdArr1.details) ?? {}) as Record<string, unknown>;
     const stats = (details.stats ?? {}) as Record<string, unknown>;
     const codeObj = (details.code ?? {}) as Record<string, unknown>;
@@ -615,8 +603,12 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
       return Array.from(seen.values());
     };
 
-    const depRows = [...getRows(pdDep1, 'departures'), ...getRows(pdDep2, 'departures')];
-    const arrRows = [...getRows(pdArr1, 'arrivals'), ...getRows(pdArr2, 'arrivals')];
+    const depRows = depJsons.flatMap((json) =>
+      getRows(json?.result?.response?.airport?.pluginData ?? {}, 'departures'),
+    );
+    const arrRows = arrJsons.flatMap((json) =>
+      getRows(json?.result?.response?.airport?.pluginData ?? {}, 'arrivals'),
+    );
 
     const departures = dedupeBoardRows(
       depRows.filter((r) => r.flight).map((r) => mapFr24ScheduleRow(r.flight!, 'departures', iata, icao, name)),

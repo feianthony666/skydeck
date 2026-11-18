@@ -1304,31 +1304,62 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
   const queryCode = (iata || resolvedIcao).toLowerCase();
   if (queryCode) {
     const ts = Math.floor(Date.now() / 1000);
-    const makeUrl = (mode: 'departures' | 'arrivals') =>
-      `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=1&limit=45`;
+    const makeUrl = (mode: 'departures' | 'arrivals', page: number) =>
+      `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=${page}&limit=100`;
 
-    const depJson = await fetchJsonViaCorsRelay<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>(
-      makeUrl('departures'),
-      7000,
-    );
-    const arrJson = await fetchJsonViaCorsRelay<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>(
-      makeUrl('arrivals'),
-      7000,
-    );
+    const loadBoardPages = async (
+      mode: 'departures' | 'arrivals',
+    ): Promise<Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>> => {
+      const loaded: Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}> = [];
+      for (const page of [1, 2, 3, 4, 5]) {
+        const json = await fetchJsonViaCorsRelay<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>(
+          makeUrl(mode, page),
+          7000,
+        );
+        if (!json) break;
+        loaded.push(json);
+        const pd = json.result?.response?.airport?.pluginData ?? {};
+        const sched = ((((pd.schedule as Record<string, unknown> | undefined)?.[mode] as Record<string, unknown> | undefined)?.data as
+          | Array<{flight?: Record<string, unknown>}>
+          | undefined) ?? []);
+        if (sched.length === 0) break;
+      }
+      return loaded;
+    };
+    const [depJsons, arrJsons] = await Promise.all([
+      loadBoardPages('departures'),
+      loadBoardPages('arrivals'),
+    ]);
 
-    const pdDep = depJson?.result?.response?.airport?.pluginData ?? {};
-    const pdArr = arrJson?.result?.response?.airport?.pluginData ?? {};
-    const depRows = ((pdDep.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
-      | Array<{flight?: Record<string, unknown>}>
-      | undefined;
-    const arrRows = ((pdArr.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
-      | Array<{flight?: Record<string, unknown>}>
-      | undefined;
+    const depRows = depJsons.flatMap((json) => {
+      const pd = json?.result?.response?.airport?.pluginData ?? {};
+      return ((((pd.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
+        | Array<{flight?: Record<string, unknown>}>
+        | undefined) ?? []);
+    });
+    const arrRows = arrJsons.flatMap((json) => {
+      const pd = json?.result?.response?.airport?.pluginData ?? {};
+      return ((((pd.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
+        | Array<{flight?: Record<string, unknown>}>
+        | undefined) ?? []);
+    });
 
     if ((Array.isArray(depRows) && depRows.length > 0) || (Array.isArray(arrRows) && arrRows.length > 0)) {
       const apName = catalog?.name ?? dir?.name ?? `${iata || resolvedIcao} Airport`;
-      const departures = (depRows ?? []).filter((r) => r.flight).map((r) => mapFr24BoardRow(r.flight!, 'departures', iata, resolvedIcao, apName));
-      const arrivals = (arrRows ?? []).filter((r) => r.flight).map((r) => mapFr24BoardRow(r.flight!, 'arrivals', iata, resolvedIcao, apName));
+      const departuresById = new Map<string, AirportBoardFlight>();
+      for (const r of depRows ?? []) {
+        if (!r.flight) continue;
+        const row = mapFr24BoardRow(r.flight, 'departures', iata, resolvedIcao, apName);
+        departuresById.set(row.id, row);
+      }
+      const arrivalsById = new Map<string, AirportBoardFlight>();
+      for (const r of arrRows ?? []) {
+        if (!r.flight) continue;
+        const row = mapFr24BoardRow(r.flight, 'arrivals', iata, resolvedIcao, apName);
+        arrivalsById.set(row.id, row);
+      }
+      const departures = Array.from(departuresById.values());
+      const arrivals = Array.from(arrivalsById.values());
       const board: AirportBoardResponse = {
         icao: resolvedIcao,
         iata,

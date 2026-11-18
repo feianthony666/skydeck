@@ -3,6 +3,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {resolveAircraftSpec, resolveAirlineLivery} from '../data/aviationCatalog';
 import type {
   AirportWeather,
@@ -90,10 +91,19 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     taxiRoot?: THREE.Group;
     aircraftRefs?: AircraftModelRefs | null;
     taxiModels?: AircraftModelRefs[];
+    realAircraftRoot?: THREE.Group;
+    realAircraftKey: string;
+    realAircraftLoading: boolean;
     maxAnisotropy: number;
     lastAircraftKey: string;
     lastTaxiHash: string;
-  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: ''});
+  }>({
+    maxAnisotropy: 1,
+    lastAircraftKey: '',
+    lastTaxiHash: '',
+    realAircraftKey: '',
+    realAircraftLoading: false,
+  });
 
   // Trigger camera glide when viewMode or cockpitPreset changes
   useEffect(() => {
@@ -228,6 +238,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       taxiRoot,
       aircraftRefs: null,
       taxiModels: [],
+      realAircraftRoot: exteriorRoot,
+      realAircraftKey: '',
+      realAircraftLoading: false,
       maxAnisotropy: maxAniso,
       lastAircraftKey: '',
       lastTaxiHash: '',
