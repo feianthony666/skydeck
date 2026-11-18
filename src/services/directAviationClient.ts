@@ -1807,45 +1807,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
 
 async function handleStaticRoute(path: string, params: URLSearchParams): Promise<unknown> {
   if (path === '/api/flights') {
-    const lamin = Math.max(-85, Number(params.get('lamin') ?? -85));
-    const lomin = Math.max(-180, Number(params.get('lomin') ?? -180));
-    const lamax = Math.min(85, Number(params.get('lamax') ?? 85));
-    const lomax = Math.min(180, Number(params.get('lomax') ?? 180));
-    try {
-      const snapshot = await fetch(`./flights/latest.json?ts=${Date.now()}`, {
-        signal: AbortSignal.timeout(12000),
-        cache: 'no-store',
-      });
-      if (snapshot.ok) {
-        const payload = await snapshot.json() as FlightsResponse;
-        const flights = payload.flights.filter((flight) =>
-          flight.lat >= lamin - 2 &&
-          flight.lat <= lamax + 2 &&
-          flight.lon >= lomin - 2 &&
-          flight.lon <= lomax + 2,
-        );
-        return {
-          ...payload,
-          flights,
-          bounds: {lamin, lomin, lamax, lomax},
-          fromServerCache: true,
-        };
-      }
-    } catch {
-      // No browser provider fallback is available on static-only hosting.
-    }
-    return {
-      flights: [],
-      providers: [{
-        provider: 'github-pages-snapshot',
-        ok: false,
-        count: 0,
-        latencyMs: 0,
-        note: 'Waiting for next GitHub Actions snapshot',
-      }],
-      fetchedAt: Date.now(),
-      bounds: {lamin, lomin, lamax, lomax},
-    };
+    return fetchDirectFlights(params);
   }
   if (path === '/api/airports') {
     const lamin = Number(params.get('lamin') ?? -85);
