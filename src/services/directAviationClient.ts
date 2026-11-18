@@ -686,6 +686,44 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
       ]);
       if (directOut.length > 0) return directOut;
 
+      const fr24NativeBoxes: Array<[number, number, number, number]> =
+        latSpan > 16 || lonSpan > 24
+          ? (() => {
+              const mLat = (frMinLat + frMaxLat) / 2;
+              const mLon = (frMinLon + frMaxLon) / 2;
+              return [
+                [frMinLat, mLat, frMinLon, mLon],
+                [frMinLat, mLat, mLon, frMaxLon],
+                [mLat, frMaxLat, frMinLon, mLon],
+                [mLat, frMaxLat, mLon, frMaxLon],
+              ];
+            })()
+          : [[frMinLat, frMaxLat, frMinLon, frMaxLon]];
+      const fr24NativePromises = fr24NativeBoxes.map(async (b) => {
+        try {
+          const url = makeFr24Url(b[0], b[1], b[2], b[3]);
+          const response = await fetch(url, {
+            signal: AbortSignal.timeout(8000),
+            headers: {Accept: 'application/json'},
+          });
+          if (!response.ok) return [];
+          return parseFr24Feed(await response.json() as Record<string, unknown>);
+        } catch {
+          return [];
+        }
+      });
+      const fr24NativeLists = await Promise.all(fr24NativePromises);
+      const fr24Native = fr24NativeLists.flat();
+      if (fr24Native.length > 0) {
+        providers.push({
+          provider: 'fr24-native',
+          ok: true,
+          count: fr24Native.length,
+          latencyMs: 0,
+        });
+        return fr24Native;
+      }
+
       const hasWorker = Boolean(getCloudflareWorkerUrl());
 
       if (hasWorker) {
@@ -1306,6 +1344,106 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
     const ts = Math.floor(Date.now() / 1000);
     const makeUrl = (mode: 'departures' | 'arrivals', page: number) =>
       `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=${page}&limit=100`;
+
+    const loadNativeBoardPages = async (
+      mode: 'departures' | 'arrivals',
+    ): Promise<Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>> => {
+      const loaded: Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}> = [];
+      for (const page of [1, 2, 3, 4, 5]) {
+        try {
+          const response = await fetch(makeUrl(mode, page), {
+            signal: AbortSignal.timeout(7000),
+            headers: {Accept: 'application/json'},
+          });
+          if (!response.ok) break;
+          const json = await response.json() as {result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}};
+          loaded.push(json);
+          const pd = json.result?.response?.airport?.pluginData ?? {};
+          const sched = ((((pd.schedule as Record<string, unknown> | undefined)?.[mode] as Record<string, unknown> | undefined)?.data as
+            | Array<{flight?: Record<string, unknown>}>
+            | undefined) ?? []);
+          if (sched.length === 0) break;
+        } catch {
+          break;
+        }
+      }
+      return loaded;
+    };
+
+    const [nativeDepJsons, nativeArrJsons] = await Promise.all([
+      loadNativeBoardPages('departures'),
+      loadNativeBoardPages('arrivals'),
+    ]);
+    const nativeFound =
+      nativeDepJsons.some((json) => {
+        const pd = json.result?.response?.airport?.pluginData ?? {};
+        return ((((pd.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
+          | Array<{flight?: Record<string, unknown>}>
+          | undefined) ?? []).length > 0;
+      }) ||
+      nativeArrJsons.some((json) => {
+        const pd = json.result?.response?.airport?.pluginData ?? {};
+        return ((((pd.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
+          | Array<{flight?: Record<string, unknown>}>
+          | undefined) ?? []).length > 0;
+      });
+
+    if (nativeFound) {
+      const depJsons = nativeDepJsons;
+      const arrJsons = nativeArrJsons;
+
+      const depRows = depJsons.flatMap((json) => {
+        const pd = json.result?.response?.airport?.pluginData ?? {};
+        return ((((pd.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
+          | Array<{flight?: Record<string, unknown>}>
+          | undefined) ?? []);
+      });
+      const arrRows = arrJsons.flatMap((json) => {
+        const pd = json.result?.response?.airport?.pluginData ?? {};
+        return ((((pd.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
+          | Array<{flight?: Record<string, unknown>}>
+          | undefined) ?? []);
+      });
+
+      if (depRows.length > 0 || arrRows.length > 0) {
+        const apName = catalog?.name ?? dir?.name ?? `${iata || resolvedIcao} Airport`;
+        const departuresById = new Map<string, AirportBoardFlight>();
+        for (const r of depRows) {
+          if (!r.flight) continue;
+          const row = mapFr24BoardRow(r.flight, 'departures', iata, resolvedIcao, apName);
+          departuresById.set(row.id, row);
+        }
+        const arrivalsById = new Map<string, AirportBoardFlight>();
+        for (const r of arrRows) {
+          if (!r.flight) continue;
+          const row = mapFr24BoardRow(r.flight, 'arrivals', iata, resolvedIcao, apName);
+          arrivalsById.set(row.id, row);
+        }
+        const board: AirportBoardResponse = {
+          icao: resolvedIcao,
+          iata,
+          name: apName,
+          city: catalog?.city ?? dir?.city ?? '',
+          country: catalog?.country ?? dir?.country ?? '',
+          lat: catalog?.lat ?? dir?.lat ?? 0,
+          lon: catalog?.lon ?? dir?.lon ?? 0,
+          delayIndex: {
+            arrivalsIndex: null,
+            arrivalsDelayAvgMin: null,
+            arrivalsDelayedPct: null,
+            departuresIndex: null,
+            departuresDelayAvgMin: null,
+            departuresDelayedPct: null,
+          },
+          arrivals: Array.from(arrivalsById.values()),
+          departures: Array.from(departuresById.values()),
+          fetchedAt: Date.now(),
+          source: 'fr24-native-board',
+        };
+        browserBoardCache.set(cacheKey, {ts: Date.now(), board});
+        return board;
+      }
+    }
 
     const loadBoardPages = async (
       mode: 'departures' | 'arrivals',
