@@ -7,7 +7,13 @@ import {
 } from 'lucide-react';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {AIRPORT_CATALOG, type RegionPreset} from '../data/aviationCatalog';
-import {apiFetchJson} from '../services/directAviationClient';
+import {apiFetchJson, DEFAULT_CF_WORKER_URL, getCloudflareWorkerUrl} from '../services/directAviationClient';
+import {
+  buildFr24AircraftSvg,
+  getDbFlagMeta,
+  getEmergencySquawkMeta,
+  resolveFr24ModelClass,
+} from './aircraftIcons';
 import type {
   AirfieldSurfaceData,
   AirportMarker,
@@ -35,6 +41,8 @@ export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
   radarOpacity: 0.5,
   showGroundTraffic: true,
   showDrRings: true,
+  apiBaseUrl: '',
+  cfWorkerUrl: DEFAULT_CF_WORKER_URL,
 };
 
 const BASEMAP_LABEL: Record<RadarSettings['basemapStyle'], string> = {
@@ -209,6 +217,65 @@ export const RadarSettingsPopover: React.FC<{
           />
         </div>
       )}
+
+      <Separator />
+
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-foreground">Cloudflare Worker CORS Proxy</span>
+            <span className="text-[10px] font-mono text-primary">
+              {settings.cfWorkerUrl?.trim() || getCloudflareWorkerUrl() ? 'Worker Active' : 'Public Fallback'}
+            </span>
+          </div>
+          <input
+            type="url"
+            value={settings.cfWorkerUrl ?? ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              onUpdateSettings({cfWorkerUrl: val});
+              try {
+                const clean = val.trim().replace(/\/+$/, '');
+                if (clean) window.localStorage.setItem('skydeck-cf-worker', clean);
+                else window.localStorage.removeItem('skydeck-cf-worker');
+              } catch {
+                // ignore storage errors
+              }
+            }}
+            placeholder={DEFAULT_CF_WORKER_URL}
+            aria-label="Cloudflare Worker CORS proxy URL"
+            className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <p className="text-[10px] text-muted-foreground leading-snug">
+            Bypasses GitHub Pages / Surge CORS blocks on FR24, ADS-B.lol &amp; Overpass.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-foreground">Custom Backend Relay (Optional)</span>
+            <span className="text-[10px] text-muted-foreground font-mono">Netlify / Node</span>
+          </div>
+          <input
+            type="url"
+            value={settings.apiBaseUrl ?? ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              onUpdateSettings({apiBaseUrl: val});
+              try {
+                const clean = val.trim().replace(/\/+$/, '');
+                if (clean) window.localStorage.setItem('skydeck-api-base', clean);
+                else window.localStorage.removeItem('skydeck-api-base');
+              } catch {
+                // ignore storage errors
+              }
+            }}
+            placeholder="Optional https://your-site.netlify.app"
+            aria-label="Custom SkyDeck API relay URL"
+            className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </div>
+      </div>
     </PopoverContent>
   </Popover>
 );
@@ -228,6 +295,10 @@ interface RadarMapProps {
   plannedRoute?: {originLat: number; originLon: number; destLat: number; destLon: number} | null;
   userLocation?: {lat: number; lon: number; label?: string} | null;
   flyToLocation?: {lat: number; lon: number; zoom?: number; seq: number} | null;
+  followSelected?: boolean;
+  isolateSelected?: boolean;
+  isMobilePortrait?: boolean;
+  onUserDragBreakFollow?: () => void;
   settings: RadarSettings;
   onSelectFlight: (flight: LiveFlight) => void;
   onSelectAirport: (airport: {icao: string; iata: string; name: string}) => void;
@@ -436,34 +507,84 @@ function makePlaneIcon(
   showLabel: boolean,
   initialTrackDeg = flight.trueTrackDeg,
 ): L.DivIcon {
-  // Maintain #F9D949 for plane label & aircraft icon (paths exclusively hold the GeoFS altitude gradient)
-  const iconFill = isSelected ? '#F59E0B' : '#F9D949';
-  const stroke = isSelected ? '#ffffff' : isDark ? '#0B0E14' : '#13233a';
+  const emerg = getEmergencySquawkMeta(flight.squawk);
+  const dbMeta = getDbFlagMeta(flight);
+  const modelClass = resolveFr24ModelClass(flight.aircraftType, flight.callsign);
+
+  // Maintain #F9D949 for commercial, distinct LADD/MIL/PIA highlights, and crisp red alert for emergency squawks
+  const iconFill = emerg
+    ? '#EF4444'
+    : isSelected
+      ? '#F59E0B'
+      : dbMeta?.kind === 'LADD'
+        ? '#C084FC'
+        : dbMeta?.kind === 'MIL'
+          ? '#34D399'
+          : dbMeta?.kind === 'PIA'
+            ? '#22D3EE'
+            : '#F9D949';
+  const stroke = emerg
+    ? '#ffffff'
+    : isSelected
+      ? '#ffffff'
+      : dbMeta?.kind === 'LADD'
+        ? '#4C1D95'
+        : isDark
+          ? '#0B0E14'
+          : '#13233a';
   const size = Math.max(
-    12,
-    Math.min(40, isSelected ? baseSize + 6 : flight.onGround ? Math.max(12, baseSize - 4) : baseSize),
+    14,
+    Math.min(
+      42,
+      emerg
+        ? Math.max(baseSize + 6, 26)
+        : isSelected
+          ? baseSize + 6
+          : dbMeta
+            ? Math.max(baseSize + 2, 20)
+            : flight.onGround
+              ? Math.max(14, baseSize - 3)
+              : baseSize,
+    ),
   );
 
-  const labelHtml =
-    showLabel || isSelected
-      ? `<span style="margin-left:5px;padding:1px 7px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;white-space:nowrap;background:#F9D949;color:#13233a;border:1px solid ${
+  const emergBadgeHtml = emerg
+    ? `<span style="margin-left:5px;padding:1px 7px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;white-space:nowrap;background:#DC2626;color:#ffffff;border:1.5px solid #ffffff;box-shadow:0 2px 8px rgba(220,38,38,0.65);letter-spacing:0.03em;">▲ ${emerg.shortLabel} · ${flight.callsign}</span>`
+    : '';
+
+  const flagTag = dbMeta ? `[${dbMeta.shortLabel}] ` : '';
+  const labelBg = dbMeta?.kind === 'LADD' ? '#7E22CE' : dbMeta?.kind === 'MIL' ? '#065F46' : '#F9D949';
+  const labelFg = dbMeta?.kind === 'LADD' || dbMeta?.kind === 'MIL' ? '#ffffff' : '#13233a';
+
+  const labelHtml = emerg
+    ? emergBadgeHtml
+    : showLabel || isSelected
+      ? `<span style="margin-left:5px;padding:1px 7px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;white-space:nowrap;background:${labelBg};color:${labelFg};border:1px solid ${
           isSelected ? '#ffffff' : 'rgba(19,35,58,0.45)'
-        };box-shadow:0 1px 4px rgba(19,35,58,0.28);">${flight.callsign}${
+        };box-shadow:0 1px 4px rgba(19,35,58,0.28);">${flagTag}${flight.callsign}${
           flight.onGround ? ' GND' : ` FL${Math.round(flight.altitudeFt / 100)}`
         }</span>`
       : '';
+
+  const ringSize = size + 16;
+  const emergRingHtml = emerg
+    ? `<div class="skydeck-emerg-ring" style="width:${ringSize}px;height:${ringSize}px;"></div>`
+    : dbMeta?.kind === 'LADD'
+      ? `<div style="position:absolute;left:50%;top:50%;width:${size + 10}px;height:${size + 10}px;transform:translate(-50%,-50%);border-radius:9999px;border:1.5px dashed #A855F7;background:rgba(168,85,247,0.12);pointer-events:none;"></div>`
+      : '';
+
+  const svgHtml = buildFr24AircraftSvg(modelClass, size, iconFill, stroke);
 
   return L.divIcon({
     className: 'skydeck-plane-icon',
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     html: `<div style="position:relative;width:${size}px;height:${size}px;display:flex;align-items:center;">
-      <div class="skydeck-plane-rot" style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transform:rotate(${initialTrackDeg.toFixed(
+      ${emergRingHtml}
+      <div class="skydeck-plane-rot" style="position:relative;z-index:2;width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transform:rotate(${initialTrackDeg.toFixed(
         1,
       )}deg);">
-        <svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="${iconFill}" stroke="${stroke}" stroke-width="1.35">
-          <path d="M12 2L14.2 9.2L21 13V15L14.2 13V18.5L17 20.5V22L12 20.8L7 22V20.5L9.8 18.5V13L3 15V13L9.8 9.2L12 2Z"/>
-        </svg>
+        ${svgHtml}
       </div>
       ${labelHtml}
     </div>`,
@@ -531,7 +652,16 @@ function computeBearingDeg(p1: [number, number], p2: [number, number]): number {
 function deriveRunwayEndLabels(ref: string | undefined, bearingDeg: number): [string, string] {
   if (ref && ref.includes('/')) {
     const parts = ref.split('/').map((s) => s.trim());
-    if (parts.length === 2 && parts[0] && parts[1]) return [parts[0], parts[1]];
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      const m = parts[0].match(/^(\d{1,2})/);
+      if (m) {
+        const expectedBearing = (parseInt(m[1], 10) % 36) * 10;
+        const diff = Math.abs((((bearingDeg - expectedBearing) + 540) % 360) - 180);
+        // If OSM way was drawn opposite to the first runway number's landing direction, swap threshold ends!
+        if (diff > 90) return [parts[1], parts[0]];
+      }
+      return [parts[0], parts[1]];
+    }
   }
   const num = Math.max(1, Math.min(36, Math.round(bearingDeg / 10) || 36));
   const opp = num > 18 ? num - 18 : num + 18;
@@ -568,6 +698,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   plannedRoute,
   userLocation,
   flyToLocation,
+  followSelected = false,
+  isolateSelected = false,
+  isMobilePortrait = false,
+  onUserDragBreakFollow,
   settings,
   onSelectFlight,
   onSelectAirport,
@@ -606,6 +740,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const onSelectAirportRef = useRef(onSelectAirport);
   onSelectAirportRef.current = onSelectAirport;
 
+  const followSelectedRef = useRef(followSelected);
+  followSelectedRef.current = followSelected;
+
+  const selectedFlightIdRef = useRef<string | null>(selectedFlight?.id ?? null);
+  selectedFlightIdRef.current = selectedFlight?.id ?? null;
+
+  const onUserDragBreakFollowRef = useRef(onUserDragBreakFollow);
+  onUserDragBreakFollowRef.current = onUserDragBreakFollow;
+
   const isDark = theme === 'dark';
 
   // Accumulate client-side live breadcrumbs (rejecting outlier position teleports)
@@ -630,7 +773,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           merged.push({lat: f.lat, lon: f.lon, altFt: f.altitudeFt});
         }
       }
-      if (merged.length > 48) merged.splice(0, merged.length - 48);
+      if (merged.length > 120) merged.splice(0, merged.length - 120);
       map.set(key, merged);
     }
   }, [flights]);
@@ -646,7 +789,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       center: activeRegion.center,
       zoom: activeRegion.zoom,
       minZoom: 3,
-      maxZoom: 18,
+      maxZoom: 20,
       zoomControl: false,
       preferCanvas: true,
     });
@@ -680,6 +823,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     });
     map.on('zoomend', () => {
       isMapZoomingRef.current = false;
+      setMapZoom(map.getZoom());
+    });
+    map.on('dragstart', () => {
+      onUserDragBreakFollowRef.current?.();
     });
 
     let moveTimer: number | undefined;
@@ -699,7 +846,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           },
           z,
         );
-      }, 320);
+      }, 480);
     });
 
     const ro = new ResizeObserver(() => {
@@ -780,44 +927,80 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           : 'dark'
         : settings.basemapStyle;
 
+    const tileOpts = {
+      keepBuffer: 4,
+      updateWhenIdle: true,
+      updateWhenZooming: false,
+    };
+
     if (effectiveStyle === 'satellite') {
       layers.push(
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-          {attribution: 'Tiles &copy; Esri', maxZoom: 18},
+          {
+            ...tileOpts,
+            attribution: 'Tiles &copy; Esri',
+            maxNativeZoom: 17,
+            maxZoom: 20,
+          },
         ),
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-          {maxZoom: 16, opacity: 0.85},
+          {
+            ...tileOpts,
+            maxNativeZoom: 15,
+            maxZoom: 20,
+            opacity: 0.85,
+          },
         ),
       );
     } else if (effectiveStyle === 'osm') {
       layers.push(
         L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          ...tileOpts,
           attribution: '&copy; OpenStreetMap contributors',
-          maxZoom: 19,
+          maxNativeZoom: 19,
+          maxZoom: 20,
         }),
       );
     } else if (effectiveStyle === 'light') {
       layers.push(
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-          {attribution: 'Tiles &copy; Esri', maxZoom: 16},
+          {
+            ...tileOpts,
+            attribution: 'Tiles &copy; Esri',
+            maxNativeZoom: 16,
+            maxZoom: 20,
+          },
         ),
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-          {maxZoom: 16, opacity: 0.92},
+          {
+            ...tileOpts,
+            maxNativeZoom: 15,
+            maxZoom: 20,
+          },
         ),
       );
     } else {
       layers.push(
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-          {attribution: 'Tiles &copy; Esri', maxZoom: 16},
+          {
+            ...tileOpts,
+            attribution: 'Tiles &copy; Esri',
+            maxNativeZoom: 16,
+            maxZoom: 20,
+          },
         ),
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-          {maxZoom: 16, opacity: 0.9},
+          {
+            ...tileOpts,
+            maxNativeZoom: 15,
+            maxZoom: 20,
+          },
         ),
       );
     }
@@ -860,7 +1043,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const radarLayer = L.tileLayer(tileUrl, {
       opacity: settings.radarOpacity,
       maxNativeZoom: 7,
-      maxZoom: 18,
+      maxZoom: 20,
       attribution: 'Radar: RainViewer',
     });
     radarLayer.addTo(map);
@@ -973,10 +1156,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     }
   }, [unifiedAirports, selectedAirportIcao, settings.showMetarDots]);
 
-  // Fetch detailed OSM/Catalog runway, apron & taxiway surface geometry when zoomed into an airfield (zoom >= 11.5)
+  // Fetch detailed AIP/Overpass runway, apron & taxiway surface geometry when zoomed into an airfield (zoom >= 10.8)
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || mapZoom < 11.5) {
+    if (!map || mapZoom < 10.8) {
       setSurfaceData(null);
       lastSurfaceKeyRef.current = '';
       return;
@@ -984,7 +1167,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
     const center = map.getCenter();
     let bestAp: {icao: string; lat: number; lon: number} | null = null;
-    let bestDist = 0.25;
+    let bestDist = 0.28;
     for (const ap of unifiedAirports) {
       const d = Math.hypot(ap.lat - center.lat, ap.lon - center.lng);
       if (d < bestDist) {
@@ -1000,38 +1183,37 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     if (key === lastSurfaceKeyRef.current) return;
     lastSurfaceKeyRef.current = key;
 
-    let cancelled = false;
+    const ac = new AbortController();
     const qs = new URLSearchParams({
       lat: targetLat.toFixed(4),
       lon: targetLon.toFixed(4),
       icao: targetIcao,
     });
-    apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`)
+    apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`, ac.signal)
       .then((data) => {
-        if (!cancelled) setSurfaceData(data);
+        if (!ac.signal.aborted) setSurfaceData(data);
       })
       .catch(() => {
         // optional overlay
       });
     return () => {
-      cancelled = true;
+      ac.abort();
     };
   }, [mapZoom, viewportTick, unifiedAirports]);
 
-  // Render Monochromatic Vectorized Runway & Taxiway Overlay with Lights + Runway Numbers + Taxiway Labels
+  // Render FlightDeck-Precision Vectorized Runway, Taxiway, Approach Path & Flashing Approach Lighting Overlay
   useEffect(() => {
     const layer = surfaceLayerRef.current;
     const renderer = canvasRendererRef.current;
     if (!layer || !renderer) return;
     layer.clearLayers();
-    if (!surfaceData || mapZoom < 11.5) return;
+    if (!surfaceData || mapZoom < 10.8) return;
 
-    // Monochromatic palette (satellite vector style)
     const apronFill = isDark ? '#1e293b' : '#475569';
     const apronStroke = isDark ? '#475569' : '#1e293b';
     const taxiFill = isDark ? '#334155' : '#64748b';
     const rwyCasing = isDark ? '#94a3b8' : '#1e293b';
-    const rwyAsphalt = '#0f172a';
+    const rwyAsphalt = '#0b1220';
     const twyLabelSeen = new Set<string>();
 
     // 1. Aprons
@@ -1046,96 +1228,193 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }).addTo(layer);
     }
 
-    // 2. Taxiways + Centerline Lights + Blue Edge Lights + Taxiway Badges
-    const twyWeight = mapZoom >= 15 ? 10 : mapZoom >= 13 ? 6 : 3.5;
+    // 2. Taxiways + Amber Centerline + Realistic Green Centerline Lights + Blue Edge Lights + ICAO Signage
+    const twyWeight = mapZoom >= 15 ? 11 : mapZoom >= 13 ? 7 : 3.5;
     for (const twy of surfaceData.taxiways) {
-      // Base monochromatic asphalt ribbon
       L.polyline(twy.coords, {
         renderer,
         color: taxiFill,
         weight: twyWeight,
-        opacity: 0.92,
+        opacity: 0.94,
         lineCap: 'round',
         lineJoin: 'round',
         interactive: false,
       }).addTo(layer);
 
-      // Taxiway amber centerline strip
       L.polyline(twy.coords, {
         renderer,
         color: '#f59e0b',
-        weight: mapZoom >= 14 ? 1.4 : 0.9,
-        opacity: 0.72,
+        weight: mapZoom >= 14 ? 1.5 : 0.9,
+        opacity: 0.8,
         interactive: false,
       }).addTo(layer);
 
-      // Detailed taxiway green centerline lights + blue edge lights on closer zoom
-      if (mapZoom >= 13.5 && twy.coords.length >= 2) {
-        const pStart = twy.coords[0];
-        const pEnd = twy.coords[twy.coords.length - 1];
-        const brg = computeBearingDeg(pStart, pEnd);
-        for (let i = 0; i < twy.coords.length; i += 2) {
-          const pt = twy.coords[i];
-          L.circleMarker(pt, {
-            renderer,
-            radius: mapZoom >= 15 ? 1.9 : 1.3,
-            color: '#22c55e',
-            fillColor: '#4ade80',
-            fillOpacity: 0.95,
-            weight: 0,
-            interactive: false,
-          }).addTo(layer);
+      if (mapZoom >= 13 && twy.coords.length >= 2) {
+        for (let segIdx = 0; segIdx < twy.coords.length - 1; segIdx++) {
+          const pA = twy.coords[segIdx];
+          const pB = twy.coords[segIdx + 1];
+          const brg = computeBearingDeg(pA, pB);
+          const subSteps = mapZoom >= 15 ? 3 : 1;
+          for (let k = 0; k < subSteps; k++) {
+            const frac = k / subSteps;
+            const pt: [number, number] = [
+              pA[0] + (pB[0] - pA[0]) * frac,
+              pA[1] + (pB[1] - pA[1]) * frac,
+            ];
+            L.circleMarker(pt, {
+              renderer,
+              radius: mapZoom >= 15 ? 2.0 : 1.4,
+              color: '#16a34a',
+              fillColor: '#4ade80',
+              fillOpacity: 0.96,
+              weight: 0,
+              interactive: false,
+            }).addTo(layer);
 
-          if (mapZoom >= 14.5) {
-            const leftEdge = offsetLatLonMeters(pt[0], pt[1], brg, 0, -10);
-            const rightEdge = offsetLatLonMeters(pt[0], pt[1], brg, 0, 10);
-            for (const edgePt of [leftEdge, rightEdge]) {
-              L.circleMarker(edgePt, {
-                renderer,
-                radius: 1.4,
-                color: '#38bdf8',
-                fillColor: '#38bdf8',
-                fillOpacity: 0.9,
-                weight: 0,
-                interactive: false,
-              }).addTo(layer);
+            if (mapZoom >= 14.2) {
+              const leftEdge = offsetLatLonMeters(pt[0], pt[1], brg, 0, -10.5);
+              const rightEdge = offsetLatLonMeters(pt[0], pt[1], brg, 0, 10.5);
+              for (const edgePt of [leftEdge, rightEdge]) {
+                L.circleMarker(edgePt, {
+                  renderer,
+                  radius: mapZoom >= 15.5 ? 1.8 : 1.4,
+                  color: '#0284c7',
+                  fillColor: '#38bdf8',
+                  fillOpacity: 0.94,
+                  weight: 0,
+                  interactive: false,
+                }).addTo(layer);
+              }
             }
           }
         }
       }
 
-      // Taxiway Ref Label
-      if (mapZoom >= 13.5 && twy.ref && !twyLabelSeen.has(`${twy.ref}-${Math.round(twy.coords[0][0] * 100)}`)) {
-        twyLabelSeen.add(`${twy.ref}-${Math.round(twy.coords[0][0] * 100)}`);
-        const mid = twy.coords[Math.floor(twy.coords.length / 2)];
-        L.marker(mid, {
-          interactive: false,
-          icon: L.divIcon({
-            className: 'skydeck-taxi-badge',
-            iconSize: [24, 16],
-            iconAnchor: [12, 8],
-            html: `<span style="display:inline-block;padding:0px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;background:#0f172a;color:#F9D949;border:1px solid rgba(249,217,73,0.65);">${twy.ref}</span>`,
-          }),
-        }).addTo(layer);
+      if (mapZoom >= 13 && twy.ref) {
+        const badgeKey = `${twy.ref}-${Math.round(twy.coords[0][0] * 140)}-${Math.round(twy.coords[0][1] * 140)}`;
+        if (!twyLabelSeen.has(badgeKey)) {
+          twyLabelSeen.add(badgeKey);
+          const mid = twy.coords[Math.floor(twy.coords.length / 2)];
+          L.marker(mid, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-taxi-badge',
+              iconSize: [26, 16],
+              iconAnchor: [13, 8],
+              html: `<span style="display:inline-block;padding:0px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:800;background:#090d16;color:#FACC15;border:1px solid #FACC15;box-shadow:0 1px 3px rgba(0,0,0,0.45);">${twy.ref}</span>`,
+            }),
+          }).addTo(layer);
+        }
       }
     }
 
-    // 3. Runways + Threshold Bars + Runway Numbers + Runway Edge/Threshold Lights
-    const rwyWeight = mapZoom >= 15 ? 24 : mapZoom >= 13.5 ? 15 : 9;
+    // 3. Runways + Piano Keys + Aiming Blocks + Flashing Sequenced Approach Lights ("Rabbit") + Dashed |- - - - -| Approach Paths
+    const rwyWeight = mapZoom >= 16 ? 32 : mapZoom >= 15 ? 24 : mapZoom >= 13.5 ? 15 : 9;
+    const approachLabelSeen = new Set<string>();
+
     for (const rwy of surfaceData.runways) {
       if (rwy.coords.length < 2) continue;
+
+      const startPt = rwy.coords[0];
+      const endPt = rwy.coords[rwy.coords.length - 1];
+      const brg = computeBearingDeg(startPt, endPt);
+      const revBrg = (brg + 180) % 360;
+      const [labelA, labelB] = deriveRunwayEndLabels(rwy.ref, brg);
+
+      // Extended Dashed Approach Path |- - - - -| from both runway thresholds
+      const drawApproachPath = (thresholdPt: [number, number], landingHeadingDeg: number, rwyLabel: string) => {
+        // Outbound opposite of landing heading (towards approaching traffic)
+        const outboundBrg = (landingHeadingDeg + 180) % 360;
+        const appEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 10186, 0); // 5.5 NM
+
+        // Extended |- - - - -| dashed centerline
+        L.polyline([thresholdPt, appEnd], {
+          renderer,
+          color: isDark ? '#38BDF8' : '#0369A1',
+          weight: mapZoom >= 13 ? 1.8 : 1.4,
+          opacity: 0.82,
+          dashArray: '8 7',
+          interactive: false,
+        }).addTo(layer);
+
+        // Perpendicular | range gate ticks every 1 NM (1852 m)
+        for (let nm = 1; nm <= 5; nm++) {
+          const distM = nm * 1852;
+          const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -170);
+          const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 170);
+          L.polyline([barL, barR], {
+            renderer,
+            color: isDark ? '#7DD3FC' : '#0284C7',
+            weight: 1.5,
+            opacity: 0.85,
+            interactive: false,
+          }).addTo(layer);
+        }
+
+        // Approach identifier badge at ~3.1 NM
+        if (mapZoom >= 11.2 && !approachLabelSeen.has(`${rwyLabel}-${Math.round(thresholdPt[0] * 100)}`)) {
+          approachLabelSeen.add(`${rwyLabel}-${Math.round(thresholdPt[0] * 100)}`);
+          const tagPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 5700, 0);
+          L.marker(tagPt, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-approach-badge',
+              iconSize: [96, 18],
+              iconAnchor: [48, 9],
+              html: `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;white-space:nowrap;background:${
+                isDark ? 'rgba(11,14,20,0.88)' : 'rgba(242,247,254,0.94)'
+              };color:${isDark ? '#7DD3FC' : '#0369A1'};border:1px solid ${
+                isDark ? 'rgba(56,189,248,0.55)' : 'rgba(3,105,161,0.45)'
+              };">APP ${rwyLabel} · ${String(Math.round(landingHeadingDeg)).padStart(3, '0')}°</span>`,
+            }),
+          }).addTo(layer);
+        }
+
+        // Flashing Sequenced Approach Lights ("Rabbit" strobes) + ALSF-II crossbars on approach zoom
+        if (mapZoom >= 12.5) {
+          const strobeCount = 7;
+          for (let s = 1; s <= strobeCount; s++) {
+            const distFromThresholdM = 120 + (strobeCount - s) * 115; // flashes sweep inward toward runway
+            const sPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distFromThresholdM, 0);
+            const delaySec = (s * 0.14).toFixed(2);
+            L.marker(sPt, {
+              interactive: false,
+              icon: L.divIcon({
+                className: 'skydeck-rabbit-icon',
+                iconSize: [8, 8],
+                iconAnchor: [4, 4],
+                html: `<div class="skydeck-rabbit-dot" style="animation-delay:${delaySec}s;"></div>`,
+              }),
+            }).addTo(layer);
+          }
+          // 300m decision crossbar
+          const cbL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 300, -28);
+          const cbR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 300, 28);
+          L.polyline([cbL, cbR], {
+            renderer,
+            color: '#f8fafc',
+            weight: 2.2,
+            opacity: 0.9,
+            dashArray: '3 4',
+            interactive: false,
+          }).addTo(layer);
+        }
+      };
+
+      drawApproachPath(startPt, brg, labelA);
+      drawApproachPath(endPt, revBrg, labelB);
 
       // Shoulder casing
       L.polyline(rwy.coords, {
         renderer,
         color: rwyCasing,
         weight: rwyWeight + 3,
-        opacity: 0.95,
+        opacity: 0.96,
         lineCap: 'butt',
         interactive: false,
       }).addTo(layer);
 
-      // Asphalt surface
+      // Asphalt runway surface
       L.polyline(rwy.coords, {
         renderer,
         color: rwyAsphalt,
@@ -1149,29 +1428,25 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       L.polyline(rwy.coords, {
         renderer,
         color: '#f8fafc',
-        weight: mapZoom >= 14 ? 1.8 : 1.1,
-        opacity: 0.9,
+        weight: mapZoom >= 14 ? 1.9 : 1.2,
+        opacity: 0.92,
         dashArray: mapZoom >= 14 ? '10 10' : '6 6',
         interactive: false,
       }).addTo(layer);
 
-      const startPt = rwy.coords[0];
-      const endPt = rwy.coords[rwy.coords.length - 1];
-      const brg = computeBearingDeg(startPt, endPt);
-      const [labelA, labelB] = deriveRunwayEndLabels(rwy.ref, brg);
-
-      // Edge light strings along runway sides
-      if (mapZoom >= 12.5) {
-        const steps = 16;
+      // Runway edge lights (white/amber last 600m)
+      if (mapZoom >= 12.2) {
+        const steps = 18;
+        const halfW = (rwy.widthM ?? 45) * 0.5;
         for (let s = 0; s <= steps; s++) {
           const frac = s / steps;
           const lat = startPt[0] + (endPt[0] - startPt[0]) * frac;
           const lon = startPt[1] + (endPt[1] - startPt[1]) * frac;
-          const halfW = (rwy.widthM ?? 45) * 0.5;
           const lEdge = offsetLatLonMeters(lat, lon, brg, 0, -halfW);
           const rEdge = offsetLatLonMeters(lat, lon, brg, 0, halfW);
           const isEnd = s === 0 || s === steps;
-          const lightColor = isEnd ? '#ef4444' : '#f8fafc';
+          const isCautionZone = !isEnd && (s <= 2 || s >= steps - 2);
+          const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#f8fafc';
           for (const pt of [lEdge, rEdge]) {
             L.circleMarker(pt, {
               renderer,
@@ -1186,15 +1461,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
       }
 
-      // Threshold green lights & piano-key bar + Runway Number Badges at both physical ends
+      // Piano-key threshold markings, aiming point blocks, green threshold lights & rotated runway designator
       const drawEnd = (pt: [number, number], endBrg: number, rwyNum: string) => {
         const halfW = (rwy.widthM ?? 45) * 0.45;
         for (let t = -3; t <= 3; t++) {
           const tPt = offsetLatLonMeters(pt[0], pt[1], endBrg, 0, (t / 3) * halfW);
           L.circleMarker(tPt, {
             renderer,
-            radius: mapZoom >= 14 ? 2.2 : 1.5,
-            color: '#22c55e',
+            radius: mapZoom >= 14 ? 2.3 : 1.6,
+            color: '#16a34a',
             fillColor: '#4ade80',
             fillOpacity: 1,
             weight: 0,
@@ -1203,26 +1478,48 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
 
         if (mapZoom >= 13) {
-          const stripeA = offsetLatLonMeters(pt[0], pt[1], endBrg, 30, -halfW * 0.8);
-          const stripeB = offsetLatLonMeters(pt[0], pt[1], endBrg, 30, halfW * 0.8);
-          L.polyline([stripeA, stripeB], {
-            renderer,
-            color: '#ffffff',
-            weight: 3,
-            opacity: 0.9,
-            dashArray: '2 3',
-            interactive: false,
-          }).addTo(layer);
+          // Longitudinal ICAO Piano-Key Threshold Bars
+          const numKeys = 6;
+          for (let k = -numKeys; k <= numKeys; k++) {
+            if (k === 0) continue;
+            const latOffset = (k / numKeys) * (halfW * 0.85);
+            const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
+            const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 48, latOffset);
+            L.polyline([p1, p2], {
+              renderer,
+              color: '#ffffff',
+              weight: mapZoom >= 15 ? 2.4 : 1.5,
+              opacity: 0.92,
+              lineCap: 'butt',
+              interactive: false,
+            }).addTo(layer);
+          }
+
+          // Touchdown Aiming Point Blocks (~260m from threshold)
+          if (mapZoom >= 14) {
+            for (const side of [-1, 1]) {
+              const a1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 240, side * halfW * 0.45);
+              const a2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 285, side * halfW * 0.45);
+              L.polyline([a1, a2], {
+                renderer,
+                color: '#ffffff',
+                weight: mapZoom >= 15.5 ? 4.5 : 3,
+                opacity: 0.92,
+                lineCap: 'butt',
+                interactive: false,
+              }).addTo(layer);
+            }
+          }
         }
 
-        const numPos = offsetLatLonMeters(pt[0], pt[1], endBrg, 95, 0);
+        const numPos = offsetLatLonMeters(pt[0], pt[1], endBrg, 105, 0);
         L.marker(numPos, {
           interactive: false,
           icon: L.divIcon({
             className: 'skydeck-runway-num',
-            iconSize: [34, 18],
-            iconAnchor: [17, 9],
-            html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:0.05em;background:rgba(15,23,42,0.92);color:#ffffff;border:1px solid rgba(255,255,255,0.65);box-shadow:0 1px 4px rgba(0,0,0,0.45);transform:rotate(${Math.round(
+            iconSize: [38, 20],
+            iconAnchor: [19, 10],
+            html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:0.05em;background:rgba(11,18,32,0.92);color:#ffffff;border:1px solid rgba(255,255,255,0.7);box-shadow:0 1px 4px rgba(0,0,0,0.45);transform:rotate(${Math.round(
               endBrg,
             )}deg);">${rwyNum}</span>`,
           }),
@@ -1230,7 +1527,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       };
 
       drawEnd(startPt, brg, labelA);
-      drawEnd(endPt, (brg + 180) % 360, labelB);
+      drawEnd(endPt, revBrg, labelB);
     }
 
     // 4. Gate / Stand Labels on Close Zoom
@@ -1242,14 +1539,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             className: 'skydeck-taxi-badge',
             iconSize: [24, 14],
             iconAnchor: [12, 7],
-            html: `<span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:600;color:#e2e8f0;background:rgba(15,23,42,0.78);padding:0 3px;border-radius:3px;">${gate.ref}</span>`,
+            html: `<span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:600;color:#e2e8f0;background:rgba(15,23,42,0.82);padding:0 3px;border-radius:3px;">${gate.ref}</span>`,
           }),
         }).addTo(layer);
       }
     }
   }, [surfaceData, mapZoom, isDark]);
 
-  // Smooth 60fps Interpolated & Forward-Gliding Flight Markers + FOV-Clipped GeoFS Paths
+  // Smooth 60fps Interpolated & Forward-Gliding Flight Markers + FOV-Clipped GeoFS Paths + Isolation Filter
   useEffect(() => {
     const fLayer = flightsLayerRef.current;
     const pLayer = allPathsLayerRef.current;
@@ -1262,7 +1559,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     drLayer.clearLayers();
 
     const mapBounds = map?.getBounds();
-    const visibleFlights = flights.filter((f) => settings.showGroundTraffic || !f.onGround);
+    const baseVisible = flights.filter((f) => settings.showGroundTraffic || !f.onGround);
+    const visibleFlights =
+      isolateSelected && selectedFlight
+        ? baseVisible.filter((f) => f.id === selectedFlight.id)
+        : baseVisible;
+
     const activeIds = new Set<string>();
     const markerPool = flightMarkersRef.current;
     const nowMs = performance.now();
@@ -1272,22 +1574,27 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       activeIds.add(id);
 
       const isSelected = selectedFlight?.id === id;
+      const emerg = getEmergencySquawkMeta(f.squawk);
       const inView = mapBounds ? mapBounds.contains([f.lat, f.lon]) : true;
 
-      // Flown routes strictly only for aircraft inside user FOV + GeoFS altitude gradient
-      if (settings.flightPathMode === 'all' && !f.onGround && !isSelected && inView) {
+      // Flown routes strictly only for aircraft inside user FOV + GeoFS altitude gradient (hidden for non-selected when isolated)
+      if (!isolateSelected && settings.flightPathMode === 'all' && !f.onGround && !isSelected && inView) {
         const key = f.icao24 || id;
         const rawTrail = clientTrailMapRef.current.get(key) ?? [];
-        const smoothedChains = sanitizeAndSmoothTrail(rawTrail.slice(-20), f, mapBounds);
+        const smoothedChains = sanitizeAndSmoothTrail(rawTrail.slice(-28), f, mapBounds);
         for (const chain of smoothedChains) {
           drawAltitudeGradientPath(pLayer, renderer, chain, 2.1, isDark ? 0.8 : 0.9);
         }
       }
 
+      const dbMeta = getDbFlagMeta(f);
       const visualKey = `${isSelected ? 1 : 0}-${settings.planeSize}-${settings.showPlaneLabels ? 1 : 0}-${
         isDark ? 1 : 0
-      }-${f.onGround ? 1 : 0}-${f.callsign}-${Math.round(f.altitudeFt / 500)}`;
+      }-${f.onGround ? 1 : 0}-${f.callsign}-${f.aircraftType}-${f.squawk}-${emerg?.code ?? ''}-${
+        dbMeta?.kind ?? ''
+      }-${f.dbFlags ?? 0}-${Math.round(f.altitudeFt / 500)}`;
 
+      const zOffset = emerg ? 1500 : isSelected ? 1000 : f.isLadd ? 350 : f.isMilitary ? 250 : f.onGround ? 10 : 120;
       const pooled = markerPool.get(id);
       if (pooled) {
         const movedTarget =
@@ -1319,7 +1626,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           pooled.blendDurationMs = 1500;
           pooled.lastUpdateMs = nowMs;
         }
-        pooled.marker.setZIndexOffset(isSelected ? 1000 : f.onGround ? 10 : 120);
+        pooled.marker.setZIndexOffset(zOffset);
         if (pooled.visualKey !== visualKey) {
           pooled.visualKey = visualKey;
           pooled.marker.setIcon(
@@ -1329,7 +1636,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       } else {
         const marker = L.marker([f.lat, f.lon], {
           icon: makePlaneIcon(f, isSelected, settings.planeSize, isDark, settings.showPlaneLabels, f.trueTrackDeg),
-          zIndexOffset: isSelected ? 1000 : f.onGround ? 10 : 120,
+          zIndexOffset: zOffset,
         });
         marker.on('click', () => {
           const latest = markerPool.get(id)?.flight ?? f;
@@ -1338,11 +1645,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         marker.bindTooltip(
           () => {
             const latest = markerPool.get(id)?.flight ?? f;
-            return `${latest.callsign} · ${latest.aircraftType}${
-              latest.origin && latest.destination ? ` · ${latest.origin} → ${latest.destination}` : ''
-            } · ${latest.onGround ? 'GND' : `FL${Math.round(latest.altitudeFt / 100)}`}${
-              latest.squawk ? ` · SQK ${latest.squawk}` : ''
-            }${latest.isEstimated ? ' [DR-EST]' : ''}`;
+            const em = getEmergencySquawkMeta(latest.squawk);
+            const db = getDbFlagMeta(latest);
+            return `${em ? `[${em.shortLabel}] ` : ''}${db ? `[${db.shortLabel}] ` : ''}${latest.callsign} · ${
+              latest.aircraftType
+            }${latest.origin && latest.destination ? ` · ${latest.origin} → ${latest.destination}` : ''} · ${
+              latest.onGround ? 'GND' : `FL${Math.round(latest.altitudeFt / 100)}`
+            }${latest.squawk ? ` · SQK ${latest.squawk}` : ''}${latest.isEstimated ? ' [DR-EST]' : ''}`;
           },
           {direction: 'right', offset: [10, 0]},
         );
@@ -1390,6 +1699,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   }, [
     flights,
     selectedFlight,
+    isolateSelected,
     settings.planeSize,
     settings.flightPathMode,
     settings.showPlaneLabels,
@@ -1399,14 +1709,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     viewportTick,
   ]);
 
-  // Continuous 60fps Aircraft Kinematic Glide + Smooth Convergence Loop
+  // Continuous 60fps Aircraft Kinematic Glide + Zoom-Preserving Follow Pan Loop
   useEffect(() => {
     let rafId = 0;
     let lastTickMs = 0;
+    let lastFollowPanMs = 0;
 
     const step = (frameMs: number) => {
       rafId = window.requestAnimationFrame(step);
-      if (isMapZoomingRef.current || frameMs - lastTickMs < 24) return; // ~40-45fps smooth cadence
+      if (isMapZoomingRef.current || frameMs - lastTickMs < 24) return;
       lastTickMs = frameMs;
 
       const map = mapRef.current;
@@ -1415,7 +1726,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
       for (const entry of flightMarkersRef.current.values()) {
         const f = entry.flight;
-        if (!bounds.contains([entry.targetLat, entry.targetLon])) continue;
+        const isFollowed = followSelectedRef.current && selectedFlightIdRef.current === f.id;
+        if (!isFollowed && !bounds.contains([entry.targetLat, entry.targetLon])) continue;
 
         // 1. Eased convergence from previous rendered point to latest ADS-B report
         const t =
@@ -1464,6 +1776,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             rotEl.style.transform = `rotate(${nextTrack.toFixed(1)}deg)`;
           }
         }
+
+        // 4. Follow Mode: Keep aircraft centered at the user's current zoom level
+        if (isFollowed && frameMs - lastFollowPanMs > 110) {
+          lastFollowPanMs = frameMs;
+          const c = map.getCenter();
+          if (Math.hypot(nextLat - c.lat, nextLon - c.lng) > 0.00015) {
+            map.panTo([nextLat, nextLon], {animate: false});
+          }
+        }
       }
     };
 
@@ -1471,7 +1792,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     return () => window.cancelAnimationFrame(rafId);
   }, []);
 
-  // Selected Flight Actual Flown Route (Sanitized + Chaikin Smoothed + Synced to Plane + FOV-Clipped)
+  // Immediately center map (preserving user's current zoom) when Follow Mode is activated
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !followSelected || !selectedFlight) return;
+    map.panTo([selectedFlight.lat, selectedFlight.lon], {animate: true});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followSelected, selectedFlight?.id]);
+
+  // Selected Flight Actual Flown Route (Merged Server + Live Trail + Unclipped when Isolated)
   useEffect(() => {
     const tLayer = trailLayerRef.current;
     const map = mapRef.current;
@@ -1481,21 +1810,58 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
     const mapBounds = map?.getBounds();
 
-    if (selectedFlight && settings.flightPathMode !== 'off') {
+    if (selectedFlight && (isolateSelected || settings.flightPathMode !== 'off')) {
       const inView = mapBounds ? mapBounds.contains([selectedFlight.lat, selectedFlight.lon]) : true;
-      if (inView) {
+      if (isolateSelected || inView) {
         const serverTrail = selectedDetail?.trail ?? [];
         const fallbackTrail = clientTrailMapRef.current.get(selectedFlight.icao24 || selectedFlight.id) ?? [];
-        const fullFlown: TrailPt[] =
-          serverTrail.length > 1
-            ? serverTrail.map((p) => ({lat: p.lat, lon: p.lon, altFt: p.altFt}))
-            : fallbackTrail.length > 1
-              ? fallbackTrail
-              : [];
 
-        const smoothedChains = sanitizeAndSmoothTrail(fullFlown, selectedFlight, mapBounds);
+        // Always keep the richest trail available (critical for military/adsb.lol flights without FR24 trail IDs)
+        let fullFlown: TrailPt[] = [];
+        if (serverTrail.length > 1) {
+          fullFlown = serverTrail.map((p) => ({lat: p.lat, lon: p.lon, altFt: p.altFt}));
+          for (const pt of fallbackTrail) {
+            const last = fullFlown[fullFlown.length - 1];
+            if (!last || Math.hypot(pt.lat - last.lat, pt.lon - last.lon) > 0.001) {
+              fullFlown.push(pt);
+            }
+          }
+        } else if (fallbackTrail.length > 1) {
+          fullFlown = fallbackTrail;
+        }
+
+        const smoothedChains = sanitizeAndSmoothTrail(
+          fullFlown,
+          selectedFlight,
+          isolateSelected ? undefined : mapBounds,
+        );
         for (const chain of smoothedChains) {
-          drawAltitudeGradientPath(tLayer, renderer, chain, 3.4, 0.96);
+          drawAltitudeGradientPath(tLayer, renderer, chain, isolateSelected ? 4 : 3.4, 0.96);
+        }
+
+        // If isolated and destination airport is known in directory, draw projected dashed course ahead
+        if (isolateSelected && !plannedRoute) {
+          const destCode = (selectedDetail?.destinationIata || selectedFlight.destination || '').toUpperCase();
+          const destIcao = (selectedDetail?.destinationIcao || '').toUpperCase();
+          const destAp = unifiedAirports.find(
+            (a) => (destIcao && a.icao === destIcao) || (destCode && a.iata === destCode),
+          );
+          if (destAp) {
+            L.polyline(
+              [
+                [selectedFlight.lat, selectedFlight.lon],
+                [destAp.lat, destAp.lon],
+              ],
+              {
+                renderer,
+                color: '#38BDF8',
+                weight: 2,
+                opacity: 0.75,
+                dashArray: '6 6',
+                interactive: false,
+              },
+            ).addTo(tLayer);
+          }
         }
       }
     }
@@ -1513,7 +1879,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }).addTo(tLayer);
       mapRef.current?.fitBounds(routeBounds, {padding: [48, 48], maxZoom: 7});
     }
-  }, [selectedFlight, selectedDetail, plannedRoute, settings.flightPathMode, isDark, viewportTick]);
+  }, [
+    selectedFlight,
+    selectedDetail,
+    plannedRoute,
+    isolateSelected,
+    unifiedAirports,
+    settings.flightPathMode,
+    isDark,
+    viewportTick,
+  ]);
 
   const currentFrameTime =
     rainviewer && rainviewer.frames[radarFrameIdx]
@@ -1524,11 +1899,11 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       : null;
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-card">
+    <div className={`relative w-full h-full overflow-hidden bg-card ${isMobilePortrait ? 'skydeck-mobile-map' : ''}`}>
       <div ref={mapDivRef} className="w-full h-full" />
 
       {/* Top-Right Compact GeoFS Altitude Legend & Optional Weather Radar Player */}
-      <div className="hidden sm:flex absolute top-3 right-14 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card/90 backdrop-blur-md border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm transition-all">
+      <div className="hidden md:flex absolute top-3 right-14 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card/90 backdrop-blur-md border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm transition-all">
         {settings.showRadar && rainviewer && rainviewer.frames.length > 0 && (
           <div className="flex items-center gap-2 pr-2.5 border-r border-border">
             <button

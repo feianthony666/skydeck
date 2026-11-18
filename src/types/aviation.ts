@@ -40,7 +40,14 @@ export interface LiveFlight {
   isEstimated: boolean;
   uncertaintyNm: number;
   trail?: TrailPoint[];
+  dbFlags?: number;
+  isLadd?: boolean;
+  isMilitary?: boolean;
+  isPia?: boolean;
+  ownerOperator?: string;
 }
+
+export type TrafficFlagFilter = 'all' | 'ladd' | 'military' | 'pia' | 'emergency';
 
 export interface AircraftPhoto {
   url: string;
@@ -266,6 +273,7 @@ export interface AirportBoardFlight {
   statusText: string;
   statusColor: 'green' | 'amber' | 'red' | 'gray';
   isDelayed: boolean;
+  isCancelled?: boolean;
   isLive: boolean;
 }
 
@@ -328,6 +336,8 @@ export interface RadarSettings {
   radarOpacity: number;
   showGroundTraffic: boolean;
   showDrRings: boolean;
+  cfWorkerUrl?: string;
+  apiBaseUrl?: string;
 }
 
 export type AppView = 'radar' | 'deck' | 'taxi' | 'planner';

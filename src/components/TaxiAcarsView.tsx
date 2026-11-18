@@ -3,6 +3,7 @@ import {Plane, Radio, RefreshCw, Search} from 'lucide-react';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {AIRPORT_CATALOG, resolveAirlineLivery, type AirportSpec} from '../data/aviationCatalog';
 import {apiFetchJson} from '../services/directAviationClient';
+import {buildFr24AircraftSvg, resolveFr24ModelClass} from './aircraftIcons';
 import type {
   AcarsMessage,
   AirportWeather,
@@ -89,7 +90,7 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
       center: [airportSpec.lat, airportSpec.lon],
       zoom: 13,
       minZoom: 11,
-      maxZoom: 18,
+      maxZoom: 20,
     });
     const geomLayer = L.layerGroup().addTo(map);
     const planeLayer = L.layerGroup().addTo(map);
@@ -115,28 +116,40 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
     map.setView([airportSpec.lat, airportSpec.lon], 13, {animate: true});
   }, [airportSpec]);
 
-  // Verified zero-API-key real surface tiles (Esri World Imagery / Dark Gray / OSM)
+  // Verified zero-API-key real surface tiles with maxNativeZoom upscaling up to z20
   useEffect(() => {
     const map = taxiMapRef.current;
     if (!map) return;
     for (const old of taxiTileRef.current) map.removeLayer(old);
     taxiTileRef.current = [];
 
+    const tileOpts = {keepBuffer: 4, updateWhenIdle: true, updateWhenZooming: false};
     const layers: L.TileLayer[] =
       theme === 'dark'
         ? [
             L.tileLayer(
               'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-              {maxZoom: 16, attribution: 'Tiles &copy; Esri'},
+              {
+                ...tileOpts,
+                maxNativeZoom: 16,
+                maxZoom: 20,
+                attribution: 'Tiles &copy; Esri',
+              },
             ),
             L.tileLayer(
               'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-              {maxZoom: 16, opacity: 0.85},
+              {
+                ...tileOpts,
+                maxNativeZoom: 15,
+                maxZoom: 20,
+              },
             ),
           ]
         : [
             L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-              maxZoom: 19,
+              ...tileOpts,
+              maxNativeZoom: 19,
+              maxZoom: 20,
               attribution: '&copy; OpenStreetMap',
             }),
           ];
@@ -145,7 +158,6 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
       tile.addTo(map);
       tile.bringToBack();
     }
-    if (layers.length > 1) layers[0].bringToBack();
     taxiTileRef.current = layers;
   }, [theme]);
 
@@ -169,15 +181,17 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
 
     for (const f of [...groundTraffic, ...nearbyAirborne]) {
       const color = f.onGround ? '#22C55E' : '#38BDF8';
+      const svg = buildFr24AircraftSvg(
+        resolveFr24ModelClass(f.aircraftType, f.callsign),
+        22,
+        color,
+        '#0B0E14',
+      );
       const icon = L.divIcon({
         className: 'skydeck-taxi-icon',
         iconSize: [22, 22],
         iconAnchor: [11, 11],
-        html: `<div style="transform:rotate(${Math.round(f.trueTrackDeg)}deg);width:22px;height:22px;display:flex;align-items:center;justify-content:center;">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="${color}" stroke="#0B0E14" stroke-width="1.4">
-            <path d="M12 2L14.2 9.2L21 13V15L14.2 13V18.5L17 20.5V22L12 20.8L7 22V20.5L9.8 18.5V13L3 15V13L9.8 9.2L12 2Z"/>
-          </svg>
-        </div>`,
+        html: `<div style="transform:rotate(${Math.round(f.trueTrackDeg)}deg);width:22px;height:22px;display:flex;align-items:center;justify-content:center;">${svg}</div>`,
       });
       const m = L.marker([f.lat, f.lon], {icon});
       m.on('click', () => onInspectFlight(f));

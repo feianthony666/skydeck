@@ -45,7 +45,21 @@ const hexDbCache = new Map<string, {ts: number; meta: Record<string, string> | n
 const airportBoardCache = new Map<string, {ts: number; board: AirportBoardResponse}>();
 const surfaceCache = new Map<string, {ts: number; data: AirfieldSurfaceData}>();
 const openSkySectorCache = new Map<string, {ts: number; flights: LiveFlight[]}>();
+let adsbMilFeedCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
+let adsbLaddFeedCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let globalAirportsCache: {ts: number; airports: AirportMarker[]} | null = null;
+interface AipRunwayEntry {
+  airportIdent: string;
+  leIdent: string;
+  heIdent: string;
+  leLat: number;
+  leLon: number;
+  heLat: number;
+  heLon: number;
+  widthM: number;
+  closed: boolean;
+}
+let globalRunwaysCache: {ts: number; byAirport: Map<string, AipRunwayEntry[]>} | null = null;
 const flightTrailHistory = new Map<string, TrailPoint[]>();
 const flightIndexMap = new Map<string, LiveFlight>();
 
@@ -172,6 +186,85 @@ async function getGlobalAirports(): Promise<AirportMarker[]> {
   const list = Array.from(seeded.values());
   globalAirportsCache = {ts: Date.now(), airports: list};
   return list;
+}
+
+async function getGlobalRunwaysByAirport(): Promise<Map<string, AipRunwayEntry[]>> {
+  if (globalRunwaysCache && Date.now() - globalRunwaysCache.ts < 86400000) {
+    return globalRunwaysCache.byAirport;
+  }
+
+  const byAirport = new Map<string, AipRunwayEntry[]>();
+  try {
+    const res = await fetch('https://davidmegginson.github.io/ourairports-data/runways.csv', {
+      headers: {'User-Agent': API_USER_AGENT},
+      signal: AbortSignal.timeout(9000),
+    });
+    if (res.ok) {
+      const text = await res.text();
+      const lines = text.split(/\r?\n/);
+      if (lines.length > 1) {
+        const header = splitCsvRow(lines[0]).map((h) => h.trim().toLowerCase());
+        const idxIdent = header.indexOf('airport_ident');
+        const idxWidth = header.indexOf('width_ft');
+        const idxClosed = header.indexOf('closed');
+        const idxLeIdent = header.indexOf('le_ident');
+        const idxLeLat = header.indexOf('le_latitude_deg');
+        const idxLeLon = header.indexOf('le_longitude_deg');
+        const idxHeIdent = header.indexOf('he_ident');
+        const idxHeLat = header.indexOf('he_latitude_deg');
+        const idxHeLon = header.indexOf('he_longitude_deg');
+
+        for (let i = 1; i < lines.length; i++) {
+          const raw = lines[i];
+          if (!raw) continue;
+          const cols = splitCsvRow(raw);
+          const airportIdent = (cols[idxIdent] ?? '').trim().toUpperCase();
+          if (!airportIdent) continue;
+          const closed = (cols[idxClosed] ?? '0').trim() === '1';
+          if (closed) continue;
+          const leLat = Number(cols[idxLeLat]);
+          const leLon = Number(cols[idxLeLon]);
+          const heLat = Number(cols[idxHeLat]);
+          const heLon = Number(cols[idxHeLon]);
+          if (
+            !Number.isFinite(leLat) ||
+            !Number.isFinite(leLon) ||
+            !Number.isFinite(heLat) ||
+            !Number.isFinite(heLon) ||
+            (leLat === 0 && leLon === 0) ||
+            (heLat === 0 && heLon === 0)
+          ) {
+            continue;
+          }
+          const leIdent = (cols[idxLeIdent] ?? '').trim().toUpperCase();
+          const heIdent = (cols[idxHeIdent] ?? '').trim().toUpperCase();
+          const widthFt = Number(cols[idxWidth]);
+          const widthM = Number.isFinite(widthFt) && widthFt > 20 ? Math.round(widthFt * 0.3048) : 45;
+          const entry: AipRunwayEntry = {
+            airportIdent,
+            leIdent,
+            heIdent,
+            leLat,
+            leLon,
+            heLat,
+            heLon,
+            widthM,
+            closed,
+          };
+          const arr = byAirport.get(airportIdent);
+          if (arr) arr.push(entry);
+          else byAirport.set(airportIdent, [entry]);
+        }
+      }
+    }
+  } catch {
+    // fallback silently
+  }
+
+  if (byAirport.size > 0) {
+    globalRunwaysCache = {ts: Date.now(), byAirport};
+  }
+  return byAirport;
 }
 
 async function safeJson<T>(res: Response | null): Promise<T | null> {
@@ -362,14 +455,13 @@ function mapFr24ScheduleRow(
 
   const delaySec =
     schedTs && (realTs || estTs) ? (realTs || estTs || 0) - schedTs : 0;
+  const isCancelled = /cancel/i.test(statusText) || icon === 'red';
   const isDelayed =
-    icon === 'amber' ||
-    icon === 'red' ||
-    /delay|cancel/i.test(statusText) ||
-    delaySec >= 900;
+    !isCancelled &&
+    (icon === 'amber' || /delay/i.test(statusText) || delaySec >= 900);
 
   const statusColor: AirportBoardFlight['statusColor'] =
-    icon === 'red' || /cancel/i.test(statusText)
+    isCancelled
       ? 'red'
       : icon === 'amber' || isDelayed
         ? 'amber'
@@ -404,6 +496,7 @@ function mapFr24ScheduleRow(
     statusText,
     statusColor,
     isDelayed,
+    isCancelled,
     isLive: Boolean(statusObj.live),
   };
 }
@@ -576,7 +669,7 @@ function recordFlightBreadcrumb(f: LiveFlight) {
     trackDeg: f.trueTrackDeg,
     ts: f.lastContactEpoch,
   });
-  if (existing.length > 60) existing.shift();
+  if (existing.length > 120) existing.shift();
   flightTrailHistory.set(key, existing);
 }
 
@@ -658,7 +751,7 @@ async function fetchFr24Web(
   lomax: number,
 ): Promise<{flights: LiveFlight[]; status: ProviderStatus}> {
   const start = Date.now();
-  const url = `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${lamax.toFixed(3)},${lamin.toFixed(3)},${lomin.toFixed(3)},${lomax.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=0&stats=1`;
+  const url = `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${lamax.toFixed(3)},${lamin.toFixed(3)},${lomin.toFixed(3)},${lomax.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
   try {
     const res = await fetch(url, {
       headers: {
@@ -906,6 +999,10 @@ async function fetchAdsbLol(
         const callsign = String(a.flight ?? icao24).trim().toUpperCase();
         const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
         const altFt = onGround ? 0 : Number(a.alt_baro ?? a.alt_geom ?? 0) || 0;
+        const dbFlags = Number(a.dbFlags ?? 0) || 0;
+        const isMilitary = (dbFlags & 1) !== 0;
+        const isPia = (dbFlags & 4) !== 0;
+        const isLadd = (dbFlags & 8) !== 0;
         return {
           id: icao24,
           icao24,
@@ -913,7 +1010,7 @@ async function fetchAdsbLol(
           flightNumber: callsign,
           registration: String(a.r ?? ''),
           airlineIcao: airlineIcaoFromCallsign(callsign),
-          airlineName: airlineIcaoFromCallsign(callsign),
+          airlineName: String(a.ownOp ?? '') || airlineIcaoFromCallsign(callsign),
           aircraftType: String(a.t ?? 'A320').toUpperCase(),
           lat: Number(a.lat),
           lon: Number(a.lon),
@@ -929,6 +1026,11 @@ async function fetchAdsbLol(
           source: 'adsb.lol',
           isEstimated: false,
           uncertaintyNm: 0,
+          dbFlags,
+          isMilitary,
+          isPia,
+          isLadd,
+          ownerOperator: a.ownOp ? String(a.ownOp) : undefined,
         };
       });
     return {
@@ -940,6 +1042,214 @@ async function fetchAdsbLol(
       flights: [],
       status: {
         provider: 'adsb.lol',
+        ok: false,
+        count: 0,
+        latencyMs: Date.now() - start,
+        note: err instanceof Error ? err.message : 'Timeout',
+      },
+    };
+  }
+}
+
+async function fetchAdsbMil(
+  lamin: number,
+  lomin: number,
+  lamax: number,
+  lomax: number,
+): Promise<{flights: LiveFlight[]; status: ProviderStatus}> {
+  const start = Date.now();
+  try {
+    let acRows: Array<Record<string, unknown>> = [];
+    let nowSec = Math.floor(Date.now() / 1000);
+
+    if (adsbMilFeedCache && Date.now() - adsbMilFeedCache.ts < 12000) {
+      acRows = adsbMilFeedCache.ac;
+      nowSec = adsbMilFeedCache.nowSec;
+    } else {
+      const res = await fetch('https://api.adsb.lol/v2/mil', {
+        headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+        signal: AbortSignal.timeout(2800),
+      });
+      if (!res.ok) {
+        if (adsbMilFeedCache && Date.now() - adsbMilFeedCache.ts < 45000) {
+          acRows = adsbMilFeedCache.ac;
+          nowSec = adsbMilFeedCache.nowSec;
+        } else {
+          return {
+            flights: [],
+            status: {provider: 'adsb.lol-mil', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
+          };
+        }
+      } else {
+        const json = (await res.json()) as {ac?: Array<Record<string, unknown>>; now?: number};
+        acRows = json.ac ?? [];
+        nowSec = Math.floor((json.now ?? Date.now()) / 1000);
+        adsbMilFeedCache = {ts: Date.now(), ac: acRows, nowSec};
+      }
+    }
+
+    const flights: LiveFlight[] = acRows
+      .filter((a) => {
+        const lat = Number(a.lat);
+        const lon = Number(a.lon);
+        return (
+          Number.isFinite(lat) &&
+          Number.isFinite(lon) &&
+          lat >= lamin - 1 &&
+          lat <= lamax + 1 &&
+          lon >= lomin - 1 &&
+          lon <= lomax + 1
+        );
+      })
+      .map((a) => {
+        const icao24 = String(a.hex ?? '').toUpperCase();
+        const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
+        const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
+        const altFt = onGround ? 0 : Number(a.alt_baro ?? a.alt_geom ?? 0) || 0;
+        const dbFlags = (Number(a.dbFlags ?? 0) || 0) | 1;
+        return {
+          id: icao24,
+          icao24,
+          callsign,
+          flightNumber: callsign,
+          registration: String(a.r ?? ''),
+          airlineIcao: airlineIcaoFromCallsign(callsign) || 'MIL',
+          airlineName: String(a.ownOp ?? 'Military / State'),
+          aircraftType: String(a.t ?? 'F16').toUpperCase(),
+          lat: Number(a.lat),
+          lon: Number(a.lon),
+          altitudeFt: Math.max(0, Math.round(altFt)),
+          groundSpeedKts: Math.round(Number(a.gs ?? 0)),
+          trueTrackDeg: Math.round(Number(a.track ?? 0)),
+          verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
+          onGround,
+          squawk: String(a.squawk ?? ''),
+          origin: '',
+          destination: '',
+          lastContactEpoch: nowSec - Math.round(Number(a.seen_pos ?? 0)),
+          source: 'adsb.lol',
+          isEstimated: false,
+          uncertaintyNm: 0,
+          dbFlags,
+          isMilitary: true,
+          isPia: (dbFlags & 4) !== 0,
+          isLadd: (dbFlags & 8) !== 0,
+          ownerOperator: a.ownOp ? String(a.ownOp) : undefined,
+        };
+      });
+    return {
+      flights,
+      status: {provider: 'adsb.lol-mil', ok: true, count: flights.length, latencyMs: Date.now() - start},
+    };
+  } catch (err) {
+    return {
+      flights: [],
+      status: {
+        provider: 'adsb.lol-mil',
+        ok: false,
+        count: 0,
+        latencyMs: Date.now() - start,
+        note: err instanceof Error ? err.message : 'Timeout',
+      },
+    };
+  }
+}
+
+async function fetchAdsbLadd(
+  lamin: number,
+  lomin: number,
+  lamax: number,
+  lomax: number,
+): Promise<{flights: LiveFlight[]; status: ProviderStatus}> {
+  const start = Date.now();
+  try {
+    let acRows: Array<Record<string, unknown>> = [];
+    let nowSec = Math.floor(Date.now() / 1000);
+
+    if (adsbLaddFeedCache && Date.now() - adsbLaddFeedCache.ts < 15000) {
+      acRows = adsbLaddFeedCache.ac;
+      nowSec = adsbLaddFeedCache.nowSec;
+    } else {
+      const res = await fetch('https://api.adsb.lol/v2/ladd', {
+        headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+        signal: AbortSignal.timeout(3200),
+      });
+      if (!res.ok) {
+        if (adsbLaddFeedCache && Date.now() - adsbLaddFeedCache.ts < 60000) {
+          acRows = adsbLaddFeedCache.ac;
+          nowSec = adsbLaddFeedCache.nowSec;
+        } else {
+          return {
+            flights: [],
+            status: {provider: 'adsb.lol-ladd', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
+          };
+        }
+      } else {
+        const json = (await res.json()) as {ac?: Array<Record<string, unknown>>; now?: number};
+        acRows = json.ac ?? [];
+        nowSec = Math.floor((json.now ?? Date.now()) / 1000);
+        adsbLaddFeedCache = {ts: Date.now(), ac: acRows, nowSec};
+      }
+    }
+
+    const flights: LiveFlight[] = acRows
+      .filter((a) => {
+        const lat = Number(a.lat);
+        const lon = Number(a.lon);
+        return (
+          Number.isFinite(lat) &&
+          Number.isFinite(lon) &&
+          lat >= lamin - 1 &&
+          lat <= lamax + 1 &&
+          lon >= lomin - 1 &&
+          lon <= lomax + 1
+        );
+      })
+      .map((a) => {
+        const icao24 = String(a.hex ?? '').toUpperCase();
+        const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
+        const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
+        const altFt = onGround ? 0 : Number(a.alt_baro ?? a.alt_geom ?? 0) || 0;
+        const dbFlags = (Number(a.dbFlags ?? 0) || 0) | 8;
+        return {
+          id: icao24,
+          icao24,
+          callsign,
+          flightNumber: callsign,
+          registration: String(a.r ?? ''),
+          airlineIcao: airlineIcaoFromCallsign(callsign) || 'LADD',
+          airlineName: String(a.ownOp ?? 'LADD Restricted'),
+          aircraftType: String(a.t ?? 'GLF6').toUpperCase(),
+          lat: Number(a.lat),
+          lon: Number(a.lon),
+          altitudeFt: Math.max(0, Math.round(altFt)),
+          groundSpeedKts: Math.round(Number(a.gs ?? 0)),
+          trueTrackDeg: Math.round(Number(a.track ?? 0)),
+          verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
+          onGround,
+          squawk: String(a.squawk ?? ''),
+          origin: '',
+          destination: '',
+          lastContactEpoch: nowSec - Math.round(Number(a.seen_pos ?? 0)),
+          source: 'adsb.lol',
+          isEstimated: false,
+          uncertaintyNm: 0,
+          dbFlags,
+          isLadd: true,
+          isMilitary: (dbFlags & 1) !== 0,
+          isPia: (dbFlags & 4) !== 0,
+          ownerOperator: a.ownOp ? String(a.ownOp) : undefined,
+        };
+      });
+    return {
+      flights,
+      status: {provider: 'adsb.lol-ladd', ok: true, count: flights.length, latencyMs: Date.now() - start},
+    };
+  } catch (err) {
+    return {
+      flights: [],
+      status: {
+        provider: 'adsb.lol-ladd',
         ok: false,
         count: 0,
         latencyMs: Date.now() - start,
@@ -1198,6 +1508,17 @@ function classifyAcarsLabel(label: string, text: string): {name: string; categor
 export function createApiRouter(): express.Router {
   const router = express.Router();
 
+  router.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   // 1. Live Multi-Source Flights Aggregator
   router.get('/flights', async (req, res) => {
     const lamin = Number(req.query.lamin ?? 18.0);
@@ -1218,9 +1539,11 @@ export function createApiRouter(): express.Router {
     const lonSpanNm = Math.abs(lomax - lomin) * 60 * Math.cos((centerLat * Math.PI) / 180);
     const radiusNm = Math.min(250, Math.max(40, Math.hypot(latSpanNm, lonSpanNm) / 2));
 
-    const [fr24Res, adsbRes, adsbFiRes, openSkyRes, airNavRes, variFlightRes] = await Promise.all([
+    const [fr24Res, adsbRes, adsbMilRes, adsbLaddRes, adsbFiRes, openSkyRes, airNavRes, variFlightRes] = await Promise.all([
       fetchFr24Web(lamin, lomin, lamax, lomax),
       fetchAdsbLol(centerLat, centerLon, radiusNm),
+      fetchAdsbMil(lamin, lomin, lamax, lomax),
+      fetchAdsbLadd(lamin, lomin, lamax, lomax),
       fetchAdsbFi(centerLat, centerLon, radiusNm),
       fetchOpenSky(lamin, lomin, lamax, lomax),
       fetchAirNavWeb(lamin, lomin, lamax, lomax),
@@ -1232,6 +1555,8 @@ export function createApiRouter(): express.Router {
       variFlightRes.flights,
       airNavRes.flights,
       fr24Res.flights,
+      adsbLaddRes.flights,
+      adsbMilRes.flights,
       adsbRes.flights,
       adsbFiRes.flights,
       openSkyRes.flights,
@@ -1254,24 +1579,40 @@ export function createApiRouter(): express.Router {
           }
           if (!existing.registration && f.registration) existing.registration = f.registration;
           if (!existing.fr24Id && f.fr24Id) existing.fr24Id = f.fr24Id;
+          if (f.dbFlags) existing.dbFlags = (existing.dbFlags ?? 0) | f.dbFlags;
+          if (f.isLadd) existing.isLadd = true;
+          if (f.isMilitary) existing.isMilitary = true;
+          if (f.isPia) existing.isPia = true;
+          if (!existing.ownerOperator && f.ownerOperator) existing.ownerOperator = f.ownerOperator;
         }
       }
     }
 
     const flights = Array.from(mergedMap.values())
       .filter((f) => f.lat >= lamin - 1 && f.lat <= lamax + 1 && f.lon >= lomin - 1 && f.lon <= lomax + 1)
-      .slice(0, 450);
+      .sort((a, b) => {
+        const aEmerg = a.squawk === '7700' || a.squawk === '7600' || a.squawk === '7500' ? 1 : 0;
+        const bEmerg = b.squawk === '7700' || b.squawk === '7600' || b.squawk === '7500' ? 1 : 0;
+        if (aEmerg !== bEmerg) return bEmerg - aEmerg;
+        const aFlag = (a.isLadd ? 2 : 0) + (a.isMilitary ? 1 : 0) + (a.isPia ? 1 : 0);
+        const bFlag = (b.isLadd ? 2 : 0) + (b.isMilitary ? 1 : 0) + (b.isPia ? 1 : 0);
+        if (aFlag !== bFlag) return bFlag - aFlag;
+        return 0;
+      })
+      .slice(0, 480);
 
     for (const f of flights) {
       recordFlightBreadcrumb(f);
       const history = flightTrailHistory.get(f.icao24 || f.id);
       if (history && history.length > 1) {
-        f.trail = history.slice(-16);
+        f.trail = history.slice(-40);
       }
     }
 
     const providers: ProviderStatus[] = [
       fr24Res.status,
+      adsbLaddRes.status,
+      adsbMilRes.status,
       adsbFiRes.status,
       adsbRes.status,
       variFlightRes.status,
@@ -1691,7 +2032,7 @@ export function createApiRouter(): express.Router {
     res.json({airports: inBox, maxTier, totalInViewport: inBox.length});
   });
 
-  // 2d. Detailed Vectorized Airfield Surface (Runways, Aprons, Taxiways & Gates)
+  // 2d. Detailed Vectorized Airfield Surface (AIP Runways CSV + Overpass Taxiways, Aprons & Gates)
   router.get('/surface', async (req, res) => {
     const icao = String(req.query.icao ?? '').trim().toUpperCase();
     const catalog = AIRPORT_CATALOG.find((a) => a.icao === icao || a.iata === icao);
@@ -1704,63 +2045,127 @@ export function createApiRouter(): express.Router {
 
     const cacheKey = icao || `${lat.toFixed(3)},${lon.toFixed(3)}`;
     const cached = surfaceCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < 86400000) {
+    const cacheTtlMs =
+      cached && (cached.data.taxiways.length > 0 || cached.data.aprons.length > 0)
+        ? 86400000
+        : 300000;
+    if (cached && Date.now() - cached.ts < cacheTtlMs) {
       res.json(cached.data);
       return;
     }
 
     const aprons: Array<Array<[number, number]>> = [];
-    const runways: TaxiwaySegment[] = [];
+    const osmRunways: TaxiwaySegment[] = [];
     const taxiways: TaxiwaySegment[] = [];
     const gates: AirfieldSurfaceGate[] = [];
 
-    try {
-      const q = `[out:json][timeout:6];(way["aeroway"~"runway|taxiway|taxilane|apron"](${(lat - 0.042).toFixed(4)},${(lon - 0.052).toFixed(4)},${(lat + 0.042).toFixed(4)},${(lon + 0.052).toFixed(4)});node["aeroway"~"gate|parking_position"](${(lat - 0.035).toFixed(4)},${(lon - 0.042).toFixed(4)},${(lat + 0.035).toFixed(4)},${(lon + 0.042).toFixed(4)}););out body;>;out skel qt;`;
-      const osmRes = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': API_USER_AGENT},
-        body: `data=${encodeURIComponent(q)}`,
-        signal: AbortSignal.timeout(6200),
-      });
-      if (osmRes.ok) {
-        const json = (await osmRes.json()) as {
-          elements?: Array<{
-            type: string;
-            id: number;
-            lat?: number;
-            lon?: number;
-            nodes?: number[];
-            tags?: Record<string, string>;
-          }>;
-        };
-        const nodes = new Map<number, [number, number]>();
-        for (const el of json.elements ?? []) {
-          if (el.type === 'node' && el.lat !== undefined && el.lon !== undefined) {
-            nodes.set(el.id, [el.lat, el.lon]);
-            if (el.tags?.aeroway === 'gate' || el.tags?.aeroway === 'parking_position') {
-              const ref = el.tags.ref || el.tags.name;
-              if (ref) gates.push({id: `g-${el.id}`, ref, lat: el.lat, lon: el.lon});
+    const overpassMirrors = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+    ];
+
+    const osmPromise = (async () => {
+      const q = `[out:json][timeout:8];(way["aeroway"~"runway|taxiway|taxilane|apron"](${(lat - 0.065).toFixed(4)},${(lon - 0.085).toFixed(4)},${(lat + 0.065).toFixed(4)},${(lon + 0.085).toFixed(4)});node["aeroway"~"gate|parking_position|holding_position"](${(lat - 0.055).toFixed(4)},${(lon - 0.075).toFixed(4)},${(lat + 0.055).toFixed(4)},${(lon + 0.075).toFixed(4)}););out body;>;out skel qt;`;
+      for (const endpoint of overpassMirrors) {
+        try {
+          const osmRes = await fetch(endpoint, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': API_USER_AGENT},
+            body: `data=${encodeURIComponent(q)}`,
+            signal: AbortSignal.timeout(7000),
+          });
+          if (!osmRes.ok) continue;
+          const json = (await osmRes.json()) as {
+            elements?: Array<{
+              type: string;
+              id: number;
+              lat?: number;
+              lon?: number;
+              nodes?: number[];
+              tags?: Record<string, string>;
+            }>;
+          };
+          const nodes = new Map<number, [number, number]>();
+          for (const el of json.elements ?? []) {
+            if (el.type === 'node' && el.lat !== undefined && el.lon !== undefined) {
+              nodes.set(el.id, [el.lat, el.lon]);
+              if (el.tags?.aeroway === 'gate' || el.tags?.aeroway === 'parking_position') {
+                const ref = el.tags.ref || el.tags.name;
+                if (ref) gates.push({id: `g-${el.id}`, ref, lat: el.lat, lon: el.lon});
+              }
             }
           }
-        }
-        for (const el of json.elements ?? []) {
-          if (el.type !== 'way' || !Array.isArray(el.nodes)) continue;
-          const coords = el.nodes.map((nid) => nodes.get(nid)).filter((c): c is [number, number] => Boolean(c));
-          if (coords.length < 2) continue;
-          const kind = el.tags?.aeroway;
-          if (kind === 'apron') {
-            if (coords.length >= 3) aprons.push(coords);
-          } else if (kind === 'runway') {
-            const widthM = Number.parseFloat(el.tags?.width ?? '45') || 45;
-            runways.push({id: `rwy-${el.id}`, kind: 'runway', ref: el.tags?.ref, widthM, coords});
-          } else if (kind === 'taxiway' || kind === 'taxilane') {
-            const widthM = Number.parseFloat(el.tags?.width ?? '22') || 22;
-            taxiways.push({id: `twy-${el.id}`, kind: 'taxiway', ref: el.tags?.ref, widthM, coords});
+          for (const el of json.elements ?? []) {
+            if (el.type !== 'way' || !Array.isArray(el.nodes)) continue;
+            const coords = el.nodes.map((nid) => nodes.get(nid)).filter((c): c is [number, number] => Boolean(c));
+            if (coords.length < 2) continue;
+            const kind = el.tags?.aeroway;
+            if (kind === 'apron') {
+              if (coords.length >= 3) aprons.push(coords);
+            } else if (kind === 'runway') {
+              const widthM = Number.parseFloat(el.tags?.width ?? '45') || 45;
+              osmRunways.push({id: `rwy-${el.id}`, kind: 'runway', ref: el.tags?.ref, widthM, coords});
+            } else if (kind === 'taxiway' || kind === 'taxilane') {
+              const widthM = Number.parseFloat(el.tags?.width ?? '22') || 22;
+              taxiways.push({
+                id: `twy-${el.id}`,
+                kind: 'taxiway',
+                ref: el.tags?.ref || el.tags?.name,
+                widthM,
+                coords,
+              });
+            }
           }
+          if (osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0) break;
+        } catch {
+          // try next Overpass mirror
         }
       }
-    } catch {
-      // Fallback to catalog runways below
+    })();
+
+    const aipMapPromise = getGlobalRunwaysByAirport();
+    await Promise.all([osmPromise, aipMapPromise]);
+    const aipMap = await aipMapPromise;
+
+    const lookupIdents = [catalog?.icao, icao].filter(Boolean) as string[];
+    let aipRunways: AipRunwayEntry[] = [];
+    for (const ident of lookupIdents) {
+      const found = aipMap.get(ident);
+      if (found && found.length > 0) {
+        aipRunways = found;
+        break;
+      }
+    }
+
+    // Authoritative AIP runway coordinates ensure exact alignment with actual touchdown locations
+    const runways: TaxiwaySegment[] = [];
+    if (aipRunways.length > 0) {
+      aipRunways.forEach((r, idx) => {
+        const ref = r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined;
+        runways.push({
+          id: `aip-rwy-${r.airportIdent}-${idx}`,
+          kind: 'runway',
+          ref,
+          widthM: r.widthM,
+          coords: [
+            [r.leLat, r.leLon],
+            [r.heLat, r.heLon],
+          ],
+        });
+      });
+      // Append any distinct Overpass runways far from AIP entries (e.g. brand-new third runway)
+      for (const osm of osmRunways) {
+        const oMidLat = (osm.coords[0][0] + osm.coords[osm.coords.length - 1][0]) * 0.5;
+        const oMidLon = (osm.coords[0][1] + osm.coords[osm.coords.length - 1][1]) * 0.5;
+        const alreadyCovered = runways.some((ar) => {
+          const aMidLat = (ar.coords[0][0] + ar.coords[1][0]) * 0.5;
+          const aMidLon = (ar.coords[0][1] + ar.coords[1][1]) * 0.5;
+          return Math.hypot(oMidLat - aMidLat, oMidLon - aMidLon) < 0.0025;
+        });
+        if (!alreadyCovered) runways.push(osm);
+      }
+    } else if (osmRunways.length > 0) {
+      runways.push(...osmRunways);
     }
 
     if (runways.length === 0 && catalog) {
@@ -1781,7 +2186,6 @@ export function createApiRouter(): express.Router {
           coords: [p1, p2],
         });
 
-        // Parallel taxiway + exit links for monochromatic surface chart
         const perpLat = -Math.sin(rad) * 0.0022;
         const perpLon = (Math.cos(rad) * 0.0022) / cosLat;
         const twyRef = String.fromCharCode(65 + (idx % 6));
@@ -1830,8 +2234,8 @@ export function createApiRouter(): express.Router {
       aprons,
       runways,
       taxiways,
-      gates: gates.slice(0, 80),
-      source: taxiways.length > 0 || aprons.length > 0 ? 'osm-overpass' : 'catalog',
+      gates: gates.slice(0, 100),
+      source: aipRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 ? 'osm-overpass' : 'catalog',
     };
     surfaceCache.set(cacheKey, {ts: Date.now(), data: result});
     res.json(result);

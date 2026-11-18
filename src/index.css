@@ -166,11 +166,80 @@ html:not(.dark) .leaflet-control-attribution a {
 .skydeck-plane-label,
 .skydeck-airport-label,
 .skydeck-runway-num,
-.skydeck-taxi-badge {
+.skydeck-taxi-badge,
+.skydeck-approach-badge,
+.skydeck-rabbit-icon {
   background: transparent !important;
   border: none !important;
   box-shadow: none !important;
   padding: 0 !important;
+}
+
+@keyframes skydeck-rabbit {
+  0%, 100% {
+    opacity: 0.2;
+    transform: scale(0.75);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1.45);
+    box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.95), 0 0 14px 4px rgba(56, 189, 248, 0.75);
+  }
+  38% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+}
+
+.skydeck-rabbit-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 1px solid #38bdf8;
+  animation: skydeck-rabbit 1.05s linear infinite;
+}
+
+@keyframes skydeck-emerg-pulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.7);
+    opacity: 0.95;
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(1.85);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.85);
+    opacity: 0;
+  }
+}
+
+.skydeck-emerg-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 9999px;
+  border: 2px solid #ef4444;
+  background: rgba(239, 68, 68, 0.14);
+  pointer-events: none;
+  animation: skydeck-emerg-pulse 1.35s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.skydeck-mobile-map .leaflet-top.leaflet-right {
+  top: 64px !important;
+  right: 8px !important;
+}
+
+.skydeck-mobile-map .leaflet-control-zoom a {
+  width: 38px !important;
+  height: 38px !important;
+  line-height: 38px !important;
+  font-size: 18px !important;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 ::-webkit-scrollbar {

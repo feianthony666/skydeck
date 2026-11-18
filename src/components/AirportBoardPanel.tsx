@@ -1,9 +1,20 @@
-import {AlertTriangle, ArrowDownLeft, ArrowUpRight, Clock, Filter, Plane, X} from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Ban,
+  Clock,
+  Filter,
+  Plane,
+  Search,
+  X,
+} from 'lucide-react';
 import React, {useMemo, useState} from 'react';
 import type {AirportBoardFlight, AirportBoardResponse, AirportWeather} from '../types/aviation';
 import {Badge} from './ui/badge';
 import {Button} from './ui/button';
 import {Card, CardContent, CardHeader, CardTitle} from './ui/card';
+import {Input} from './ui/input';
 import {Separator} from './ui/separator';
 import {TabsList, TabsTrigger} from './ui/tabs';
 
@@ -131,13 +142,44 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
   onClose,
 }) => {
   const [boardTab, setBoardTab] = useState<'departures' | 'arrivals'>('departures');
-  const [onlyDelayedInList, setOnlyDelayedInList] = useState(false);
+  const [listStatusFilter, setListStatusFilter] = useState<'all' | 'delayed' | 'cancelled'>('all');
+  const [boardSearch, setBoardSearch] = useState('');
+
+  const isRowCancelled = (item: AirportBoardFlight) =>
+    Boolean(item.isCancelled || /cancel/i.test(item.statusText) || item.statusColor === 'red');
+
+  const rawTabRows = useMemo(
+    () => (boardTab === 'departures' ? (board?.departures ?? []) : (board?.arrivals ?? [])),
+    [board, boardTab],
+  );
 
   const listItems = useMemo(() => {
-    const raw = boardTab === 'departures' ? (board?.departures ?? []) : (board?.arrivals ?? []);
-    if (!onlyDelayedInList) return raw;
-    return raw.filter((item) => item.isDelayed);
-  }, [board, boardTab, onlyDelayedInList]);
+    const q = boardSearch.trim().toUpperCase();
+    return rawTabRows.filter((item) => {
+      if (listStatusFilter === 'delayed' && !item.isDelayed) return false;
+      if (listStatusFilter === 'cancelled' && !isRowCancelled(item)) return false;
+      if (!q) return true;
+      const peerCode = boardTab === 'departures' ? item.destinationIata : item.originIata;
+      const peerName = boardTab === 'departures' ? item.destinationName : item.originName;
+      return (
+        item.flightNumber.toUpperCase().includes(q) ||
+        item.callsign.toUpperCase().includes(q) ||
+        peerCode.toUpperCase().includes(q) ||
+        peerName.toUpperCase().includes(q) ||
+        item.airlineName.toUpperCase().includes(q) ||
+        item.registration.toUpperCase().includes(q) ||
+        item.aircraftCode.toUpperCase().includes(q) ||
+        (item.terminal ?? '').toUpperCase().includes(q) ||
+        (item.gate ?? '').toUpperCase().includes(q) ||
+        item.statusText.toUpperCase().includes(q)
+      );
+    });
+  }, [rawTabRows, listStatusFilter, boardSearch, boardTab]);
+
+  const cancelledTabCount = useMemo(
+    () => rawTabRows.filter((f) => isRowCancelled(f)).length,
+    [rawTabRows],
+  );
 
   const delayedTotalCount = useMemo(() => {
     const all = [...(board?.departures ?? []), ...(board?.arrivals ?? [])];
@@ -349,14 +391,50 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                 </TabsTrigger>
               </TabsList>
 
-              <Button
-                size="sm"
-                variant={onlyDelayedInList ? 'destructive' : 'outline'}
-                onClick={() => setOnlyDelayedInList((v) => !v)}
-              >
-                <AlertTriangle className="w-3 h-3" />
-                Delayed
-              </Button>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant={listStatusFilter === 'delayed' ? 'destructive' : 'outline'}
+                  onClick={() =>
+                    setListStatusFilter((prev) => (prev === 'delayed' ? 'all' : 'delayed'))
+                  }
+                >
+                  <AlertTriangle className="w-3 h-3" />
+                  Delayed
+                </Button>
+                <Button
+                  size="sm"
+                  variant={listStatusFilter === 'cancelled' ? 'destructive' : 'outline'}
+                  onClick={() =>
+                    setListStatusFilter((prev) => (prev === 'cancelled' ? 'all' : 'cancelled'))
+                  }
+                >
+                  <Ban className="w-3 h-3" />
+                  Cancelled ({cancelledTabCount})
+                </Button>
+              </div>
+            </div>
+
+            {/* Live Search Bar for Departures / Arrivals / Cancelled Flights */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <Input
+                value={boardSearch}
+                onChange={(e) => setBoardSearch(e.target.value)}
+                placeholder={`Search ${boardTab} by flight, airport, reg, gate, or "cancelled"`}
+                aria-label="Search airport board flights"
+                className="h-8 pl-8 pr-8 text-xs"
+              />
+              {boardSearch && (
+                <button
+                  type="button"
+                  onClick={() => setBoardSearch('')}
+                  aria-label="Clear board search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           </div>
 
@@ -368,8 +446,8 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
               </div>
             ) : listItems.length === 0 ? (
               <div className="py-8 text-center text-xs text-muted-foreground">
-                No {onlyDelayedInList ? 'delayed ' : ''}
-                {boardTab} matched right now.
+                No {listStatusFilter !== 'all' ? `${listStatusFilter} ` : ''}
+                {boardTab} matched{boardSearch ? ` "${boardSearch}"` : ''} right now.
               </div>
             ) : (
               listItems.map((item) => {
