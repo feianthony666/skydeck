@@ -627,81 +627,12 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
     flightPollCycle++;
     const providers: ProviderStatus[] = [];
 
-    // 1. Direct native-CORS OpenSky fetch in parallel with CORS-relayed feeds
-    const openSkyPromise = (async (): Promise<LiveFlight[]> => {
-      const t0 = Date.now();
-      try {
-        const url = `https://opensky-network.org/api/states/all?lamin=${osMinLat.toFixed(2)}&lomin=${osMinLon.toFixed(2)}&lamax=${osMaxLat.toFixed(2)}&lomax=${osMaxLon.toFixed(2)}`;
-        const res = await fetch(url, {signal: AbortSignal.timeout(13000)});
-        if (!res.ok) {
-          providers.push({
-            provider: 'opensky',
-            ok: false,
-            count: 0,
-            latencyMs: Date.now() - t0,
-            note: `HTTP ${res.status}`,
-          });
-          return [];
-        }
-        const json = (await res.json()) as {states?: Array<unknown[]>; time?: number};
-        const nowSec = json.time ?? Math.floor(Date.now() / 1000);
-        const list: LiveFlight[] = [];
-        for (const s of (json.states ?? []).slice(0, 1200)) {
-          const lat = Number(s[6]);
-          const lon = Number(s[5]);
-          if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-          const icao24 = String(s[0] ?? '').toUpperCase();
-          const callsign = String(s[1] ?? icao24).trim().toUpperCase();
-          const altM = Number(s[7] ?? s[13] ?? 0);
-          const velMs = Number(s[9] ?? 0);
-          const vrateMs = Number(s[11] ?? 0);
-          list.push({
-            id: icao24,
-            icao24,
-            callsign: callsign || icao24,
-            flightNumber: callsign || icao24,
-            registration: '',
-            airlineIcao: airlineIcaoFromCallsign(callsign),
-            airlineName: airlineIcaoFromCallsign(callsign),
-            aircraftType: 'A320',
-            lat,
-            lon,
-            altitudeFt: Math.max(0, Math.round(altM * 3.28084)),
-            groundSpeedKts: Math.max(0, Math.round(velMs * 1.94384)),
-            trueTrackDeg: Math.round(Number(s[10] ?? 0)),
-            verticalRateFpm: Math.round(vrateMs * 196.85),
-            onGround: Boolean(s[8]),
-            squawk: s[14] ? String(s[14]) : '',
-            origin: '',
-            destination: '',
-            lastContactEpoch: Number(s[4] ?? s[3] ?? nowSec),
-            source: 'opensky',
-            isEstimated: false,
-            uncertaintyNm: 0,
-          });
-        }
-        providers.push({
-          provider: 'opensky',
-          ok: true,
-          count: list.length,
-          latencyMs: Date.now() - t0,
-        });
-        return list;
-      } catch (err) {
-        providers.push({
-          provider: 'opensky',
-          ok: false,
-          count: 0,
-          latencyMs: Date.now() - t0,
-          note: err instanceof Error ? err.message : 'Timeout',
-        });
-        return [];
-      }
-    })();
+    // OpenSky is not browser-CORS compatible and was rate-limited on GitHub Pages.
+    // It is intentionally skipped in static hosting mode.
+    const openSkyPromise = Promise.resolve([] as LiveFlight[]);
 
     // 2. CORS-Relayed Waterfall / Parallel via Cloudflare Worker (FR24 gliders=1 + Military + adsb.lol + adsb.fi)
     const relayPromise = (async (): Promise<LiveFlight[]> => {
-      const hasWorker = Boolean(getCloudflareWorkerUrl());
       const makeFr24Url = (bMinLat: number, bMaxLat: number, bMinLon: number, bMaxLon: number) =>
         `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${bMaxLat.toFixed(3)},${bMinLat.toFixed(3)},${bMinLon.toFixed(3)},${bMaxLon.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
       const fr24Url = makeFr24Url(frMinLat, frMaxLat, frMinLon, frMaxLon);
@@ -709,6 +640,53 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
       const milUrl = `https://api.adsb.lol/v2/mil`;
       const laddUrl = `https://api.adsb.lol/v2/ladd`;
       const fiUrl = `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${radiusNm}`;
+      const directOut: LiveFlight[] = [];
+
+      const directFetches = await Promise.allSettled([
+        fetch(lolUrl, {signal: AbortSignal.timeout(8000)}),
+        fetch(fiUrl, {signal: AbortSignal.timeout(8000)}),
+        radiusNm <= 180 ? fetch(milUrl, {signal: AbortSignal.timeout(7000)}) : Promise.resolve(null),
+        radiusNm <= 180 ? fetch(laddUrl, {signal: AbortSignal.timeout(7000)}) : Promise.resolve(null),
+      ]);
+
+      const parseDirectJson = async (item: PromiseSettledResult<Response | null>, kind: 'lol' | 'fi' | 'mil' | 'ladd') => {
+        if (item.status !== 'fulfilled' || !item.value?.ok) return;
+        const t0 = Date.now();
+        try {
+          const json = await item.value.json() as
+            | {ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}
+            | null;
+          const rows = kind === 'fi' ? (json?.aircraft ?? []) : (json?.ac ?? []);
+          if (rows.length === 0) return;
+          const parsed = parseAdsbExchangeList(
+            rows,
+            kind === 'fi' ? 'adsb.fi' : 'adsb.lol',
+            Math.floor((json?.now ?? Date.now()) / 1000),
+            kind === 'mil' ? 1 : kind === 'ladd' ? 8 : 0,
+          );
+          if (parsed.length > 0) {
+            directOut.push(...parsed);
+            providers.push({
+              provider: kind === 'mil' ? 'adsb.lol-mil' : kind === 'ladd' ? 'adsb.lol-ladd' : kind,
+              ok: true,
+              count: parsed.length,
+              latencyMs: Date.now() - t0,
+            });
+          }
+        } catch {
+          // Provider payload may be transiently unavailable.
+        }
+      };
+
+      await Promise.all([
+        parseDirectJson(directFetches[0], 'lol'),
+        parseDirectJson(directFetches[1], 'fi'),
+        parseDirectJson(directFetches[2], 'mil'),
+        parseDirectJson(directFetches[3], 'ladd'),
+      ]);
+      if (directOut.length > 0) return directOut;
+
+      const hasWorker = Boolean(getCloudflareWorkerUrl());
 
       if (hasWorker) {
         const t0 = Date.now();

@@ -240,7 +240,7 @@ export default function App() {
   useEffect(() => {
     const id = window.setInterval(() => {
       setNowEpochSec(Math.floor(Date.now() / 1000));
-    }, 2000);
+    }, 5000);
     return () => clearInterval(id);
   }, []);
 
@@ -493,16 +493,17 @@ export default function App() {
   const fetchingFlightsRef = useRef(false);
 
   useEffect(() => {
+    const shouldPoll = () => !document.hidden && navigator.onLine;
     setFlightsLoading(true);
     fetchLiveFlights(activeRegion.bounds, activeRegion.id);
     fetchAirportsInView(activeRegion.bounds, activeRegion.zoom);
     const id = window.setInterval(() => {
-      if (fetchingFlightsRef.current) return;
+      if (!shouldPoll() || fetchingFlightsRef.current) return;
       fetchingFlightsRef.current = true;
       void fetchLiveFlights(boundsRef.current, activeRegion.id).finally(() => {
         fetchingFlightsRef.current = false;
       });
-    }, 6000);
+    }, 15000);
     return () => clearInterval(id);
   }, [activeRegion, fetchLiveFlights, fetchAirportsInView]);
 

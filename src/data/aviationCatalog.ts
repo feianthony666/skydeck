@@ -42,7 +42,7 @@ export interface AirlineLivery {
 export interface AircraftGeometrySpec {
   code: string;
   name: string;
-  category: 'widebody' | 'narrowbody' | 'regional';
+  category: 'widebody' | 'narrowbody' | 'regional' | 'turboprop' | 'military' | 'business';
   lengthScale: number;
   wingspanScale: number;
   fuselageRadius: number;
@@ -606,6 +606,15 @@ export function resolveAircraftSpec(typeCode: string): AircraftGeometrySpec {
   }
   if (/^(ARJ|C909|CRJ|E17|E19|ERJ)/.test(t)) {
     return {code: t, name: t.startsWith('ARJ') || t.startsWith('C909') ? 'COMAC ARJ21' : t, category: 'regional', lengthScale: 0.82, wingspanScale: 0.84, fuselageRadius: 0.27, engines: 2, winglets: true, tTail: /ARJ|C909|CRJ/.test(t)};
+  }
+  if (/^(AT4|AT7|DH|DHC|SB2|SF34|JS32|JS41)/.test(t)) {
+    return {code: t, name: t, category: 'turboprop', lengthScale: 0.78, wingspanScale: 0.82, fuselageRadius: 0.25, engines: 2, winglets: false};
+  }
+  if (/^(C1|C17|C5|C130|H|P3|T|F)/.test(t)) {
+    return {code: t, name: t, category: 'military', lengthScale: 1.12, wingspanScale: 1.18, fuselageRadius: 0.42, engines: 4, winglets: false};
+  }
+  if (/^(G|LJ|C5|C5|C7|BE|PA|TBM|PC12|SR)/.test(t)) {
+    return {code: t, name: t, category: 'business', lengthScale: 0.68, wingspanScale: 0.68, fuselageRadius: 0.22, engines: 2, winglets: true};
   }
   return {code: t, name: t, category: 'narrowbody', lengthScale: 1.0, wingspanScale: 1.0, fuselageRadius: 0.34, engines: 2, winglets: true};
 }

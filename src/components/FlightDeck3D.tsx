@@ -245,6 +245,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
 
     let frameId = 0;
     let lastTime = performance.now();
+    let lastRenderTime = 0;
     let avionicsTimer = 0;
     let disposed = false;
 
@@ -268,6 +269,16 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     const tick = () => {
       if (disposed) return;
       const now = performance.now();
+      if (document.hidden) {
+        lastTime = now;
+        frameId = window.setTimeout(tick, 500);
+        return;
+      }
+      if (!isSoftwareGl && now - lastRenderTime < 1000 / 30) {
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
+      lastRenderTime = now;
       const dt = Math.min(0.1, (now - lastTime) / 1000);
       lastTime = now;
 
