@@ -4,6 +4,8 @@ import {AIRPORT_CATALOG} from '../src/data/aviationCatalog';
 import type {
   AcarsMessage,
   AircraftPhoto,
+  AirfieldPolygonFeature,
+  AirfieldStandFeature,
   AirfieldSurfaceData,
   AirfieldSurfaceGate,
   AirportBoardFlight,
@@ -22,6 +24,13 @@ import type {
   TaxiwaySegment,
   TrailPoint,
 } from '../src/types/aviation';
+import {
+  buildOverpassAirfieldQuery,
+  GLOBAL_OVERPASS_MIRRORS,
+  mergeAndAlignRunways,
+  parseOverpassAirfieldElements,
+  type OverpassElement,
+} from '../src/utils/airfieldGeometry';
 
 const BROWSER_HEADERS = {
   'User-Agent':
@@ -109,7 +118,7 @@ async function getGlobalAirports(): Promise<AirportMarker[]> {
   try {
     const res = await fetch('https://davidmegginson.github.io/ourairports-data/airports.csv', {
       headers: {'User-Agent': API_USER_AGENT},
-      signal: AbortSignal.timeout(7000),
+      signal: AbortSignal.timeout(4500),
     });
     if (res.ok) {
       const text = await res.text();
@@ -189,15 +198,18 @@ async function getGlobalAirports(): Promise<AirportMarker[]> {
 }
 
 async function getGlobalRunwaysByAirport(): Promise<Map<string, AipRunwayEntry[]>> {
-  if (globalRunwaysCache && Date.now() - globalRunwaysCache.ts < 86400000) {
-    return globalRunwaysCache.byAirport;
+  if (globalRunwaysCache) {
+    const ttl = globalRunwaysCache.byAirport.size > 0 ? 86400000 : 300000;
+    if (Date.now() - globalRunwaysCache.ts < ttl) {
+      return globalRunwaysCache.byAirport;
+    }
   }
 
   const byAirport = new Map<string, AipRunwayEntry[]>();
   try {
     const res = await fetch('https://davidmegginson.github.io/ourairports-data/runways.csv', {
       headers: {'User-Agent': API_USER_AGENT},
-      signal: AbortSignal.timeout(9000),
+      signal: AbortSignal.timeout(4500),
     });
     if (res.ok) {
       const text = await res.text();
@@ -261,9 +273,7 @@ async function getGlobalRunwaysByAirport(): Promise<Map<string, AipRunwayEntry[]
     // fallback silently
   }
 
-  if (byAirport.size > 0) {
-    globalRunwaysCache = {ts: Date.now(), byAirport};
-  }
+  globalRunwaysCache = {ts: Date.now(), byAirport};
   return byAirport;
 }
 
@@ -2075,7 +2085,7 @@ export function createApiRouter(): express.Router {
     res.json({airports: inBox, maxTier, totalInViewport: inBox.length});
   });
 
-  // 2d. Detailed Vectorized Airfield Surface (AIP Runways CSV + Overpass Taxiways, Aprons & Gates)
+  // 2d. Detailed Vectorized Airfield Surface (OSM Terminals, Aprons, Stands & Taxiways + Collinear Runway Alignment)
   router.get('/surface', async (req, res) => {
     const rawCode = String(req.query.icao ?? '').trim().toUpperCase();
     const catalog = AIRPORT_CATALOG.find((a) => a.icao === rawCode || a.iata === rawCode);
@@ -2105,83 +2115,57 @@ export function createApiRouter(): express.Router {
     const cacheKey = icao || `${lat.toFixed(3)},${lon.toFixed(3)}`;
     const cached = surfaceCache.get(cacheKey);
     const cacheTtlMs =
-      cached && (cached.data.taxiways.length > 0 || cached.data.aprons.length > 0)
+      cached && cached.data.source === 'osm-overpass' && cached.data.taxiways.length > 0
         ? 86400000
-        : 300000;
+        : 45000;
     if (cached && Date.now() - cached.ts < cacheTtlMs) {
       res.json(cached.data);
       return;
     }
 
-    const aprons: Array<Array<[number, number]>> = [];
-    const osmRunways: TaxiwaySegment[] = [];
-    const taxiways: TaxiwaySegment[] = [];
-    const gates: AirfieldSurfaceGate[] = [];
-
-    const overpassMirrors = [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-    ];
+    let aprons: Array<Array<[number, number]>> = [];
+    let labeledAprons: AirfieldPolygonFeature[] = [];
+    let terminals: AirfieldPolygonFeature[] = [];
+    let stands: AirfieldStandFeature[] = [];
+    let osmRunways: TaxiwaySegment[] = [];
+    let taxiways: TaxiwaySegment[] = [];
+    let gates: AirfieldSurfaceGate[] = [];
+    let osmSucceeded = false;
 
     const osmPromise = (async () => {
-      const q = `[out:json][timeout:8];(way["aeroway"~"runway|taxiway|taxilane|apron"](${(lat - 0.075).toFixed(4)},${(lon - 0.095).toFixed(4)},${(lat + 0.075).toFixed(4)},${(lon + 0.095).toFixed(4)});node["aeroway"~"gate|parking_position|holding_position"](${(lat - 0.06).toFixed(4)},${(lon - 0.08).toFixed(4)},${(lat + 0.06).toFixed(4)},${(lon + 0.08).toFixed(4)}););out body;>;out skel qt;`;
+      const q = buildOverpassAirfieldQuery(lat, lon);
       try {
         const json = await Promise.any(
-          overpassMirrors.map(async (endpoint) => {
+          GLOBAL_OVERPASS_MIRRORS.map(async (endpoint) => {
             const osmRes = await fetch(endpoint, {
               method: 'POST',
-              headers: {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': API_USER_AGENT},
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                Accept: 'application/json',
+                'User-Agent': API_USER_AGENT,
+              },
               body: `data=${encodeURIComponent(q)}`,
-              signal: AbortSignal.timeout(6500),
+              signal: AbortSignal.timeout(10500),
             });
             if (!osmRes.ok) throw new Error(`HTTP ${osmRes.status}`);
-            const parsed = (await osmRes.json()) as {
-              elements?: Array<{
-                type: string;
-                id: number;
-                lat?: number;
-                lon?: number;
-                nodes?: number[];
-                tags?: Record<string, string>;
-              }>;
-            };
-            if (!Array.isArray(parsed.elements)) throw new Error('Invalid Overpass JSON');
+            const parsed = (await osmRes.json()) as {elements?: OverpassElement[]};
+            if (!Array.isArray(parsed.elements) || parsed.elements.length === 0) {
+              throw new Error('Empty Overpass payload');
+            }
             return parsed;
           }),
         );
 
-        const nodes = new Map<number, [number, number]>();
-        for (const el of json.elements ?? []) {
-          if (el.type === 'node' && el.lat !== undefined && el.lon !== undefined) {
-            nodes.set(el.id, [el.lat, el.lon]);
-            if (el.tags?.aeroway === 'gate' || el.tags?.aeroway === 'parking_position') {
-              const ref = el.tags.ref || el.tags.name;
-              if (ref) gates.push({id: `g-${el.id}`, ref, lat: el.lat, lon: el.lon});
-            }
-          }
-        }
-        for (const el of json.elements ?? []) {
-          if (el.type !== 'way' || !Array.isArray(el.nodes)) continue;
-          const coords = el.nodes.map((nid) => nodes.get(nid)).filter((c): c is [number, number] => Boolean(c));
-          if (coords.length < 2) continue;
-          const kind = el.tags?.aeroway;
-          if (kind === 'apron') {
-            if (coords.length >= 3) aprons.push(coords);
-          } else if (kind === 'runway') {
-            const widthM = Number.parseFloat(el.tags?.width ?? '45') || 45;
-            osmRunways.push({id: `rwy-${el.id}`, kind: 'runway', ref: el.tags?.ref, widthM, coords});
-          } else if (kind === 'taxiway' || kind === 'taxilane') {
-            const widthM = Number.parseFloat(el.tags?.width ?? '22') || 22;
-            taxiways.push({
-              id: `twy-${el.id}`,
-              kind: 'taxiway',
-              ref: el.tags?.ref || el.tags?.name,
-              widthM,
-              coords,
-            });
-          }
-        }
+        const parsed = parseOverpassAirfieldElements(json.elements ?? []);
+        osmRunways = parsed.osmRunways;
+        taxiways = parsed.taxiways.slice(0, 2600);
+        aprons = parsed.aprons;
+        labeledAprons = parsed.labeledAprons;
+        terminals = parsed.terminals;
+        stands = parsed.stands;
+        gates = parsed.gates;
+        osmSucceeded =
+          osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
       } catch {
         // fallback to AIP + synthesized airfield layout
       }
@@ -2201,36 +2185,17 @@ export function createApiRouter(): express.Router {
       }
     }
 
-    // Authoritative AIP runway coordinates ensure exact alignment with actual touchdown locations
-    const runways: TaxiwaySegment[] = [];
-    if (aipRunways.length > 0) {
-      aipRunways.forEach((r, idx) => {
-        const ref = r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined;
-        runways.push({
-          id: `aip-rwy-${r.airportIdent}-${idx}`,
-          kind: 'runway',
-          ref,
-          widthM: r.widthM,
-          coords: [
-            [r.leLat, r.leLon],
-            [r.heLat, r.heLon],
-          ],
-        });
-      });
-      // Append any distinct Overpass runways far from AIP entries (e.g. brand-new third runway)
-      for (const osm of osmRunways) {
-        const oMidLat = (osm.coords[0][0] + osm.coords[osm.coords.length - 1][0]) * 0.5;
-        const oMidLon = (osm.coords[0][1] + osm.coords[osm.coords.length - 1][1]) * 0.5;
-        const alreadyCovered = runways.some((ar) => {
-          const aMidLat = (ar.coords[0][0] + ar.coords[1][0]) * 0.5;
-          const aMidLon = (ar.coords[0][1] + ar.coords[1][1]) * 0.5;
-          return Math.hypot(oMidLat - aMidLat, oMidLon - aMidLon) < 0.0025;
-        });
-        if (!alreadyCovered) runways.push(osm);
-      }
-    } else if (osmRunways.length > 0) {
-      runways.push(...osmRunways);
-    }
+    const runways = mergeAndAlignRunways(
+      osmRunways,
+      aipRunways.map((r) => ({
+        ref: r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined,
+        leLat: r.leLat,
+        leLon: r.leLon,
+        heLat: r.heLat,
+        heLon: r.heLon,
+        widthM: r.widthM,
+      })),
+    );
 
     if (runways.length === 0 && catalog) {
       catalog.runways.forEach((r, idx) => {
@@ -2293,27 +2258,37 @@ export function createApiRouter(): express.Router {
       });
     }
 
-    if (aprons.length === 0) {
+    if (aprons.length === 0 && !osmSucceeded) {
       const aLat = catalog?.lat ?? lat;
       const aLon = catalog?.lon ?? lon;
-      aprons.push([
-        [aLat - 0.004, aLon - 0.006],
-        [aLat + 0.004, aLon - 0.006],
-        [aLat + 0.004, aLon + 0.006],
-        [aLat - 0.004, aLon + 0.006],
-      ]);
+      const box: Array<[number, number]> = [
+        [aLat - 0.0025, aLon - 0.0038],
+        [aLat + 0.0025, aLon - 0.0038],
+        [aLat + 0.0025, aLon + 0.0038],
+        [aLat - 0.0025, aLon + 0.0038],
+      ];
+      aprons.push(box);
+      labeledAprons.push({
+        id: 'syn-apron-main',
+        ref: 'MAIN APRON',
+        coords: box,
+        center: [aLat, aLon],
+      });
     }
 
     const result: AirfieldSurfaceData = {
       icao: catalog?.icao ?? icao,
-      iata: catalog?.iata ?? '',
+      iata: catalog?.iata ?? iata,
       lat,
       lon,
       aprons,
+      labeledAprons,
+      terminals,
+      stands,
       runways,
       taxiways,
-      gates: gates.slice(0, 100),
-      source: aipRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 ? 'osm-overpass' : 'catalog',
+      gates,
+      source: osmSucceeded ? 'osm-overpass' : 'catalog',
     };
     surfaceCache.set(cacheKey, {ts: Date.now(), data: result});
     res.json(result);

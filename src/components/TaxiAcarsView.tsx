@@ -176,89 +176,219 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
     if (!layer) return;
     layer.clearLayers();
 
-    const aprons = surfaceData?.aprons ?? [];
-    for (const poly of aprons) {
-      L.polygon(poly, {
-        color: 'rgba(250, 204, 21, 0.25)',
+    const calcBearing = (p1: [number, number], p2: [number, number]) => {
+      const toRad = Math.PI / 180;
+      const lat1 = p1[0] * toRad;
+      const lat2 = p2[0] * toRad;
+      const dLon = (p2[1] - p1[1]) * toRad;
+      const y = Math.sin(dLon) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+      return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+    };
+    const offsetM = (lat: number, lon: number, brg: number, fwdM: number, rightM: number): [number, number] => {
+      const b = (brg * Math.PI) / 180;
+      const nM = Math.cos(b) * fwdM - Math.sin(b) * rightM;
+      const eM = Math.sin(b) * fwdM + Math.cos(b) * rightM;
+      return [lat + nM / 111320, lon + eM / (111320 * Math.cos((lat * Math.PI) / 180))];
+    };
+    const deriveEnds = (ref: string | undefined, brg: number): [string, string] => {
+      if (ref && ref.includes('/')) {
+        const parts = ref.split('/').map((s) => s.trim());
+        if (parts.length === 2 && parts[0] && parts[1]) {
+          const m = parts[0].match(/^(\d{1,2})/);
+          if (m) {
+            const expected = (parseInt(m[1], 10) % 36) * 10;
+            const diff = Math.abs((((brg - expected) + 540) % 360) - 180);
+            if (diff > 90) return [parts[1], parts[0]];
+          }
+          return [parts[0], parts[1]];
+        }
+      }
+      const num = Math.max(1, Math.min(36, Math.round(brg / 10) || 36));
+      const opp = num > 18 ? num - 18 : num + 18;
+      return [String(num).padStart(2, '0'), String(opp).padStart(2, '0')];
+    };
+
+    // 1. Aprons + Names/Numbers
+    const apronItems =
+      surfaceData?.labeledAprons && surfaceData.labeledAprons.length > 0
+        ? surfaceData.labeledAprons
+        : (surfaceData?.aprons ?? []).map((coords, idx) => {
+            let sLat = 0;
+            let sLon = 0;
+            for (const c of coords) {
+              sLat += c[0];
+              sLon += c[1];
+            }
+            return {
+              id: `apron-${idx}`,
+              coords,
+              center: [sLat / Math.max(1, coords.length), sLon / Math.max(1, coords.length)] as [number, number],
+              ref: undefined as string | undefined,
+              name: undefined as string | undefined,
+            };
+          });
+
+    const apronLabelSeen = new Set<string>();
+    let autoApronIdx = 1;
+    for (const ap of apronItems) {
+      if (ap.coords.length < 3) continue;
+      L.polygon(ap.coords, {
+        color: 'rgba(250, 204, 21, 0.3)',
         weight: 0.9,
-        fillColor: theme === 'dark' ? '#0f141e' : '#263244',
-        fillOpacity: theme === 'dark' ? 0.65 : 0.45,
+        fillColor: theme === 'dark' ? '#0f141e' : '#334155',
+        fillOpacity: theme === 'dark' ? 0.62 : 0.45,
         interactive: false,
       }).addTo(layer);
+
+      let minLat = Infinity;
+      let maxLat = -Infinity;
+      let minLon = Infinity;
+      let maxLon = -Infinity;
+      for (const [aLat, aLon] of ap.coords) {
+        if (aLat < minLat) minLat = aLat;
+        if (aLat > maxLat) maxLat = aLat;
+        if (aLon < minLon) minLon = aLon;
+        if (aLon > maxLon) maxLon = aLon;
+      }
+      const span = Math.hypot(maxLat - minLat, maxLon - minLon);
+      const lbl = ap.ref || ap.name || (span >= 0.0022 ? `APRON ${autoApronIdx++}` : '');
+      if (lbl) {
+        const key = `${Math.round(ap.center[0] * 300)}-${Math.round(ap.center[1] * 300)}`;
+        if (!apronLabelSeen.has(key)) {
+          apronLabelSeen.add(key);
+          L.marker(ap.center, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-apron-badge',
+              iconSize: [90, 16],
+              iconAnchor: [45, 8],
+              html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;background:rgba(15,23,42,0.75);border:1px solid rgba(250,204,21,0.35);font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:#FDE68A;white-space:nowrap;">${lbl.slice(0, 18)}</span>`,
+            }),
+          }).addTo(layer);
+        }
+      }
     }
 
+    // 2. Airport Terminals & Concourses
+    const termSeen = new Set<string>();
+    for (const term of surfaceData?.terminals ?? []) {
+      if (term.coords.length < 3) continue;
+      L.polygon(term.coords, {
+        color: theme === 'dark' ? 'rgba(56, 189, 248, 0.65)' : 'rgba(14, 165, 233, 0.85)',
+        weight: 1.3,
+        fillColor: theme === 'dark' ? '#1a2538' : '#3b4a62',
+        fillOpacity: theme === 'dark' ? 0.88 : 0.82,
+        interactive: false,
+      }).addTo(layer);
+      const tLbl = term.name || term.ref;
+      if (tLbl) {
+        const tKey = `${tLbl.toUpperCase()}-${Math.round(term.center[0] * 240)}-${Math.round(term.center[1] * 240)}`;
+        if (!termSeen.has(tKey)) {
+          termSeen.add(tKey);
+          L.marker(term.center, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-term-badge',
+              iconSize: [110, 18],
+              iconAnchor: [55, 9],
+              html: `<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(12,20,34,0.82);border:1px solid rgba(56,189,248,0.45);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#E0F2FE;white-space:nowrap;">${tLbl.slice(0, 22)}</span>`,
+            }),
+          }).addTo(layer);
+        }
+      }
+    }
+
+    // 3. Apron Parking Stand Lead-Ins & Numbered Stands/Gates
+    const standSeen = new Set<string>();
+    for (const st of surfaceData?.stands ?? []) {
+      if (st.coords && st.coords.length >= 2) {
+        L.polyline(st.coords, {
+          color: '#FACC15',
+          weight: 1.1,
+          opacity: 0.62,
+          interactive: false,
+        }).addTo(layer);
+      }
+      if (st.ref) {
+        const sk = `${Math.round(st.lat * 1400)}-${Math.round(st.lon * 1400)}`;
+        if (!standSeen.has(sk)) {
+          standSeen.add(sk);
+          L.marker([st.lat, st.lon], {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-taxi-badge',
+              iconSize: [28, 14],
+              iconAnchor: [14, 7],
+              html: `<span style="display:inline-block;padding:0 3px;border-radius:3px;background:rgba(11,16,27,0.78);border:1px solid rgba(250,204,21,0.38);font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:#FEF08A;white-space:nowrap;">${st.ref}</span>`,
+            }),
+          }).addTo(layer);
+        }
+      }
+    }
+
+    // 4. All Taxiways & Taxilanes
     const taxiways =
       surfaceData && surfaceData.taxiways.length > 0
         ? surfaceData.taxiways
-        : segments.filter((s) => s.kind === 'taxiway');
+        : segments.filter((s) => s.kind === 'taxiway' || s.kind === 'taxilane');
 
     const placedRefs = new Set<string>();
     for (const seg of taxiways) {
       if (seg.coords.length < 2) continue;
+      const isLane = seg.kind === 'taxilane';
       L.polyline(seg.coords, {
-        color: 'rgba(250, 204, 21, 0.32)',
-        weight: 7,
-        opacity: 0.9,
+        color: 'rgba(250, 204, 21, 0.36)',
+        weight: isLane ? 4.8 : 7,
+        opacity: isLane ? 0.68 : 0.9,
         interactive: false,
       }).addTo(layer);
       L.polyline(seg.coords, {
-        color: theme === 'dark' ? '#111622' : '#1e293b',
-        weight: 4.5,
+        color: theme === 'dark' ? '#0b101b' : '#334155',
+        weight: isLane ? 3.2 : 4.5,
         opacity: 0.95,
         interactive: false,
       }).addTo(layer);
       L.polyline(seg.coords, {
         color: '#FACC15',
-        weight: 1,
-        opacity: 0.5,
+        weight: isLane ? 0.8 : 1.05,
+        opacity: isLane ? 0.55 : 0.68,
         interactive: false,
       }).addTo(layer);
 
+      const cleanRef = seg.ref ? seg.ref.replace(/^(taxiway|taxilane|twy)\s+/i, '').trim() : '';
       const mid = seg.coords[Math.floor(seg.coords.length / 2)];
-      if (seg.ref && !placedRefs.has(`${seg.ref}-${mid[0].toFixed(3)}`)) {
-        placedRefs.add(`${seg.ref}-${mid[0].toFixed(3)}`);
-        L.marker(mid, {
-          interactive: false,
-          icon: L.divIcon({
-            className: 'skydeck-taxi-badge',
-            iconSize: [28, 14],
-            iconAnchor: [14, 7],
-            html: `<span style="display:inline-flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:800;color:#FDE047;text-shadow:0 1px 3px rgba(0,0,0,0.95);">${seg.ref}</span>`,
-          }),
-        }).addTo(layer);
+      if (cleanRef) {
+        const badgeKey = `${cleanRef}-${Math.round(mid[0] * 320)}-${Math.round(mid[1] * 320)}`;
+        if (!placedRefs.has(badgeKey)) {
+          placedRefs.add(badgeKey);
+          L.marker(mid, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-taxi-badge',
+              iconSize: [28, 14],
+              iconAnchor: [14, 7],
+              html: `<span style="display:inline-flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:800;color:#FDE047;text-shadow:0 1px 3px rgba(0,0,0,0.95);">${cleanRef}</span>`,
+            }),
+          }).addTo(layer);
+        }
       }
 
-      for (let i = 0; i < seg.coords.length; i += Math.max(1, Math.floor(seg.coords.length / 3))) {
-        L.circleMarker(seg.coords[i], {
-          radius: 1.4,
-          color: '#22c55e',
-          fillColor: '#4ade80',
-          fillOpacity: 0.88,
-          weight: 0,
-          interactive: false,
-        }).addTo(layer);
-        if (i === 0 && seg.coords.length >= 2) {
-          const p0 = seg.coords[0];
-          const p1 = seg.coords[1];
-          const dLat = p1[0] - p0[0];
-          const dLon = p1[1] - p0[1];
-          const len = Math.max(1e-6, Math.hypot(dLat, dLon));
-          const offLat = (-dLon / len) * 0.00011;
-          const offLon = (dLat / len) * 0.00011;
-          for (const sign of [-1, 1]) {
-            L.circleMarker([p0[0] + offLat * sign, p0[1] + offLon * sign], {
-              radius: 1.1,
-              color: '#0ea5e9',
-              fillColor: '#38bdf8',
-              fillOpacity: 0.8,
-              weight: 0,
-              interactive: false,
-            }).addTo(layer);
-          }
+      if (!isLane) {
+        for (let i = 0; i < seg.coords.length; i += Math.max(1, Math.floor(seg.coords.length / 3))) {
+          L.circleMarker(seg.coords[i], {
+            radius: 1.3,
+            color: '#22c55e',
+            fillColor: '#4ade80',
+            fillOpacity: 0.88,
+            weight: 0,
+            interactive: false,
+          }).addTo(layer);
         }
       }
     }
 
+    // 5. Luminous Runways + Dashed Approach + Upright Threshold Numbers
     const runways =
       surfaceData && surfaceData.runways.length > 0
         ? surfaceData.runways
@@ -268,25 +398,44 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
       if (rwy.coords.length < 2) continue;
       const pA = rwy.coords[0];
       const pB = rwy.coords[rwy.coords.length - 1];
-      const dLat = pB[0] - pA[0];
-      const dLon = pB[1] - pA[1];
-      const norm = Math.max(1e-6, Math.hypot(dLat, dLon));
-      const extLat = (dLat / norm) * 0.045;
-      const extLon = (dLon / norm) * 0.045;
+      const brg = calcBearing(pA, pB);
+      const revBrg = (brg + 180) % 360;
+      const [aLbl, bLbl] = deriveEnds(rwy.ref, brg);
 
-      // Dashed |- - - - -| approach paths
-      L.polyline([[pA[0] - extLat, pA[1] - extLon], pA], {
-        color: 'rgba(248, 250, 252, 0.5)',
-        weight: 1.3,
-        dashArray: '6 6',
-        interactive: false,
-      }).addTo(layer);
-      L.polyline([pB, [pB[0] + extLat, pB[1] + extLon]], {
-        color: 'rgba(248, 250, 252, 0.5)',
-        weight: 1.3,
-        dashArray: '6 6',
-        interactive: false,
-      }).addTo(layer);
+      for (const [pt, hdg] of [
+        [pA, brg] as const,
+        [pB, revBrg] as const,
+      ]) {
+        const outBrg = (hdg + 180) % 360;
+        const appEnd = offsetM(pt[0], pt[1], outBrg, 2800, 0);
+        const farEnd = offsetM(pt[0], pt[1], outBrg, 8500, 0);
+        L.polyline([pt, appEnd], {
+          color: 'rgba(255, 255, 255, 0.34)',
+          weight: 5,
+          opacity: 0.9,
+          interactive: false,
+        }).addTo(layer);
+        L.polyline([pt, appEnd], {
+          color: '#FFFFFF',
+          weight: 1.8,
+          opacity: 0.95,
+          interactive: false,
+        }).addTo(layer);
+        L.polyline([appEnd, farEnd], {
+          color: 'rgba(248, 250, 252, 0.52)',
+          weight: 1.3,
+          dashArray: '6 6',
+          interactive: false,
+        }).addTo(layer);
+        L.circleMarker(pt, {
+          radius: 3.4,
+          color: '#ef4444',
+          fillColor: '#f87171',
+          fillOpacity: 0.95,
+          weight: 1,
+          interactive: false,
+        }).addTo(layer);
+      }
 
       L.polyline(rwy.coords, {
         color: 'rgba(255,255,255,0.28)',
@@ -310,42 +459,22 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
         interactive: false,
       }).addTo(layer);
 
-      for (const pt of [pA, pB]) {
-        L.circleMarker(pt, {
-          radius: 3.5,
-          color: '#ef4444',
-          fillColor: '#f87171',
-          fillOpacity: 0.95,
-          weight: 1,
+      const drawNum = (pt: [number, number], endBrg: number, numLbl: string) => {
+        const numPos = offsetM(pt[0], pt[1], endBrg, 88, 0);
+        const normDeg = ((endBrg % 360) + 360) % 360;
+        const uprightDeg = normDeg > 90 && normDeg < 270 ? normDeg - 180 : normDeg;
+        L.marker(numPos, {
           interactive: false,
+          icon: L.divIcon({
+            className: 'skydeck-runway-num',
+            iconSize: [34, 16],
+            iconAnchor: [17, 8],
+            html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:#FFFFFF;text-shadow:0 0 4px #000,0 1px 4px #000;transform:rotate(${Math.round(uprightDeg)}deg);">${numLbl}</span>`,
+          }),
         }).addTo(layer);
-      }
-
-      if (rwy.ref) {
-        const [aLbl, bLbl] = rwy.ref.split('/');
-        if (aLbl) {
-          L.marker(pA, {
-            interactive: false,
-            icon: L.divIcon({
-              className: 'skydeck-runway-num',
-              iconSize: [28, 14],
-              iconAnchor: [14, 7],
-              html: `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:#FFFFFF;text-shadow:0 1px 4px rgba(0,0,0,0.95);">${aLbl.trim()}</span>`,
-            }),
-          }).addTo(layer);
-        }
-        if (bLbl) {
-          L.marker(pB, {
-            interactive: false,
-            icon: L.divIcon({
-              className: 'skydeck-runway-num',
-              iconSize: [28, 14],
-              iconAnchor: [14, 7],
-              html: `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:#FFFFFF;text-shadow:0 1px 4px rgba(0,0,0,0.95);">${bLbl.trim()}</span>`,
-            }),
-          }).addTo(layer);
-        }
-      }
+      };
+      drawNum(pA, brg, aLbl);
+      drawNum(pB, revBrg, bLbl);
     }
   }, [segments, surfaceData, theme]);
 

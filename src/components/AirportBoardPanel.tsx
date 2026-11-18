@@ -153,9 +153,16 @@ interface SchematicTaxiway {
   points: string;
 }
 
+interface SchematicPolygon {
+  id: string;
+  points: string;
+}
+
 interface AirfieldSchematic {
   runways: SchematicRunway[];
   taxiways: SchematicTaxiway[];
+  aprons: SchematicPolygon[];
+  terminals: SchematicPolygon[];
 }
 
 function buildAirfieldSchematic(
@@ -165,10 +172,30 @@ function buildAirfieldSchematic(
   const W = 320;
   const H = 104;
   const padX = 36;
-  const padY = 18;
+  const padY = 16;
 
   if (surface && surface.runways.length > 0) {
-    const allPts = surface.runways.flatMap((r) => r.coords);
+    const rwyPts = surface.runways.flatMap((r) => r.coords);
+    let rLatSum = 0;
+    let rLonSum = 0;
+    for (const [lat, lon] of rwyPts) {
+      rLatSum += lat;
+      rLonSum += lon;
+    }
+    const rLatMid = rLatSum / Math.max(1, rwyPts.length);
+    const rLonMid = rLonSum / Math.max(1, rwyPts.length);
+
+    const nearSurface = (pts: Array<[number, number]>) =>
+      pts.length > 0 && Math.hypot(pts[0][0] - rLatMid, pts[0][1] - rLonMid) < 0.065;
+
+    const nearAprons = (surface.aprons ?? []).filter(nearSurface);
+    const nearTerminals = (surface.terminals ?? []).filter((t) => nearSurface(t.coords));
+    const allPts = [
+      ...rwyPts,
+      ...nearAprons.flat(),
+      ...nearTerminals.flatMap((t) => t.coords),
+    ];
+
     if (allPts.length >= 2) {
       let minLat = Infinity;
       let maxLat = -Infinity;
@@ -193,6 +220,24 @@ function buildAirfieldSchematic(
         y: offY + (maxLat - lat) * scale,
       });
 
+      const toPointsStr = (coords: Array<[number, number]>) =>
+        coords
+          .map((c) => {
+            const p = proj(c);
+            return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+          })
+          .join(' ');
+
+      const aprons: SchematicPolygon[] = nearAprons.slice(0, 40).map((coords, idx) => ({
+        id: `ap-${idx}`,
+        points: toPointsStr(coords),
+      }));
+
+      const terminals: SchematicPolygon[] = nearTerminals.slice(0, 28).map((t) => ({
+        id: t.id,
+        points: toPointsStr(t.coords),
+      }));
+
       const runways = surface.runways.slice(0, 8).map((r) => {
         const a = proj(r.coords[0]);
         const b = proj(r.coords[r.coords.length - 1]);
@@ -209,28 +254,25 @@ function buildAirfieldSchematic(
       });
 
       const taxiways = surface.taxiways
-        .slice(0, 90)
+        .slice(0, 180)
         .filter((t) => t.coords.length >= 2)
         .map((t) => ({
           id: t.id,
-          points: t.coords
-            .map((c) => {
-              const p = proj(c);
-              return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
-            })
-            .join(' '),
+          points: toPointsStr(t.coords),
         }));
 
-      return {runways, taxiways};
+      return {runways, taxiways, aprons, terminals};
     }
   }
 
   const cat = AIRPORT_CATALOG.find((a) => a.icao.toUpperCase() === icao.toUpperCase());
   const rwys = cat?.runways ?? [];
-  if (rwys.length === 0) return {runways: [], taxiways: []};
+  if (rwys.length === 0) return {runways: [], taxiways: [], aprons: [], terminals: []};
 
   return {
     taxiways: [],
+    aprons: [],
+    terminals: [],
     runways: rwys.slice(0, 4).map((r, idx) => {
       const rad = ((r.headingDeg - 90) * Math.PI) / 180;
       const halfLen = 42;
@@ -433,12 +475,32 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                     <line x1="160" y1="0" x2="160" y2="104" />
                     <line x1="240" y1="0" x2="240" y2="104" />
                   </g>
+                  {airfieldSchematic.aprons.map((ap) => (
+                    <polygon
+                      key={ap.id}
+                      points={ap.points}
+                      fill="#131b2b"
+                      fillOpacity="0.85"
+                      stroke="rgba(250, 204, 21, 0.25)"
+                      strokeWidth="0.6"
+                    />
+                  ))}
+                  {airfieldSchematic.terminals.map((term) => (
+                    <polygon
+                      key={term.id}
+                      points={term.points}
+                      fill="#1e2d44"
+                      fillOpacity="0.95"
+                      stroke="rgba(56, 189, 248, 0.6)"
+                      strokeWidth="0.8"
+                    />
+                  ))}
                   {airfieldSchematic.taxiways.map((twy) => (
                     <polyline
                       key={twy.id}
                       points={twy.points}
                       fill="none"
-                      stroke="rgba(250, 204, 21, 0.38)"
+                      stroke="rgba(250, 204, 21, 0.42)"
                       strokeWidth="0.9"
                       strokeLinecap="round"
                       strokeLinejoin="round"

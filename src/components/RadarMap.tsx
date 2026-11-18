@@ -643,7 +643,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const [viewportTick, setViewportTick] = useState(0);
   const [mapZoom, setMapZoom] = useState(activeRegion.zoom);
   const [surfaceList, setSurfaceList] = useState<AirfieldSurfaceData[]>([]);
-  const surfaceMemCacheRef = useRef<Map<string, AirfieldSurfaceData>>(new Map());
+  const surfaceMemCacheRef = useRef<Map<string, {ts: number; data: AirfieldSurfaceData}>>(new Map());
   const lastSurfaceBatchKeyRef = useRef<string>('');
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -1204,17 +1204,25 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           ];
 
     const batchKey = targets.map((t) => t.key).join('|');
-    if (batchKey === lastSurfaceBatchKeyRef.current) return;
-    lastSurfaceBatchKeyRef.current = batchKey;
-
     const cache = surfaceMemCacheRef.current;
+    const nowMs = Date.now();
+    const isFresh = (entry?: {ts: number; data: AirfieldSurfaceData}) => {
+      if (!entry) return false;
+      const ttl = entry.data.source === 'osm-overpass' && entry.data.taxiways.length > 0 ? 86400000 : 45000;
+      return nowMs - entry.ts < ttl;
+    };
+
     const immediate: AirfieldSurfaceData[] = [];
     const missing: typeof targets = [];
     for (const t of targets) {
       const hit = cache.get(t.key);
-      if (hit) immediate.push(hit);
+      if (hit && isFresh(hit)) immediate.push(hit.data);
       else missing.push(t);
     }
+
+    if (batchKey === lastSurfaceBatchKeyRef.current && missing.length === 0) return;
+    lastSurfaceBatchKeyRef.current = batchKey;
+
     if (immediate.length > 0) {
       setSurfaceList(immediate);
     }
@@ -1230,7 +1238,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         });
         return apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`, ac.signal)
           .then((data) => {
-            if (data) cache.set(t.key, data);
+            if (data) cache.set(t.key, {ts: Date.now(), data});
             return data;
           })
           .catch(() => null);
@@ -1240,7 +1248,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       const merged: AirfieldSurfaceData[] = [];
       for (const t of targets) {
         const hit = cache.get(t.key);
-        if (hit) merged.push(hit);
+        if (hit) merged.push(hit.data);
       }
       if (merged.length > 0 || fetched.some(Boolean)) {
         setSurfaceList(merged);
@@ -1252,359 +1260,493 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     };
   }, [mapZoom, viewportTick, unifiedAirports, selectedAirportIcao]);
 
-  // Render FlightDeck-Precision Illuminated Airfields across ALL airports: Gold-trimmed Taxiways, Luminous White Runways, Red Threshold Clusters & Dashed Approach Guides
+  // Render FlightDeck-Precision Illuminated Airfields across ALL airports:
+  // Terminals, Numbered/Named Aprons, Numbered Parking Stands, All Gold-Trimmed Taxiways, Luminous White Runways & Dashed Approach Guides
   useEffect(() => {
     const layer = surfaceLayerRef.current;
     const renderer = canvasRendererRef.current;
+    const map = mapRef.current;
     if (!layer || !renderer) return;
     layer.clearLayers();
     if (surfaceList.length === 0 || mapZoom < 9.6) return;
 
+    const viewBounds = map ? map.getBounds().pad(0.22) : null;
     const apronFill = isDark ? '#0f141e' : '#334155';
-    const apronStroke = isDark ? 'rgba(234, 179, 8, 0.28)' : 'rgba(245, 158, 11, 0.45)';
+    const apronStroke = isDark ? 'rgba(234, 179, 8, 0.32)' : 'rgba(245, 158, 11, 0.5)';
+    const termFill = isDark ? '#1a2538' : '#3b4a62';
+    const termStroke = isDark ? 'rgba(56, 189, 248, 0.65)' : 'rgba(14, 165, 233, 0.85)';
     const taxiFill = isDark ? '#0b101b' : '#475569';
     const taxiRim = isDark ? 'rgba(234, 179, 8, 0.44)' : 'rgba(245, 158, 11, 0.72)';
     const rwyAsphalt = '#060910';
     const twyLabelSeen = new Set<string>();
+    const apronLabelSeen = new Set<string>();
+    const termLabelSeen = new Set<string>();
+    const standLabelSeen = new Set<string>();
 
     for (const surfaceData of surfaceList) {
-    // 1. Subtle Dark Aprons with Delicate Gold Perimeter
-    for (const poly of surfaceData.aprons) {
-      L.polygon(poly, {
-        renderer,
-        color: apronStroke,
-        weight: 0.9,
-        fillColor: apronFill,
-        fillOpacity: isDark ? 0.52 : 0.44,
-        interactive: false,
-      }).addTo(layer);
-    }
+      // 1. Subtle Dark Aprons with Gold Perimeter + Apron Names/Numbers
+      const apronItems =
+        surfaceData.labeledAprons && surfaceData.labeledAprons.length > 0
+          ? surfaceData.labeledAprons
+          : surfaceData.aprons.map((coords, idx) => {
+              let sLat = 0;
+              let sLon = 0;
+              for (const c of coords) {
+                sLat += c[0];
+                sLon += c[1];
+              }
+              return {
+                id: `apron-raw-${idx}`,
+                coords,
+                center: [sLat / Math.max(1, coords.length), sLon / Math.max(1, coords.length)] as [
+                  number,
+                  number,
+                ],
+                ref: undefined as string | undefined,
+                name: undefined as string | undefined,
+              };
+            });
 
-    // 2. FlightDeck Taxiway Network: Warm Gold-Trimmed Corridors + Delicate Green/Blue Lights + Unboxed Gold Letters
-    const twyWeight = mapZoom >= 15 ? 9 : mapZoom >= 13 ? 5.5 : 3;
-    for (const twy of surfaceData.taxiways) {
-      // Gold shoulder outline
-      L.polyline(twy.coords, {
-        renderer,
-        color: taxiRim,
-        weight: twyWeight + 2,
-        opacity: 0.9,
-        lineCap: 'round',
-        lineJoin: 'round',
-        interactive: false,
-      }).addTo(layer);
+      let autoApronNum = 1;
+      for (const ap of apronItems) {
+        if (ap.coords.length < 3) continue;
+        L.polygon(ap.coords, {
+          renderer,
+          color: apronStroke,
+          weight: 0.95,
+          fillColor: apronFill,
+          fillOpacity: isDark ? 0.54 : 0.44,
+          interactive: false,
+        }).addTo(layer);
 
-      // Dark taxiway asphalt inside shoulders
-      L.polyline(twy.coords, {
-        renderer,
-        color: taxiFill,
-        weight: twyWeight,
-        opacity: 0.95,
-        lineCap: 'round',
-        lineJoin: 'round',
-        interactive: false,
-      }).addTo(layer);
-
-      // Crisp yellow/gold taxiway centerline
-      L.polyline(twy.coords, {
-        renderer,
-        color: '#FACC15',
-        weight: mapZoom >= 14 ? 1.3 : 0.9,
-        opacity: 0.72,
-        dashArray: mapZoom >= 13.5 ? undefined : '4 4',
-        interactive: false,
-      }).addTo(layer);
-
-      // Delicate green centerline & blue edge lighting at taxiway close-up
-      if (mapZoom >= 13.8 && twy.coords.length >= 2) {
-        const maxSegs = Math.min(twy.coords.length - 1, 8);
-        for (let segIdx = 0; segIdx < maxSegs; segIdx++) {
-          const pA = twy.coords[segIdx];
-          const pB = twy.coords[segIdx + 1];
-          const brg = computeBearingDeg(pA, pB);
-          const midPt: [number, number] = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5];
-          L.circleMarker(midPt, {
-            renderer,
-            radius: mapZoom >= 15 ? 1.5 : 1.1,
-            color: '#22c55e',
-            fillColor: '#4ade80',
-            fillOpacity: 0.92,
-            weight: 0,
-            interactive: false,
-          }).addTo(layer);
-
-          if (mapZoom >= 14.8) {
-            const leftEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, -9.5);
-            const rightEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, 9.5);
-            for (const edgePt of [leftEdge, rightEdge]) {
-              L.circleMarker(edgePt, {
-                renderer,
-                radius: 1.2,
-                color: '#0ea5e9',
-                fillColor: '#38bdf8',
-                fillOpacity: 0.85,
-                weight: 0,
+        if (mapZoom >= 12.8) {
+          let minLat = Infinity;
+          let maxLat = -Infinity;
+          let minLon = Infinity;
+          let maxLon = -Infinity;
+          for (const [aLat, aLon] of ap.coords) {
+            if (aLat < minLat) minLat = aLat;
+            if (aLat > maxLat) maxLat = aLat;
+            if (aLon < minLon) minLon = aLon;
+            if (aLon > maxLon) maxLon = aLon;
+          }
+          const span = Math.hypot(maxLat - minLat, maxLon - minLon);
+          const explicitLabel = ap.ref || ap.name;
+          const label = explicitLabel || (span >= 0.0022 ? `APRON ${autoApronNum++}` : '');
+          if (label && (!viewBounds || viewBounds.contains(ap.center))) {
+            const apKey = `${Math.round(ap.center[0] * 320)}-${Math.round(ap.center[1] * 320)}`;
+            if (!apronLabelSeen.has(apKey)) {
+              apronLabelSeen.add(apKey);
+              const shortLbl = label.length > 18 ? `${label.slice(0, 17)}…` : label;
+              L.marker(ap.center, {
                 interactive: false,
+                icon: L.divIcon({
+                  className: 'skydeck-apron-badge',
+                  iconSize: [96, 16],
+                  iconAnchor: [48, 8],
+                  html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;background:rgba(15,23,42,0.72);border:1px solid rgba(250,204,21,0.35);font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:#FDE68A;letter-spacing:0.04em;white-space:nowrap;">${shortLbl}</span>`,
+                }),
               }).addTo(layer);
             }
           }
         }
       }
 
-      // Clean unboxed amber-gold taxiway designator directly over centerline (just like FlightDeck PVG chart)
-      if (mapZoom >= 12.6 && twy.ref) {
-        const badgeKey = `${twy.ref}-${Math.round(twy.coords[0][0] * 110)}-${Math.round(twy.coords[0][1] * 110)}`;
-        if (!twyLabelSeen.has(badgeKey)) {
-          twyLabelSeen.add(badgeKey);
+      // 2. Architectural Terminal Buildings & Concourses
+      for (const term of surfaceData.terminals ?? []) {
+        if (term.coords.length < 3) continue;
+        L.polygon(term.coords, {
+          renderer,
+          color: termStroke,
+          weight: mapZoom >= 14 ? 1.6 : 1.2,
+          fillColor: termFill,
+          fillOpacity: isDark ? 0.9 : 0.85,
+          interactive: false,
+        }).addTo(layer);
+
+        const termLabel = term.name || term.ref;
+        if (mapZoom >= 12.1 && termLabel && (!viewBounds || viewBounds.contains(term.center))) {
+          const tKey = `${termLabel.toUpperCase()}-${Math.round(term.center[0] * 260)}-${Math.round(
+            term.center[1] * 260,
+          )}`;
+          if (!termLabelSeen.has(tKey)) {
+            termLabelSeen.add(tKey);
+            const shortName = termLabel.length > 22 ? `${termLabel.slice(0, 21)}…` : termLabel;
+            L.marker(term.center, {
+              interactive: false,
+              icon: L.divIcon({
+                className: 'skydeck-term-badge',
+                iconSize: [120, 18],
+                iconAnchor: [60, 9],
+                html: `<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(12,20,34,0.82);border:1px solid rgba(56,189,248,0.45);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#E0F2FE;letter-spacing:0.02em;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.45);">${shortName}</span>`,
+              }),
+            }).addTo(layer);
+          }
+        }
+      }
+
+      // 3. Apron Parking Lead-In Guidelines (zoom >= 13.4)
+      if (mapZoom >= 13.4) {
+        for (const stand of surfaceData.stands ?? []) {
+          if (!stand.coords || stand.coords.length < 2) continue;
+          if (viewBounds && !viewBounds.contains([stand.lat, stand.lon])) continue;
+          L.polyline(stand.coords, {
+            renderer,
+            color: '#FACC15',
+            weight: mapZoom >= 15 ? 1.4 : 1.0,
+            opacity: 0.62,
+            interactive: false,
+          }).addTo(layer);
+        }
+      }
+
+      // 4. FlightDeck Taxiway Network: All Taxiways & Taxilanes + Green/Blue Lights + Unboxed Gold Letters
+      const twyWeight = mapZoom >= 15 ? 9 : mapZoom >= 13 ? 5.5 : 3;
+      for (const twy of surfaceData.taxiways) {
+        const isLane = twy.kind === 'taxilane';
+        const w = isLane ? Math.max(2, twyWeight * 0.65) : twyWeight;
+
+        L.polyline(twy.coords, {
+          renderer,
+          color: taxiRim,
+          weight: w + (isLane ? 1.2 : 2),
+          opacity: isLane ? 0.65 : 0.9,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(layer);
+
+        L.polyline(twy.coords, {
+          renderer,
+          color: taxiFill,
+          weight: w,
+          opacity: 0.95,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(layer);
+
+        L.polyline(twy.coords, {
+          renderer,
+          color: '#FACC15',
+          weight: isLane ? 0.85 : mapZoom >= 14 ? 1.3 : 0.9,
+          opacity: isLane ? 0.55 : 0.72,
+          dashArray: mapZoom >= 13.5 ? undefined : '4 4',
+          interactive: false,
+        }).addTo(layer);
+
+        // Delicate green centerline & blue edge lighting (culled to visible viewport for 60fps zoom)
+        if (mapZoom >= 13.8 && !isLane && twy.coords.length >= 2) {
+          const midCheck = twy.coords[Math.floor(twy.coords.length / 2)];
+          if (!viewBounds || viewBounds.contains(midCheck)) {
+            const maxSegs = Math.min(twy.coords.length - 1, 6);
+            for (let segIdx = 0; segIdx < maxSegs; segIdx++) {
+              const pA = twy.coords[segIdx];
+              const pB = twy.coords[segIdx + 1];
+              const brg = computeBearingDeg(pA, pB);
+              const midPt: [number, number] = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5];
+              L.circleMarker(midPt, {
+                renderer,
+                radius: mapZoom >= 15 ? 1.5 : 1.1,
+                color: '#22c55e',
+                fillColor: '#4ade80',
+                fillOpacity: 0.92,
+                weight: 0,
+                interactive: false,
+              }).addTo(layer);
+
+              if (mapZoom >= 14.8) {
+                const leftEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, -9.5);
+                const rightEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, 9.5);
+                for (const edgePt of [leftEdge, rightEdge]) {
+                  L.circleMarker(edgePt, {
+                    renderer,
+                    radius: 1.2,
+                    color: '#0ea5e9',
+                    fillColor: '#38bdf8',
+                    fillOpacity: 0.85,
+                    weight: 0,
+                    interactive: false,
+                  }).addTo(layer);
+                }
+              }
+            }
+          }
+        }
+
+        // Clean unboxed amber-gold taxiway designator directly over centerline (~320m spatial grid)
+        if (mapZoom >= 12.2 && twy.ref) {
           const mid = twy.coords[Math.floor(twy.coords.length / 2)];
-          L.marker(mid, {
+          if (!viewBounds || viewBounds.contains(mid)) {
+            const badgeKey = `${twy.ref}-${Math.round(mid[0] * 320)}-${Math.round(mid[1] * 320)}`;
+            if (!twyLabelSeen.has(badgeKey)) {
+              twyLabelSeen.add(badgeKey);
+              L.marker(mid, {
+                interactive: false,
+                icon: L.divIcon({
+                  className: 'skydeck-taxi-badge',
+                  iconSize: [34, 16],
+                  iconAnchor: [17, 8],
+                  html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
+                    mapZoom >= 14 ? 10 : 9
+                  }px;font-weight:800;color:#FDE047;text-shadow:0 0 3px #000,0 0 6px #000,0 1px 2px #000;letter-spacing:0.03em;white-space:nowrap;">${
+                    twy.ref
+                  }</span>`,
+                }),
+              }).addTo(layer);
+            }
+          }
+        }
+      }
+
+      // 5. Numbered Airplane Apron Stands & Terminal Gates (viewport-culled & density-deduped)
+      if (mapZoom >= 13.8) {
+        const standGrid = mapZoom >= 15.6 ? 4200 : mapZoom >= 14.7 ? 2400 : 1200;
+        const standItems =
+          surfaceData.stands && surfaceData.stands.length > 0
+            ? surfaceData.stands.filter((s) => Boolean(s.ref))
+            : surfaceData.gates.map((g) => ({...g, kind: 'gate' as const}));
+
+        for (const stand of standItems) {
+          if (viewBounds && !viewBounds.contains([stand.lat, stand.lon])) continue;
+          const cellKey = `${Math.round(stand.lat * standGrid)}-${Math.round(stand.lon * standGrid)}`;
+          if (standLabelSeen.has(cellKey)) continue;
+          standLabelSeen.add(cellKey);
+          const isPark = stand.kind === 'parking_position';
+          L.marker([stand.lat, stand.lon], {
             interactive: false,
             icon: L.divIcon({
               className: 'skydeck-taxi-badge',
-              iconSize: [32, 16],
-              iconAnchor: [16, 8],
-              html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
-                mapZoom >= 14 ? 10 : 9
-              }px;font-weight:800;color:#FDE047;text-shadow:0 0 3px #000,0 0 6px #000,0 1px 2px #000;letter-spacing:0.03em;white-space:nowrap;">${
-                twy.ref
-              }</span>`,
+              iconSize: [30, 14],
+              iconAnchor: [15, 7],
+              html: `<span style="display:inline-block;padding:0 3px;border-radius:3px;background:rgba(11,16,27,0.78);border:1px solid ${
+                isPark ? 'rgba(250,204,21,0.38)' : 'rgba(148,163,184,0.35)'
+              };font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:${
+                isPark ? '#FEF08A' : '#E2E8F0'
+              };white-space:nowrap;">${stand.ref}</span>`,
             }),
           }).addTo(layer);
         }
       }
-    }
 
-    // 3. FlightDeck Luminous White Runways + Red Threshold Stop-Bars + Glowing Approach Beams
-    const rwyWeight = mapZoom >= 16 ? 26 : mapZoom >= 15 ? 20 : mapZoom >= 13.2 ? 12 : 7;
+      // 6. FlightDeck Luminous White Runways + Red Threshold Stop-Bars + Glowing Approach Beams
+      const rwyWeight = mapZoom >= 16 ? 26 : mapZoom >= 15 ? 20 : mapZoom >= 13.2 ? 12 : 7;
 
-    for (const rwy of surfaceData.runways) {
-      if (rwy.coords.length < 2) continue;
+      for (const rwy of surfaceData.runways) {
+        if (rwy.coords.length < 2) continue;
 
-      const startPt = rwy.coords[0];
-      const endPt = rwy.coords[rwy.coords.length - 1];
-      const brg = computeBearingDeg(startPt, endPt);
-      const revBrg = (brg + 180) % 360;
-      const [labelA, labelB] = deriveRunwayEndLabels(rwy.ref, brg);
+        const startPt = rwy.coords[0];
+        const endPt = rwy.coords[rwy.coords.length - 1];
+        const brg = computeBearingDeg(startPt, endPt);
+        const revBrg = (brg + 180) % 360;
+        const [labelA, labelB] = deriveRunwayEndLabels(rwy.ref, brg);
 
-      const drawApproachPath = (thresholdPt: [number, number], landingHeadingDeg: number) => {
-        const outboundBrg = (landingHeadingDeg + 180) % 360;
-        const beamLenM = mapZoom >= 13 ? 2800 : 7500;
-        const appBeamEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, beamLenM, 0);
-        const appLongEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 10186, 0);
+        const drawApproachPath = (thresholdPt: [number, number], landingHeadingDeg: number) => {
+          const outboundBrg = (landingHeadingDeg + 180) % 360;
+          const beamLenM = mapZoom >= 13 ? 2800 : 7500;
+          const appBeamEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, beamLenM, 0);
+          const appLongEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 10186, 0);
 
-        // Extended |- - - - -| approach dashed path
-        L.polyline([appBeamEnd, appLongEnd], {
-          renderer,
-          color: isDark ? 'rgba(248, 250, 252, 0.56)' : '#0369A1',
-          weight: 1.4,
-          opacity: 0.78,
-          dashArray: '7 7',
-          interactive: false,
-        }).addTo(layer);
-
-        // Glowing white FlightDeck approach centerline lead-in halo + core
-        L.polyline([thresholdPt, appBeamEnd], {
-          renderer,
-          color: 'rgba(255, 255, 255, 0.34)',
-          weight: mapZoom >= 13.5 ? 8 : 5,
-          opacity: 0.9,
-          interactive: false,
-        }).addTo(layer);
-        L.polyline([thresholdPt, appBeamEnd], {
-          renderer,
-          color: '#ffffff',
-          weight: mapZoom >= 13.5 ? 2.6 : 1.8,
-          opacity: 0.98,
-          interactive: false,
-        }).addTo(layer);
-
-        // Subtle perpendicular | range gate ticks every 1 NM
-        for (let nm = 1; nm <= 5; nm++) {
-          const distM = nm * 1852;
-          const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -110);
-          const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 110);
-          L.polyline([barL, barR], {
+          // Extended |- - - - -| approach dashed path
+          L.polyline([appBeamEnd, appLongEnd], {
             renderer,
-            color: isDark ? 'rgba(248, 250, 252, 0.48)' : '#0284C7',
-            weight: 1.1,
-            opacity: 0.75,
+            color: isDark ? 'rgba(248, 250, 252, 0.56)' : '#0369A1',
+            weight: 1.4,
+            opacity: 0.78,
+            dashArray: '7 7',
             interactive: false,
           }).addTo(layer);
-        }
 
-        // Flashing Sequenced Approach Lights ("Rabbit" strobes) + Red pre-threshold decision bar (like PVG screenshot)
-        if (mapZoom >= 12.0) {
-          const strobeCount = 7;
-          for (let s = 1; s <= strobeCount; s++) {
-            const distFromThresholdM = 110 + (strobeCount - s) * 115;
-            const sPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distFromThresholdM, 0);
-            const delaySec = (s * 0.14).toFixed(2);
-            L.marker(sPt, {
-              interactive: false,
-              icon: L.divIcon({
-                className: 'skydeck-rabbit-icon',
-                iconSize: [8, 8],
-                iconAnchor: [4, 4],
-                html: `<div class="skydeck-rabbit-dot" style="animation-delay:${delaySec}s;"></div>`,
-              }),
-            }).addTo(layer);
-          }
+          // Glowing white FlightDeck approach centerline lead-in halo + core
+          L.polyline([thresholdPt, appBeamEnd], {
+            renderer,
+            color: 'rgba(255, 255, 255, 0.34)',
+            weight: mapZoom >= 13.5 ? 8 : 5,
+            opacity: 0.9,
+            interactive: false,
+          }).addTo(layer);
+          L.polyline([thresholdPt, appBeamEnd], {
+            renderer,
+            color: '#ffffff',
+            weight: mapZoom >= 13.5 ? 2.6 : 1.8,
+            opacity: 0.98,
+            interactive: false,
+          }).addTo(layer);
 
-          // Iconic red threshold / stop-bar light clusters with soft halo (as seen in PVG screenshot)
-          for (const d of [45, 220]) {
-            const rPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, d, 0);
-            L.circleMarker(rPt, {
+          // Subtle perpendicular | range gate ticks every 1 NM
+          for (let nm = 1; nm <= 5; nm++) {
+            const distM = nm * 1852;
+            const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -110);
+            const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 110);
+            L.polyline([barL, barR], {
               renderer,
-              radius: mapZoom >= 14 ? 6.5 : 4.5,
-              color: '#ef4444',
-              fillColor: '#ef4444',
-              fillOpacity: 0.35,
-              weight: 0,
-              interactive: false,
-            }).addTo(layer);
-            L.circleMarker(rPt, {
-              renderer,
-              radius: mapZoom >= 14 ? 2.6 : 1.9,
-              color: '#fca5a5',
-              fillColor: '#ef4444',
-              fillOpacity: 1,
-              weight: 0.8,
+              color: isDark ? 'rgba(248, 250, 252, 0.48)' : '#0284C7',
+              weight: 1.1,
+              opacity: 0.75,
               interactive: false,
             }).addTo(layer);
           }
+
+          // Flashing Sequenced Approach Lights ("Rabbit" strobes) + Red pre-threshold decision bar
+          if (mapZoom >= 12.0) {
+            const strobeCount = 7;
+            for (let s = 1; s <= strobeCount; s++) {
+              const distFromThresholdM = 110 + (strobeCount - s) * 115;
+              const sPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distFromThresholdM, 0);
+              const delaySec = (s * 0.14).toFixed(2);
+              L.marker(sPt, {
+                interactive: false,
+                icon: L.divIcon({
+                  className: 'skydeck-rabbit-icon',
+                  iconSize: [8, 8],
+                  iconAnchor: [4, 4],
+                  html: `<div class="skydeck-rabbit-dot" style="animation-delay:${delaySec}s;"></div>`,
+                }),
+              }).addTo(layer);
+            }
+
+            // Iconic red threshold / stop-bar light clusters with soft halo
+            for (const d of [45, 220]) {
+              const rPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, d, 0);
+              L.circleMarker(rPt, {
+                renderer,
+                radius: mapZoom >= 14 ? 6.5 : 4.5,
+                color: '#ef4444',
+                fillColor: '#ef4444',
+                fillOpacity: 0.35,
+                weight: 0,
+                interactive: false,
+              }).addTo(layer);
+              L.circleMarker(rPt, {
+                renderer,
+                radius: mapZoom >= 14 ? 2.6 : 1.9,
+                color: '#fca5a5',
+                fillColor: '#ef4444',
+                fillOpacity: 1,
+                weight: 0.8,
+                interactive: false,
+              }).addTo(layer);
+            }
+          }
+        };
+
+        drawApproachPath(startPt, brg);
+        drawApproachPath(endPt, revBrg);
+
+        // Luminous outer runway glow halo
+        L.polyline(rwy.coords, {
+          renderer,
+          color: isDark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(15, 23, 42, 0.28)',
+          weight: rwyWeight + 7,
+          opacity: 0.9,
+          lineCap: 'butt',
+          interactive: false,
+        }).addTo(layer);
+
+        // Dark runway asphalt bed
+        L.polyline(rwy.coords, {
+          renderer,
+          color: rwyAsphalt,
+          weight: rwyWeight,
+          opacity: 1,
+          lineCap: 'butt',
+          interactive: false,
+        }).addTo(layer);
+
+        // Bright crisp white runway centerline beam
+        L.polyline(rwy.coords, {
+          renderer,
+          color: '#ffffff',
+          weight: mapZoom >= 14 ? 2.2 : 1.6,
+          opacity: 0.96,
+          dashArray: mapZoom >= 14.5 ? '10 8' : undefined,
+          interactive: false,
+        }).addTo(layer);
+
+        // Dense luminous runway edge light chain (white + amber caution ends)
+        if (mapZoom >= 11.5) {
+          const steps = 28;
+          const halfW = (rwy.widthM ?? 45) * 0.5;
+          for (let s = 0; s <= steps; s++) {
+            const frac = s / steps;
+            const lat = startPt[0] + (endPt[0] - startPt[0]) * frac;
+            const lon = startPt[1] + (endPt[1] - startPt[1]) * frac;
+            const lEdge = offsetLatLonMeters(lat, lon, brg, 0, -halfW);
+            const rEdge = offsetLatLonMeters(lat, lon, brg, 0, halfW);
+            const isEnd = s === 0 || s === steps;
+            const isCautionZone = !isEnd && (s <= 2 || s >= steps - 2);
+            const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#ffffff';
+            for (const pt of [lEdge, rEdge]) {
+              L.circleMarker(pt, {
+                renderer,
+                radius: mapZoom >= 14.5 ? 1.8 : 1.3,
+                color: lightColor,
+                fillColor: lightColor,
+                fillOpacity: 0.96,
+                weight: 0,
+                interactive: false,
+              }).addTo(layer);
+            }
+          }
         }
-      };
 
-      drawApproachPath(startPt, brg);
-      drawApproachPath(endPt, revBrg);
-
-      // Luminous outer runway glow halo
-      L.polyline(rwy.coords, {
-        renderer,
-        color: isDark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(15, 23, 42, 0.28)',
-        weight: rwyWeight + 7,
-        opacity: 0.9,
-        lineCap: 'butt',
-        interactive: false,
-      }).addTo(layer);
-
-      // Dark runway asphalt bed
-      L.polyline(rwy.coords, {
-        renderer,
-        color: rwyAsphalt,
-        weight: rwyWeight,
-        opacity: 1,
-        lineCap: 'butt',
-        interactive: false,
-      }).addTo(layer);
-
-      // Bright crisp white runway centerline beam
-      L.polyline(rwy.coords, {
-        renderer,
-        color: '#ffffff',
-        weight: mapZoom >= 14 ? 2.2 : 1.6,
-        opacity: 0.96,
-        dashArray: mapZoom >= 14.5 ? '10 8' : undefined,
-        interactive: false,
-      }).addTo(layer);
-
-      // Dense luminous runway edge light chain (white + amber caution ends)
-      if (mapZoom >= 11.5) {
-        const steps = 28;
-        const halfW = (rwy.widthM ?? 45) * 0.5;
-        for (let s = 0; s <= steps; s++) {
-          const frac = s / steps;
-          const lat = startPt[0] + (endPt[0] - startPt[0]) * frac;
-          const lon = startPt[1] + (endPt[1] - startPt[1]) * frac;
-          const lEdge = offsetLatLonMeters(lat, lon, brg, 0, -halfW);
-          const rEdge = offsetLatLonMeters(lat, lon, brg, 0, halfW);
-          const isEnd = s === 0 || s === steps;
-          const isCautionZone = !isEnd && (s <= 2 || s >= steps - 2);
-          const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#ffffff';
-          for (const pt of [lEdge, rEdge]) {
-            L.circleMarker(pt, {
+        // Runway thresholds: green bar + ICAO piano keys + upright bold white threshold labels
+        const drawEnd = (pt: [number, number], endBrg: number, rwyNum: string) => {
+          const halfW = (rwy.widthM ?? 45) * 0.46;
+          for (let t = -3; t <= 3; t++) {
+            const tPt = offsetLatLonMeters(pt[0], pt[1], endBrg, 0, (t / 3) * halfW);
+            L.circleMarker(tPt, {
               renderer,
-              radius: mapZoom >= 14.5 ? 1.8 : 1.3,
-              color: lightColor,
-              fillColor: lightColor,
+              radius: mapZoom >= 14 ? 2.1 : 1.5,
+              color: '#16a34a',
+              fillColor: '#4ade80',
               fillOpacity: 0.96,
               weight: 0,
               interactive: false,
             }).addTo(layer);
           }
-        }
-      }
 
-      // Runway thresholds: green/red bar + ICAO piano keys + unboxed bold white threshold labels
-      const drawEnd = (pt: [number, number], endBrg: number, rwyNum: string) => {
-        const halfW = (rwy.widthM ?? 45) * 0.46;
-        for (let t = -3; t <= 3; t++) {
-          const tPt = offsetLatLonMeters(pt[0], pt[1], endBrg, 0, (t / 3) * halfW);
-          L.circleMarker(tPt, {
-            renderer,
-            radius: mapZoom >= 14 ? 2.1 : 1.5,
-            color: '#16a34a',
-            fillColor: '#4ade80',
-            fillOpacity: 0.96,
-            weight: 0,
-            interactive: false,
-          }).addTo(layer);
-        }
-
-        if (mapZoom >= 13.5) {
-          const numKeys = 5;
-          for (let k = -numKeys; k <= numKeys; k++) {
-            if (k === 0) continue;
-            const latOffset = (k / numKeys) * (halfW * 0.85);
-            const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
-            const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
-            L.polyline([p1, p2], {
-              renderer,
-              color: '#ffffff',
-              weight: mapZoom >= 15 ? 2.1 : 1.4,
-              opacity: 0.9,
-              lineCap: 'butt',
-              interactive: false,
-            }).addTo(layer);
+          if (mapZoom >= 13.5) {
+            const numKeys = 5;
+            for (let k = -numKeys; k <= numKeys; k++) {
+              if (k === 0) continue;
+              const latOffset = (k / numKeys) * (halfW * 0.85);
+              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
+              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
+              L.polyline([p1, p2], {
+                renderer,
+                color: '#ffffff',
+                weight: mapZoom >= 15 ? 2.1 : 1.4,
+                opacity: 0.9,
+                lineCap: 'butt',
+                interactive: false,
+              }).addTo(layer);
+            }
           }
-        }
 
-        const numPos = offsetLatLonMeters(pt[0], pt[1], endBrg, 115, 0);
-        L.marker(numPos, {
-          interactive: false,
-          icon: L.divIcon({
-            className: 'skydeck-runway-num',
-            iconSize: [40, 20],
-            iconAnchor: [20, 10],
-            html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
-              mapZoom >= 14 ? 12 : 10.5
-            }px;font-weight:800;letter-spacing:0.06em;color:#ffffff;text-shadow:0 0 4px #000,0 0 7px #000,0 1px 3px #000;transform:rotate(${Math.round(
-              endBrg,
-            )}deg);">${rwyNum}</span>`,
-          }),
-        }).addTo(layer);
-      };
+          const numPos = offsetLatLonMeters(pt[0], pt[1], endBrg, 88, 0);
+          const normDeg = ((endBrg % 360) + 360) % 360;
+          const uprightDeg = normDeg > 90 && normDeg < 270 ? normDeg - 180 : normDeg;
+          L.marker(numPos, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-runway-num',
+              iconSize: [40, 20],
+              iconAnchor: [20, 10],
+              html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
+                mapZoom >= 14 ? 12 : 10.5
+              }px;font-weight:800;letter-spacing:0.06em;color:#ffffff;text-shadow:0 0 4px #000,0 0 7px #000,0 1px 3px #000;transform:rotate(${Math.round(
+                uprightDeg,
+              )}deg);">${rwyNum}</span>`,
+            }),
+          }).addTo(layer);
+        };
 
-      drawEnd(startPt, brg, labelA);
-      drawEnd(endPt, revBrg, labelB);
-    }
-
-    // 4. Subtle Terminal Gate / Stand Designators on Close Zoom
-    if (mapZoom >= 14.8) {
-      for (const gate of surfaceData.gates) {
-        L.marker([gate.lat, gate.lon], {
-          interactive: false,
-          icon: L.divIcon({
-            className: 'skydeck-taxi-badge',
-            iconSize: [24, 14],
-            iconAnchor: [12, 7],
-            html: `<span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:#cbd5e1;text-shadow:0 0 3px #000;">${gate.ref}</span>`,
-          }),
-        }).addTo(layer);
+        drawEnd(startPt, brg, labelA);
+        drawEnd(endPt, revBrg, labelB);
       }
     }
-    }
-  }, [surfaceList, mapZoom, isDark]);
+  }, [surfaceList, mapZoom, isDark, viewportTick]);
 
   // Sync flight pool & FOV trails (up to 2,200+ flights rendered at 60fps via Canvas2D without DOM lag)
   useEffect(() => {

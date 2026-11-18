@@ -1,6 +1,8 @@
 import {AIRPORT_CATALOG} from '../data/aviationCatalog';
 import type {
   AircraftPhoto,
+  AirfieldPolygonFeature,
+  AirfieldStandFeature,
   AirfieldSurfaceData,
   AirfieldSurfaceGate,
   AirportBoardFlight,
@@ -16,6 +18,13 @@ import type {
   TaxiwaySegment,
   TrailPoint,
 } from '../types/aviation';
+import {
+  buildOverpassAirfieldQuery,
+  GLOBAL_OVERPASS_MIRRORS,
+  mergeAndAlignRunways,
+  parseOverpassAirfieldElements,
+  type OverpassElement,
+} from '../utils/airfieldGeometry';
 
 let staticHostingDetected = false;
 let globalAirportsPromise: Promise<AirportMarker[]> | null = null;
@@ -493,10 +502,13 @@ interface DirectAipRunwayEntry {
   widthM: number;
 }
 let directRunwaysPromise: Promise<Map<string, DirectAipRunwayEntry[]>> | null = null;
-let cachedDirectRunways: Map<string, DirectAipRunwayEntry[]> | null = null;
+let cachedDirectRunways: {ts: number; map: Map<string, DirectAipRunwayEntry[]>} | null = null;
 
 async function getBrowserGlobalRunways(): Promise<Map<string, DirectAipRunwayEntry[]>> {
-  if (cachedDirectRunways) return cachedDirectRunways;
+  if (cachedDirectRunways) {
+    const ttl = cachedDirectRunways.map.size > 0 ? 86400000 : 300000;
+    if (Date.now() - cachedDirectRunways.ts < ttl) return cachedDirectRunways.map;
+  }
   if (directRunwaysPromise) return directRunwaysPromise;
 
   directRunwaysPromise = (async () => {
@@ -504,10 +516,10 @@ async function getBrowserGlobalRunways(): Promise<Map<string, DirectAipRunwayEnt
     try {
       const cfWorker = getCloudflareWorkerUrl();
       const target = 'https://davidmegginson.github.io/ourairports-data/runways.csv';
-      let res = await fetch(target, {signal: AbortSignal.timeout(9500)}).catch(() => null);
+      let res = await fetch(target, {signal: AbortSignal.timeout(4500)}).catch(() => null);
       if ((!res || !res.ok) && cfWorker) {
         res = await fetch(`${cfWorker}/?url=${encodeURIComponent(target)}`, {
-          signal: AbortSignal.timeout(9500),
+          signal: AbortSignal.timeout(4500),
         }).catch(() => null);
       }
       if (res && res.ok) {
@@ -566,9 +578,11 @@ async function getBrowserGlobalRunways(): Promise<Map<string, DirectAipRunwayEnt
     } catch {
       // optional
     }
-    if (byAirport.size > 0) cachedDirectRunways = byAirport;
+    cachedDirectRunways = {ts: Date.now(), map: byAirport};
     return byAirport;
-  })();
+  })().finally(() => {
+    directRunwaysPromise = null;
+  });
 
   return directRunwaysPromise;
 }
@@ -1447,21 +1461,33 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
 
   const cacheKey = `${icao || `${lat.toFixed(3)},${lon.toFixed(3)}`}`;
   const existing = browserSurfaceCache.get(cacheKey);
-  if (existing && Date.now() - existing.ts < 86400000) return existing.data;
+  const existingTtl =
+    existing && existing.data.source === 'osm-overpass' && existing.data.taxiways.length > 0
+      ? 86400000
+      : 45000;
+  if (existing && Date.now() - existing.ts < existingTtl) return existing.data;
 
-  const aprons: Array<Array<[number, number]>> = [];
-  const osmRunways: TaxiwaySegment[] = [];
-  const taxiways: TaxiwaySegment[] = [];
-  const gates: AirfieldSurfaceGate[] = [];
+  let aprons: Array<Array<[number, number]>> = [];
+  let labeledAprons: AirfieldPolygonFeature[] = [];
+  let terminals: AirfieldPolygonFeature[] = [];
+  let stands: AirfieldStandFeature[] = [];
+  let osmRunways: TaxiwaySegment[] = [];
+  let taxiways: TaxiwaySegment[] = [];
+  let gates: AirfieldSurfaceGate[] = [];
+  let osmSucceeded = false;
 
   const overpassPromise = (async () => {
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) return;
-    const q = `[out:json][timeout:8];(way["aeroway"~"runway|taxiway|taxilane|apron"](${(lat - 0.075).toFixed(4)},${(lon - 0.095).toFixed(4)},${(lat + 0.075).toFixed(4)},${(lon + 0.095).toFixed(4)});node["aeroway"~"gate|parking_position|holding_position"](${(lat - 0.06).toFixed(4)},${(lon - 0.08).toFixed(4)},${(lat + 0.06).toFixed(4)},${(lon + 0.08).toFixed(4)}););out body;>;out skel qt;`;
+    const q = buildOverpassAirfieldQuery(lat, lon);
     const cfWorker = getCloudflareWorkerUrl();
     const endpoints = [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      ...(cfWorker ? [`${cfWorker}/?url=${encodeURIComponent('https://overpass-api.de/api/interpreter')}`] : []),
+      ...GLOBAL_OVERPASS_MIRRORS.slice(0, 3),
+      ...(cfWorker
+        ? [
+            `${cfWorker}/?url=${encodeURIComponent('https://overpass.openstreetmap.fr/api/interpreter')}`,
+            `${cfWorker}/?url=${encodeURIComponent('https://overpass-api.de/api/interpreter')}`,
+          ]
+        : []),
     ];
 
     try {
@@ -1469,57 +1495,32 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
         endpoints.map(async (ep) => {
           const osmRes = await fetch(ep, {
             method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              Accept: 'application/json',
+            },
             body: `data=${encodeURIComponent(q)}`,
-            signal: AbortSignal.timeout(6500),
+            signal: AbortSignal.timeout(10500),
           });
           if (!osmRes.ok) throw new Error(`HTTP ${osmRes.status}`);
-          const parsed = (await osmRes.json()) as {
-            elements?: Array<{
-              type: string;
-              id: number;
-              lat?: number;
-              lon?: number;
-              nodes?: number[];
-              tags?: Record<string, string>;
-            }>;
-          };
-          if (!Array.isArray(parsed.elements)) throw new Error('Invalid Overpass JSON');
+          const parsed = (await osmRes.json()) as {elements?: OverpassElement[]};
+          if (!Array.isArray(parsed.elements) || parsed.elements.length === 0) {
+            throw new Error('Empty Overpass payload');
+          }
           return parsed;
         }),
       );
 
-      const nodes = new Map<number, [number, number]>();
-      for (const el of json.elements ?? []) {
-        if (el.type === 'node' && el.lat !== undefined && el.lon !== undefined) {
-          nodes.set(el.id, [el.lat, el.lon]);
-          if (el.tags?.aeroway === 'gate' || el.tags?.aeroway === 'parking_position') {
-            const ref = el.tags.ref || el.tags.name;
-            if (ref) gates.push({id: `g-${el.id}`, ref, lat: el.lat, lon: el.lon});
-          }
-        }
-      }
-      for (const el of json.elements ?? []) {
-        if (el.type !== 'way' || !Array.isArray(el.nodes)) continue;
-        const coords = el.nodes.map((id) => nodes.get(id)).filter((c): c is [number, number] => Boolean(c));
-        if (coords.length < 2) continue;
-        const kind = el.tags?.aeroway;
-        if (kind === 'apron') {
-          if (coords.length >= 3) aprons.push(coords);
-        } else if (kind === 'runway') {
-          const widthM = Number.parseFloat(el.tags?.width ?? '45') || 45;
-          osmRunways.push({id: `rwy-${el.id}`, kind: 'runway', ref: el.tags?.ref, widthM, coords});
-        } else if (kind === 'taxiway' || kind === 'taxilane') {
-          const widthM = Number.parseFloat(el.tags?.width ?? '22') || 22;
-          taxiways.push({
-            id: `twy-${el.id}`,
-            kind: 'taxiway',
-            ref: el.tags?.ref || el.tags?.name,
-            widthM,
-            coords,
-          });
-        }
-      }
+      const parsed = parseOverpassAirfieldElements(json.elements ?? []);
+      osmRunways = parsed.osmRunways;
+      taxiways = parsed.taxiways.slice(0, 2600);
+      aprons = parsed.aprons;
+      labeledAprons = parsed.labeledAprons;
+      terminals = parsed.terminals;
+      stands = parsed.stands;
+      gates = parsed.gates;
+      osmSucceeded =
+        osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
     } catch {
       // fall back to AIP + synthesized geometry
     }
@@ -1539,34 +1540,17 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     }
   }
 
-  const runways: TaxiwaySegment[] = [];
-  if (aipRunways.length > 0) {
-    aipRunways.forEach((r, idx) => {
-      const ref = r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined;
-      runways.push({
-        id: `aip-rwy-${r.airportIdent}-${idx}`,
-        kind: 'runway',
-        ref,
-        widthM: r.widthM,
-        coords: [
-          [r.leLat, r.leLon],
-          [r.heLat, r.heLon],
-        ],
-      });
-    });
-    for (const osm of osmRunways) {
-      const oMidLat = (osm.coords[0][0] + osm.coords[osm.coords.length - 1][0]) * 0.5;
-      const oMidLon = (osm.coords[0][1] + osm.coords[osm.coords.length - 1][1]) * 0.5;
-      const covered = runways.some((ar) => {
-        const aMidLat = (ar.coords[0][0] + ar.coords[1][0]) * 0.5;
-        const aMidLon = (ar.coords[0][1] + ar.coords[1][1]) * 0.5;
-        return Math.hypot(oMidLat - aMidLat, oMidLon - aMidLon) < 0.0025;
-      });
-      if (!covered) runways.push(osm);
-    }
-  } else if (osmRunways.length > 0) {
-    runways.push(...osmRunways);
-  }
+  const runways = mergeAndAlignRunways(
+    osmRunways,
+    aipRunways.map((r) => ({
+      ref: r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined,
+      leLat: r.leLat,
+      leLon: r.leLon,
+      heLat: r.heLat,
+      heLon: r.heLon,
+      widthM: r.widthM,
+    })),
+  );
 
   if (runways.length === 0 && catalog) {
     catalog.runways.forEach((r, idx) => {
@@ -1629,15 +1613,22 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     });
   }
 
-  if (aprons.length === 0) {
+  if (aprons.length === 0 && !osmSucceeded) {
     const aLat = catalog?.lat ?? lat;
     const aLon = catalog?.lon ?? lon;
-    aprons.push([
-      [aLat - 0.004, aLon - 0.006],
-      [aLat + 0.004, aLon - 0.006],
-      [aLat + 0.004, aLon + 0.006],
-      [aLat - 0.004, aLon + 0.006],
-    ]);
+    const box: Array<[number, number]> = [
+      [aLat - 0.0025, aLon - 0.0038],
+      [aLat + 0.0025, aLon - 0.0038],
+      [aLat + 0.0025, aLon + 0.0038],
+      [aLat - 0.0025, aLon + 0.0038],
+    ];
+    aprons.push(box);
+    labeledAprons.push({
+      id: 'syn-apron-main',
+      ref: 'MAIN APRON',
+      coords: box,
+      center: [aLat, aLon],
+    });
   }
 
   const result: AirfieldSurfaceData = {
@@ -1646,10 +1637,13 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     lat,
     lon,
     aprons,
+    labeledAprons,
+    terminals,
+    stands,
     runways,
     taxiways,
-    gates: gates.slice(0, 100),
-    source: aipRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 ? 'osm-overpass' : 'catalog',
+    gates,
+    source: osmSucceeded ? 'osm-overpass' : 'catalog',
   };
   browserSurfaceCache.set(cacheKey, {ts: Date.now(), data: result});
   return result;

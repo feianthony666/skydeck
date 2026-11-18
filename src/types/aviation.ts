@@ -206,7 +206,7 @@ export interface AirportDisruption {
 
 export interface TaxiwaySegment {
   id: string;
-  kind: 'runway' | 'taxiway' | 'apron';
+  kind: 'runway' | 'taxiway' | 'taxilane' | 'apron';
   ref?: string;
   widthM?: number;
   coords: Array<[number, number]>;
@@ -219,12 +219,32 @@ export interface AirfieldSurfaceGate {
   lon: number;
 }
 
+export interface AirfieldPolygonFeature {
+  id: string;
+  ref?: string;
+  name?: string;
+  coords: Array<[number, number]>;
+  center: [number, number];
+}
+
+export interface AirfieldStandFeature {
+  id: string;
+  ref: string;
+  kind: 'parking_position' | 'gate';
+  lat: number;
+  lon: number;
+  coords?: Array<[number, number]>;
+}
+
 export interface AirfieldSurfaceData {
   icao: string;
   iata: string;
   lat: number;
   lon: number;
   aprons: Array<Array<[number, number]>>;
+  labeledAprons?: AirfieldPolygonFeature[];
+  terminals?: AirfieldPolygonFeature[];
+  stands?: AirfieldStandFeature[];
   runways: TaxiwaySegment[];
   taxiways: TaxiwaySegment[];
   gates: AirfieldSurfaceGate[];
