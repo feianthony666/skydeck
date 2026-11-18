@@ -458,10 +458,10 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     <aside
       role="complementary"
       aria-label={`Flight details for ${flight.callsign}`}
-      className="h-full"
+      className="flex-1 h-full min-h-0 flex flex-col"
     >
-      <Card className="h-full flex flex-col overflow-hidden">
-        <CardHeader className="flex flex-row items-start justify-between gap-3 pb-2.5 shrink-0">
+      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl">
+        <CardHeader className="flex flex-row items-start justify-between gap-2 pb-2.5 pt-3.5 shrink-0 border-b border-border/60">
           <div className="space-y-1 min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
               <CardTitle className="font-mono text-base font-semibold text-primary">
@@ -487,13 +487,14 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             size="icon"
             onClick={onClose}
             aria-label="Close aircraft sidebar"
-            className="shrink-0"
+            className="shrink-0 -mr-1 -mt-1"
           >
             <X className="w-4 h-4" />
           </Button>
         </CardHeader>
 
-        <CardContent className="flex-1 overflow-y-auto flex flex-col gap-2.5 pt-0">
+        <CardContent className="flex-1 min-h-0 overflow-y-auto overscroll-contain pt-3 pb-6 [scrollbar-width:thin]">
+          <div className="space-y-2.5">
           {/* Emergency Squawk Banner */}
           {emerg && (
             <div
@@ -511,16 +512,17 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
           )}
 
           {/* Follow (Preserves User Zoom) + Isolate (Full Route) + 3D Quick Action Bar */}
-          <div className="flex flex-wrap items-center gap-1.5 pb-1">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pb-0.5">
             {onToggleFollow && (
               <Button
                 variant={followSelected ? 'default' : 'outline'}
                 size="sm"
                 onClick={onToggleFollow}
+                className="w-full justify-center"
                 title="Keep aircraft centered at your current map zoom"
               >
-                <Crosshair className="w-3.5 h-3.5" />
-                {followSelected ? 'Following' : 'Follow'}
+                <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                <span>{followSelected ? 'Following' : 'Follow'}</span>
               </Button>
             )}
             {onToggleIsolate && (
@@ -528,19 +530,20 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                 variant={isolateSelected ? 'default' : 'outline'}
                 size="sm"
                 onClick={onToggleIsolate}
+                className="w-full justify-center"
                 title="Hide all other traffic and show complete flight path"
               >
-                <Eye className="w-3.5 h-3.5" />
-                {isolateSelected ? 'Isolated' : 'Isolate'}
+                <Eye className="w-3.5 h-3.5 shrink-0" />
+                <span>{isolateSelected ? 'Isolated' : 'Isolate'}</span>
               </Button>
             )}
-            <Button variant="outline" size="sm" onClick={() => onOpen3DMode('cockpit')}>
-              <Gauge className="w-3.5 h-3.5" />
-              3D Deck
+            <Button variant="outline" size="sm" onClick={() => onOpen3DMode('cockpit')} className="w-full justify-center">
+              <Gauge className="w-3.5 h-3.5 shrink-0" />
+              <span>3D Deck</span>
             </Button>
-            <Button variant="outline" size="sm" onClick={() => onOpen3DMode('exterior')}>
-              <Plane className="w-3.5 h-3.5" />
-              Livery
+            <Button variant="outline" size="sm" onClick={() => onOpen3DMode('exterior')} className="w-full justify-center">
+              <Plane className="w-3.5 h-3.5 shrink-0" />
+              <span>Livery</span>
             </Button>
           </div>
 
@@ -869,39 +872,37 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             open={openSections.airframe}
             onToggle={() => toggleSection('airframe')}
           >
-            <div className="rounded-xl border border-border bg-[#0b1320] overflow-hidden">
-              <div className="aspect-[16/9] w-full relative flex items-center justify-center bg-[#0b1320] p-1">
-                {photo?.url ? (
-                  <img
-                    src={photo.url}
-                    alt={`${registration !== '—' ? registration : flight.callsign} (${aircraftModel})`}
-                    referrerPolicy="no-referrer"
-                    onError={() => setPhotoError(true)}
-                    className="max-w-full max-h-full w-auto h-auto object-contain rounded"
-                  />
-                ) : detailLoading ? (
-                  <div className="flex flex-col items-center gap-2 text-xs text-slate-300 px-4 text-center">
-                    <Camera className="w-5 h-5" />
-                    <span>Loading aircraft photo…</span>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-1.5 text-xs text-slate-300 px-4 text-center">
-                    <Plane className="w-6 h-6" />
-                    <span className="font-medium text-white">No photo indexed for {flight.icao24}</span>
-                    <a
-                      href={planespottersHexUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-sky-400 hover:underline"
-                    >
-                      Search on Planespotters.net
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                  </div>
-                )}
-              </div>
+            <div className="rounded-xl border border-border overflow-hidden bg-muted/30">
+              {photo?.url ? (
+                <img
+                  src={photo.url}
+                  alt={`${registration !== '—' ? registration : flight.callsign} (${aircraftModel})`}
+                  referrerPolicy="no-referrer"
+                  onError={() => setPhotoError(true)}
+                  className="w-full h-44 sm:h-48 object-cover block"
+                />
+              ) : detailLoading ? (
+                <div className="h-32 w-full flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground px-4 text-center">
+                  <Camera className="w-5 h-5" />
+                  <span>Loading aircraft photo…</span>
+                </div>
+              ) : (
+                <div className="h-32 w-full flex flex-col items-center justify-center gap-1.5 text-xs text-muted-foreground px-4 text-center">
+                  <Plane className="w-6 h-6" />
+                  <span className="font-medium text-foreground">No photo indexed for {flight.icao24}</span>
+                  <a
+                    href={planespottersHexUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+                  >
+                    Search on Planespotters.net
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              )}
               {photo?.url && (
-                <div className="px-2.5 py-1 border-t border-border bg-card flex items-center justify-between gap-2 text-[10.5px] text-muted-foreground">
+                <div className="px-2.5 py-1.5 border-t border-border bg-card flex items-center justify-between gap-2 text-[10.5px] text-muted-foreground">
                   <span className="truncate">Photo © {photo.photographer}</span>
                   <a
                     href={photo.link}
@@ -955,6 +956,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
               </div>
             </CollapsibleSection>
           )}
+          </div>
         </CardContent>
       </Card>
     </aside>

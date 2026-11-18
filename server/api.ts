@@ -744,6 +744,26 @@ function parseFr24Feed(raw: Record<string, unknown>): LiveFlight[] {
   return flights;
 }
 
+async function fetchFr24WebSingle(
+  lamin: number,
+  lomin: number,
+  lamax: number,
+  lomax: number,
+): Promise<LiveFlight[]> {
+  const url = `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${lamax.toFixed(3)},${lamin.toFixed(3)},${lomin.toFixed(3)},${lomax.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
+  const res = await fetch(url, {
+    headers: {
+      ...BROWSER_HEADERS,
+      Origin: 'https://www.flightradar24.com',
+      Referer: 'https://www.flightradar24.com/',
+    },
+    signal: AbortSignal.timeout(5500),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = (await res.json()) as Record<string, unknown>;
+  return parseFr24Feed(json);
+}
+
 async function fetchFr24Web(
   lamin: number,
   lomin: number,
@@ -751,24 +771,46 @@ async function fetchFr24Web(
   lomax: number,
 ): Promise<{flights: LiveFlight[]; status: ProviderStatus}> {
   const start = Date.now();
-  const url = `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${lamax.toFixed(3)},${lamin.toFixed(3)},${lomin.toFixed(3)},${lomax.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
   try {
-    const res = await fetch(url, {
-      headers: {
-        ...BROWSER_HEADERS,
-        Origin: 'https://www.flightradar24.com',
-        Referer: 'https://www.flightradar24.com/',
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) {
+    const latSpan = lamax - lamin;
+    const lonSpan = lomax - lomin;
+    // Tile wide/zoomed-out viewports into a 2x2 grid so FR24's per-request ~1500 aircraft zone limit doesn't drop planes
+    const boxes: Array<[number, number, number, number]> =
+      latSpan > 16 || lonSpan > 24
+        ? (() => {
+            const midLat = (lamin + lamax) / 2;
+            const midLon = (lomin + lomax) / 2;
+            return [
+              [lamin, lomin, midLat, midLon],
+              [lamin, midLon, midLat, lomax],
+              [midLat, lomin, lamax, midLon],
+              [midLat, midLon, lamax, lomax],
+            ];
+          })()
+        : [[lamin, lomin, lamax, lomax]];
+
+    const settled = await Promise.allSettled(
+      boxes.map((b) => fetchFr24WebSingle(b[0], b[1], b[2], b[3])),
+    );
+    const merged = new Map<string, LiveFlight>();
+    let firstErr: string | null = null;
+    for (const s of settled) {
+      if (s.status === 'fulfilled') {
+        for (const f of s.value) {
+          const key = f.icao24 || f.id;
+          if (!merged.has(key)) merged.set(key, f);
+        }
+      } else if (!firstErr) {
+        firstErr = s.reason instanceof Error ? s.reason.message : 'Timeout';
+      }
+    }
+    const flights = Array.from(merged.values());
+    if (flights.length === 0 && firstErr) {
       return {
         flights: [],
-        status: {provider: 'fr24-web', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
+        status: {provider: 'fr24-web', ok: false, count: 0, latencyMs: Date.now() - start, note: firstErr},
       };
     }
-    const json = (await res.json()) as Record<string, unknown>;
-    const flights = parseFr24Feed(json);
     return {
       flights,
       status: {provider: 'fr24-web', ok: true, count: flights.length, latencyMs: Date.now() - start},
@@ -1269,10 +1311,10 @@ async function fetchOpenSky(
   // Cap bounding box around viewport center so OpenSky does not time out on continent-scale boxes
   const cLat = (lamin + lamax) / 2;
   const cLon = (lomin + lomax) / 2;
-  const sMinLat = Math.max(lamin, cLat - 11);
-  const sMaxLat = Math.min(lamax, cLat + 11);
-  const sMinLon = Math.max(lomin, cLon - 15);
-  const sMaxLon = Math.min(lomax, cLon + 15);
+  const sMinLat = Math.max(-85, Math.max(lamin, cLat - 22));
+  const sMaxLat = Math.min(85, Math.min(lamax, cLat + 22));
+  const sMinLon = Math.max(-180, Math.max(lomin, cLon - 32));
+  const sMaxLon = Math.min(180, Math.min(lomax, cLon + 32));
   const sectorKey = `${sMinLat.toFixed(1)},${sMinLon.toFixed(1)},${sMaxLat.toFixed(1)},${sMaxLon.toFixed(1)}`;
   const cachedSector = openSkySectorCache.get(sectorKey);
 
@@ -1280,7 +1322,7 @@ async function fetchOpenSky(
     const url = `https://opensky-network.org/api/states/all?lamin=${sMinLat.toFixed(2)}&lomin=${sMinLon.toFixed(2)}&lamax=${sMaxLat.toFixed(2)}&lomax=${sMaxLon.toFixed(2)}`;
     const res = await fetch(url, {
       headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-      signal: AbortSignal.timeout(3400),
+      signal: AbortSignal.timeout(3800),
     });
     if (!res.ok) {
       if (cachedSector && Date.now() - cachedSector.ts < 30000) {
@@ -1298,7 +1340,7 @@ async function fetchOpenSky(
     const nowSec = json.time ?? Math.floor(Date.now() / 1000);
     const flights: LiveFlight[] = (json.states ?? [])
       .filter((s) => Number.isFinite(Number(s[6])) && Number.isFinite(Number(s[5])))
-      .slice(0, 350)
+      .slice(0, 1200)
       .map((s) => {
         const icao24 = String(s[0] ?? '').toUpperCase();
         const callsign = String(s[1] ?? icao24).trim().toUpperCase();
@@ -1589,7 +1631,7 @@ export function createApiRouter(): express.Router {
     }
 
     const flights = Array.from(mergedMap.values())
-      .filter((f) => f.lat >= lamin - 1 && f.lat <= lamax + 1 && f.lon >= lomin - 1 && f.lon <= lomax + 1)
+      .filter((f) => f.lat >= lamin - 2 && f.lat <= lamax + 2 && f.lon >= lomin - 2 && f.lon <= lomax + 2)
       .sort((a, b) => {
         const aEmerg = a.squawk === '7700' || a.squawk === '7600' || a.squawk === '7500' ? 1 : 0;
         const bEmerg = b.squawk === '7700' || b.squawk === '7600' || b.squawk === '7500' ? 1 : 0;
@@ -1597,9 +1639,10 @@ export function createApiRouter(): express.Router {
         const aFlag = (a.isLadd ? 2 : 0) + (a.isMilitary ? 1 : 0) + (a.isPia ? 1 : 0);
         const bFlag = (b.isLadd ? 2 : 0) + (b.isMilitary ? 1 : 0) + (b.isPia ? 1 : 0);
         if (aFlag !== bFlag) return bFlag - aFlag;
+        if (a.onGround !== b.onGround) return a.onGround ? 1 : -1;
         return 0;
       })
-      .slice(0, 480);
+      .slice(0, 2200);
 
     for (const f of flights) {
       recordFlightBreadcrumb(f);
@@ -2034,10 +2077,26 @@ export function createApiRouter(): express.Router {
 
   // 2d. Detailed Vectorized Airfield Surface (AIP Runways CSV + Overpass Taxiways, Aprons & Gates)
   router.get('/surface', async (req, res) => {
-    const icao = String(req.query.icao ?? '').trim().toUpperCase();
-    const catalog = AIRPORT_CATALOG.find((a) => a.icao === icao || a.iata === icao);
-    const lat = Number(req.query.lat ?? catalog?.lat ?? 0);
-    const lon = Number(req.query.lon ?? catalog?.lon ?? 0);
+    const rawCode = String(req.query.icao ?? '').trim().toUpperCase();
+    const catalog = AIRPORT_CATALOG.find((a) => a.icao === rawCode || a.iata === rawCode);
+    let lat = Number(req.query.lat ?? catalog?.lat ?? 0);
+    let lon = Number(req.query.lon ?? catalog?.lon ?? 0);
+    let icao = catalog?.icao ?? rawCode;
+    let iata = catalog?.iata ?? '';
+
+    if ((!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) && rawCode) {
+      const allAirports = await getGlobalAirports();
+      const dirMatch = allAirports.find(
+        (a) => a.icao.toUpperCase() === rawCode || (Boolean(a.iata) && a.iata.toUpperCase() === rawCode),
+      );
+      if (dirMatch) {
+        lat = dirMatch.lat;
+        lon = dirMatch.lon;
+        icao = dirMatch.icao;
+        iata = dirMatch.iata;
+      }
+    }
+
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) {
       res.status(400).json({error: 'Missing coordinates or airport ICAO'});
       return;
@@ -2062,64 +2121,69 @@ export function createApiRouter(): express.Router {
     const overpassMirrors = [
       'https://overpass-api.de/api/interpreter',
       'https://overpass.kumi.systems/api/interpreter',
+      'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
     ];
 
     const osmPromise = (async () => {
-      const q = `[out:json][timeout:8];(way["aeroway"~"runway|taxiway|taxilane|apron"](${(lat - 0.065).toFixed(4)},${(lon - 0.085).toFixed(4)},${(lat + 0.065).toFixed(4)},${(lon + 0.085).toFixed(4)});node["aeroway"~"gate|parking_position|holding_position"](${(lat - 0.055).toFixed(4)},${(lon - 0.075).toFixed(4)},${(lat + 0.055).toFixed(4)},${(lon + 0.075).toFixed(4)}););out body;>;out skel qt;`;
-      for (const endpoint of overpassMirrors) {
-        try {
-          const osmRes = await fetch(endpoint, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': API_USER_AGENT},
-            body: `data=${encodeURIComponent(q)}`,
-            signal: AbortSignal.timeout(7000),
-          });
-          if (!osmRes.ok) continue;
-          const json = (await osmRes.json()) as {
-            elements?: Array<{
-              type: string;
-              id: number;
-              lat?: number;
-              lon?: number;
-              nodes?: number[];
-              tags?: Record<string, string>;
-            }>;
-          };
-          const nodes = new Map<number, [number, number]>();
-          for (const el of json.elements ?? []) {
-            if (el.type === 'node' && el.lat !== undefined && el.lon !== undefined) {
-              nodes.set(el.id, [el.lat, el.lon]);
-              if (el.tags?.aeroway === 'gate' || el.tags?.aeroway === 'parking_position') {
-                const ref = el.tags.ref || el.tags.name;
-                if (ref) gates.push({id: `g-${el.id}`, ref, lat: el.lat, lon: el.lon});
-              }
+      const q = `[out:json][timeout:8];(way["aeroway"~"runway|taxiway|taxilane|apron"](${(lat - 0.075).toFixed(4)},${(lon - 0.095).toFixed(4)},${(lat + 0.075).toFixed(4)},${(lon + 0.095).toFixed(4)});node["aeroway"~"gate|parking_position|holding_position"](${(lat - 0.06).toFixed(4)},${(lon - 0.08).toFixed(4)},${(lat + 0.06).toFixed(4)},${(lon + 0.08).toFixed(4)}););out body;>;out skel qt;`;
+      try {
+        const json = await Promise.any(
+          overpassMirrors.map(async (endpoint) => {
+            const osmRes = await fetch(endpoint, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': API_USER_AGENT},
+              body: `data=${encodeURIComponent(q)}`,
+              signal: AbortSignal.timeout(6500),
+            });
+            if (!osmRes.ok) throw new Error(`HTTP ${osmRes.status}`);
+            const parsed = (await osmRes.json()) as {
+              elements?: Array<{
+                type: string;
+                id: number;
+                lat?: number;
+                lon?: number;
+                nodes?: number[];
+                tags?: Record<string, string>;
+              }>;
+            };
+            if (!Array.isArray(parsed.elements)) throw new Error('Invalid Overpass JSON');
+            return parsed;
+          }),
+        );
+
+        const nodes = new Map<number, [number, number]>();
+        for (const el of json.elements ?? []) {
+          if (el.type === 'node' && el.lat !== undefined && el.lon !== undefined) {
+            nodes.set(el.id, [el.lat, el.lon]);
+            if (el.tags?.aeroway === 'gate' || el.tags?.aeroway === 'parking_position') {
+              const ref = el.tags.ref || el.tags.name;
+              if (ref) gates.push({id: `g-${el.id}`, ref, lat: el.lat, lon: el.lon});
             }
           }
-          for (const el of json.elements ?? []) {
-            if (el.type !== 'way' || !Array.isArray(el.nodes)) continue;
-            const coords = el.nodes.map((nid) => nodes.get(nid)).filter((c): c is [number, number] => Boolean(c));
-            if (coords.length < 2) continue;
-            const kind = el.tags?.aeroway;
-            if (kind === 'apron') {
-              if (coords.length >= 3) aprons.push(coords);
-            } else if (kind === 'runway') {
-              const widthM = Number.parseFloat(el.tags?.width ?? '45') || 45;
-              osmRunways.push({id: `rwy-${el.id}`, kind: 'runway', ref: el.tags?.ref, widthM, coords});
-            } else if (kind === 'taxiway' || kind === 'taxilane') {
-              const widthM = Number.parseFloat(el.tags?.width ?? '22') || 22;
-              taxiways.push({
-                id: `twy-${el.id}`,
-                kind: 'taxiway',
-                ref: el.tags?.ref || el.tags?.name,
-                widthM,
-                coords,
-              });
-            }
-          }
-          if (osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0) break;
-        } catch {
-          // try next Overpass mirror
         }
+        for (const el of json.elements ?? []) {
+          if (el.type !== 'way' || !Array.isArray(el.nodes)) continue;
+          const coords = el.nodes.map((nid) => nodes.get(nid)).filter((c): c is [number, number] => Boolean(c));
+          if (coords.length < 2) continue;
+          const kind = el.tags?.aeroway;
+          if (kind === 'apron') {
+            if (coords.length >= 3) aprons.push(coords);
+          } else if (kind === 'runway') {
+            const widthM = Number.parseFloat(el.tags?.width ?? '45') || 45;
+            osmRunways.push({id: `rwy-${el.id}`, kind: 'runway', ref: el.tags?.ref, widthM, coords});
+          } else if (kind === 'taxiway' || kind === 'taxilane') {
+            const widthM = Number.parseFloat(el.tags?.width ?? '22') || 22;
+            taxiways.push({
+              id: `twy-${el.id}`,
+              kind: 'taxiway',
+              ref: el.tags?.ref || el.tags?.name,
+              widthM,
+              coords,
+            });
+          }
+        }
+      } catch {
+        // fallback to AIP + synthesized airfield layout
       }
     })();
 
@@ -2185,26 +2249,38 @@ export function createApiRouter(): express.Router {
           widthM: 45,
           coords: [p1, p2],
         });
+      });
+    }
 
-        const perpLat = -Math.sin(rad) * 0.0022;
-        const perpLon = (Math.cos(rad) * 0.0022) / cosLat;
-        const twyRef = String.fromCharCode(65 + (idx % 6));
+    if (taxiways.length === 0 && runways.length > 0) {
+      runways.forEach((rw, idx) => {
+        if (rw.coords.length < 2) return;
+        const p1 = rw.coords[0];
+        const p2 = rw.coords[rw.coords.length - 1];
+        const cosLat = Math.max(0.2, Math.cos((p1[0] * Math.PI) / 180));
+        const dLat = p2[0] - p1[0];
+        const dLon = (p2[1] - p1[1]) * cosLat;
+        const len = Math.max(1e-5, Math.hypot(dLat, dLon));
+        const sideSign = idx % 2 === 0 ? 1 : -1;
+        const perpLat = (-dLon / len) * 0.0024 * sideSign;
+        const perpLon = ((dLat / len) * 0.0024 * sideSign) / cosLat;
+        const twyRef = ['A', 'B', 'C', 'L', 'G', 'H'][idx % 6];
         const t1: [number, number] = [p1[0] + perpLat, p1[1] + perpLon];
         const t2: [number, number] = [p2[0] + perpLat, p2[1] + perpLon];
         taxiways.push({
-          id: `cat-twy-${r.ident}-par`,
+          id: `syn-twy-${rw.id}-par`,
           kind: 'taxiway',
           ref: twyRef,
           widthM: 22,
           coords: [t1, t2],
         });
-        [0.12, 0.45, 0.88].forEach((frac, cIdx) => {
+        [0.08, 0.34, 0.66, 0.92].forEach((frac, cIdx) => {
           const rx = p1[0] + (p2[0] - p1[0]) * frac;
           const ry = p1[1] + (p2[1] - p1[1]) * frac;
           const tx = t1[0] + (t2[0] - t1[0]) * frac;
           const ty = t1[1] + (t2[1] - t1[1]) * frac;
           taxiways.push({
-            id: `cat-twy-${r.ident}-ex-${cIdx}`,
+            id: `syn-twy-${rw.id}-ex-${cIdx}`,
             kind: 'taxiway',
             ref: `${twyRef}${cIdx + 1}`,
             widthM: 18,
@@ -2215,9 +2291,11 @@ export function createApiRouter(): express.Router {
           });
         });
       });
+    }
 
-      const aLat = catalog.lat;
-      const aLon = catalog.lon;
+    if (aprons.length === 0) {
+      const aLat = catalog?.lat ?? lat;
+      const aLon = catalog?.lon ?? lon;
       aprons.push([
         [aLat - 0.004, aLon - 0.006],
         [aLat + 0.004, aLon - 0.006],

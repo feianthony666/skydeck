@@ -183,7 +183,7 @@ export function buildFr24AircraftSvg(
   switch (model) {
     case 'a380':
       // Massive double-deck widebody, 4 engine pods, very broad wingspan
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 1.5C17.2 1.5 18.2 3.8 18.2 7.2V11.2L30 17.5V19.6L18.2 17.2V24.6L22.5 27.8V29.6L16 28.2L9.5 29.6V27.8L13.8 24.6V17.2L2 19.6V17.5L13.8 11.2V7.2C13.8 3.8 14.8 1.5 16 1.5Z"/>
         <ellipse cx="9" cy="14.2" rx="1" ry="1.8" fill="${stroke}" stroke="none"/>
         <ellipse cx="5.4" cy="16" rx="0.9" ry="1.6" fill="${stroke}" stroke="none"/>
@@ -193,7 +193,7 @@ export function buildFr24AircraftSvg(
 
     case 'heavy4':
       // Long sleek 4-engine quadjet (B747 / A340)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 1.2L17.6 5.5V11.6L29.5 18.8V20.8L17.6 17.4V25.2L21.8 28.4V30L16 28.6L10.2 30V28.4L14.4 25.2V17.4L2.5 20.8V18.8L14.4 11.6V5.5L16 1.2Z"/>
         <rect x="8.8" y="13.8" width="1.6" height="3" rx="0.6" fill="${stroke}" stroke="none"/>
         <rect x="5" y="16" width="1.4" height="2.6" rx="0.6" fill="${stroke}" stroke="none"/>
@@ -203,7 +203,7 @@ export function buildFr24AircraftSvg(
 
     case 'widebody':
       // Large twin-engine widebody (B777 / B787 / A350 / A330)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 1.4C17.1 1.4 17.8 3.6 17.8 6.8V11.8L29.4 18.2V20.2L17.8 17.1V25L21.8 28.2V29.8L16 28.5L10.2 29.8V28.2L14.2 25V17.1L2.6 20.2V18.2L14.2 11.8V6.8C14.2 3.6 14.9 1.4 16 1.4Z"/>
         <ellipse cx="10.2" cy="14.1" rx="1.15" ry="2.1" fill="${stroke}" stroke="none"/>
         <ellipse cx="21.8" cy="14.1" rx="1.15" ry="2.1" fill="${stroke}" stroke="none"/>
@@ -211,19 +211,19 @@ export function buildFr24AircraftSvg(
 
     case 'rearjet':
       // Rear-mounted twinjet with swept T-tail (CRJ / ERJ / MD80 / C909)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 2.5C16.9 2.5 17.4 4.4 17.4 7V13.4L27.4 18.6V20.4L17.4 17.8V22.8L20 23.4V25.2L17.4 25.1V26.4L21 29.1V30.4L16 29.4L11 30.4V29.1L14.6 26.4V25.1L12 25.2V23.4L14.6 22.8V17.8L4.6 20.4V18.6L14.6 13.4V7C14.6 4.4 15.1 2.5 16 2.5Z"/>
       </svg>`;
 
     case 'bizjet':
       // Sleek pointed business jet with sharp wingtips & rear nacelles
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 2.2L17.2 6.8V14.2L26.5 19.2V20.7L17.2 18.1V22.8L19.4 23.5V25L17.2 24.9V26.8L20.4 29.4V30.5L16 29.4L11.6 30.5V29.4L14.8 26.8V24.9L12.6 25V23.5L14.8 22.8V18.1L5.5 20.7V19.2L14.8 14.2V6.8L16 2.2Z"/>
       </svg>`;
 
     case 'turboprop':
       // High-aspect straight wing twin turboprop with nacelles (ATR / Dash 8 / MA60)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 2.8C16.9 2.8 17.5 4.8 17.5 7.5V12.2L29.5 13.4V15.8L17.5 16.4V25.4L21.8 28.4V29.8L16 28.7L10.2 29.8V28.4L14.5 25.4V16.4L2.5 15.8V13.4L14.5 12.2V7.5C14.5 4.8 15.1 2.8 16 2.8Z"/>
         <rect x="9.6" y="10.6" width="1.7" height="3.2" rx="0.6" fill="${stroke}" stroke="none"/>
         <rect x="20.7" y="10.6" width="1.7" height="3.2" rx="0.6" fill="${stroke}" stroke="none"/>
@@ -231,14 +231,14 @@ export function buildFr24AircraftSvg(
 
     case 'lightprop':
       // Classic single-engine Cessna/Piper light aircraft with straight high wing & nose prop
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <line x1="12" y1="3.4" x2="20" y2="3.4" stroke="${stroke}" stroke-width="1.8" stroke-linecap="round"/>
         <path d="M16 4.2L17.2 7.4V11.2L29 12V15.4L17.2 15.6L16.8 25.2L20.5 27.6V29.2L16 28.4L11.5 29.2V27.6L15.2 25.2L14.8 15.6L3 15.4V12L14.8 11.2V7.4L16 4.2Z"/>
       </svg>`;
 
     case 'heli':
       // Helicopter fuselage + tailboom + 4-blade X rotor disc
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 6.5C18.4 6.5 19.6 9 19.6 12.5C19.6 15.6 18.2 17.5 17 18.2V26.5L19.5 28V29.5H12.5V28L15 26.5V18.2C13.8 17.5 12.4 15.6 12.4 12.5C12.4 9 13.6 6.5 16 6.5Z"/>
         <line x1="5.5" y1="4.5" x2="26.5" y2="21.5" stroke="${stroke}" stroke-width="2" stroke-linecap="round"/>
         <line x1="26.5" y1="4.5" x2="5.5" y2="21.5" stroke="${stroke}" stroke-width="2" stroke-linecap="round"/>
@@ -247,13 +247,13 @@ export function buildFr24AircraftSvg(
 
     case 'fighter':
       // Delta / swept supersonic fighter silhouette (F16 / F35 / J20 / Eurofighter)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 1.5L17.8 8.5L27.8 18.5V21.5L18.4 19.5L18 24L22.2 28.2V30L17 28L16 29.5L15 28L9.8 30V28.2L14 24L13.6 19.5L4.2 21.5V18.5L14.2 8.5L16 1.5Z"/>
       </svg>`;
 
     case 'milcargo':
       // Broad high-wing heavy military cargo / tanker (C17 / C130 / Y20 / KC135)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 2.2C17.6 2.2 18.6 4.8 18.6 8.2V11.2L30.2 15.8V18.6L18.6 17.2V25.2L23.2 28.2V30L16 28.8L8.8 30V28.2L13.4 25.2V17.2L1.8 18.6V15.8L13.4 11.2V8.2C13.4 4.8 14.4 2.2 16 2.2Z"/>
         <rect x="8.4" y="12.2" width="1.6" height="2.8" rx="0.5" fill="${stroke}" stroke="none"/>
         <rect x="5" y="13.5" width="1.5" height="2.5" rx="0.5" fill="${stroke}" stroke="none"/>
@@ -264,7 +264,7 @@ export function buildFr24AircraftSvg(
     case 'narrowbody':
     default:
       // Classic FR24 narrowbody jetliner (A320 / B737 / C919 / B757)
-      return `<svg viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round">
         <path d="M16 2C16.9 2 17.5 4.2 17.5 7.4V12.2L28 17.8V19.7L17.5 16.9V24.8L21 27.6V29.3L16 28.1L11 29.3V27.6L14.5 24.8V16.9L4 19.7V17.8L14.5 12.2V7.4C14.5 4.2 15.1 2 16 2Z"/>
       </svg>`;
   }

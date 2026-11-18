@@ -4,13 +4,20 @@ import {
   ArrowUpRight,
   Ban,
   Clock,
+  Compass,
   Filter,
   Plane,
   Search,
   X,
 } from 'lucide-react';
 import React, {useMemo, useState} from 'react';
-import type {AirportBoardFlight, AirportBoardResponse, AirportWeather} from '../types/aviation';
+import {AIRPORT_CATALOG} from '../data/aviationCatalog';
+import type {
+  AirfieldSurfaceData,
+  AirportBoardFlight,
+  AirportBoardResponse,
+  AirportWeather,
+} from '../types/aviation';
 import {Badge} from './ui/badge';
 import {Button} from './ui/button';
 import {Card, CardContent, CardHeader, CardTitle} from './ui/card';
@@ -23,11 +30,13 @@ interface AirportBoardPanelProps {
   board: AirportBoardResponse | null;
   loading: boolean;
   weather?: AirportWeather;
+  surface?: AirfieldSurfaceData | null;
   timeDisplayMode: 'airport' | 'local' | 'utc';
   onTimeDisplayModeChange: (mode: 'airport' | 'local' | 'utc') => void;
   activeFilter: 'none' | 'all' | 'arrivals' | 'departures' | 'delayed';
   onFilterChange: (filter: 'none' | 'all' | 'arrivals' | 'departures' | 'delayed') => void;
   onSelectFlightFromBoard: (item: AirportBoardFlight) => void;
+  onFocusAirfield?: () => void;
   onClose: () => void;
 }
 
@@ -129,16 +138,131 @@ function delayLabel(index: number | null): string {
   return 'Normal Ops';
 }
 
+interface SchematicRunway {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  labelA: string;
+  labelB: string;
+}
+
+interface SchematicTaxiway {
+  id: string;
+  points: string;
+}
+
+interface AirfieldSchematic {
+  runways: SchematicRunway[];
+  taxiways: SchematicTaxiway[];
+}
+
+function buildAirfieldSchematic(
+  icao: string,
+  surface?: AirfieldSurfaceData | null,
+): AirfieldSchematic {
+  const W = 320;
+  const H = 104;
+  const padX = 36;
+  const padY = 18;
+
+  if (surface && surface.runways.length > 0) {
+    const allPts = surface.runways.flatMap((r) => r.coords);
+    if (allPts.length >= 2) {
+      let minLat = Infinity;
+      let maxLat = -Infinity;
+      let minLon = Infinity;
+      let maxLon = -Infinity;
+      for (const [lat, lon] of allPts) {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+      }
+      const midLatRad = (((minLat + maxLat) * 0.5) * Math.PI) / 180;
+      const cosLat = Math.max(0.2, Math.cos(midLatRad));
+      const spanX = Math.max(0.004, (maxLon - minLon) * cosLat);
+      const spanY = Math.max(0.004, maxLat - minLat);
+      const scale = Math.min((W - padX * 2) / spanX, (H - padY * 2) / spanY);
+      const offX = (W - spanX * scale) * 0.5;
+      const offY = (H - spanY * scale) * 0.5;
+
+      const proj = ([lat, lon]: [number, number]) => ({
+        x: offX + (lon - minLon) * cosLat * scale,
+        y: offY + (maxLat - lat) * scale,
+      });
+
+      const runways = surface.runways.slice(0, 8).map((r) => {
+        const a = proj(r.coords[0]);
+        const b = proj(r.coords[r.coords.length - 1]);
+        const parts = (r.ref || '').split('/');
+        return {
+          id: r.id,
+          x1: a.x,
+          y1: a.y,
+          x2: b.x,
+          y2: b.y,
+          labelA: (parts[0] || '').trim(),
+          labelB: (parts[1] || '').trim(),
+        };
+      });
+
+      const taxiways = surface.taxiways
+        .slice(0, 90)
+        .filter((t) => t.coords.length >= 2)
+        .map((t) => ({
+          id: t.id,
+          points: t.coords
+            .map((c) => {
+              const p = proj(c);
+              return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+            })
+            .join(' '),
+        }));
+
+      return {runways, taxiways};
+    }
+  }
+
+  const cat = AIRPORT_CATALOG.find((a) => a.icao.toUpperCase() === icao.toUpperCase());
+  const rwys = cat?.runways ?? [];
+  if (rwys.length === 0) return {runways: [], taxiways: []};
+
+  return {
+    taxiways: [],
+    runways: rwys.slice(0, 4).map((r, idx) => {
+      const rad = ((r.headingDeg - 90) * Math.PI) / 180;
+      const halfLen = 42;
+      const spreadY = (idx - (rwys.length - 1) * 0.5) * 20;
+      const cx = W * 0.5;
+      const cy = H * 0.5 + spreadY;
+      const parts = r.ident.split('/');
+      return {
+        id: `${icao}-${r.ident}-${idx}`,
+        x1: cx - Math.cos(rad) * halfLen,
+        y1: cy - Math.sin(rad) * halfLen,
+        x2: cx + Math.cos(rad) * halfLen,
+        y2: cy + Math.sin(rad) * halfLen,
+        labelA: (parts[0] || '').trim(),
+        labelB: (parts[1] || '').trim(),
+      };
+    }),
+  };
+}
+
 export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
   airport,
   board,
   loading,
   weather,
+  surface,
   timeDisplayMode,
   onTimeDisplayModeChange,
   activeFilter,
   onFilterChange,
   onSelectFlightFromBoard,
+  onFocusAirfield,
   onClose,
 }) => {
   const [boardTab, setBoardTab] = useState<'departures' | 'arrivals'>('departures');
@@ -186,7 +310,43 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
     return all.filter((f) => f.isDelayed).length;
   }, [board]);
 
+  const airfieldSchematic = useMemo(
+    () => buildAirfieldSchematic(airport.icao, surface),
+    [airport.icao, surface],
+  );
+
   const delayIdx = board?.delayIndex;
+  const onTimePct = useMemo(() => {
+    const depPct = delayIdx?.departuresDelayedPct;
+    const arrPct = delayIdx?.arrivalsDelayedPct;
+    if (typeof depPct === 'number' && typeof arrPct === 'number') {
+      return Math.max(0, Math.min(100, Math.round(100 - (depPct + arrPct) * 0.5)));
+    }
+    if (typeof depPct === 'number') return Math.max(0, Math.min(100, Math.round(100 - depPct)));
+    const all = [...(board?.departures ?? []), ...(board?.arrivals ?? [])];
+    if (all.length > 0) {
+      const delayed = all.filter((f) => f.isDelayed || isRowCancelled(f)).length;
+      return Math.max(0, Math.min(100, Math.round(((all.length - delayed) / all.length) * 100)));
+    }
+    return null;
+  }, [board, delayIdx]);
+
+  const opsTone =
+    onTimePct === null
+      ? 'Flights operating'
+      : onTimePct >= 82
+        ? 'Flights are on time.'
+        : onTimePct >= 65
+          ? 'Minor schedule delays.'
+          : 'Significant airport delays.';
+
+  const airportLocalClock = formatEpochInMode(
+    Math.floor(Date.now() / 1000),
+    'airport',
+    board?.timezoneName,
+    board?.utcOffsetSec,
+  );
+
   const tzAbbr =
     timeDisplayMode === 'utc'
       ? 'UTC'
@@ -198,15 +358,19 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
     <aside
       role="complementary"
       aria-label={`Airport arrivals, departures, and delay index for ${airport.iata || airport.icao}`}
-      className="h-full"
+      className="flex-1 h-full min-h-0 flex flex-col"
     >
-      <Card className="h-full flex flex-col overflow-hidden">
-        <CardHeader className="flex flex-row items-start justify-between gap-3 pb-3 shrink-0">
-          <div className="space-y-1 min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <CardTitle className="font-mono text-base font-semibold text-foreground">
-                {airport.iata ? `${airport.iata} · ${airport.icao}` : airport.icao}
-              </CardTitle>
+      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl">
+        {/* Compact Sticky Airport Top Bar */}
+        <CardHeader className="py-2.5 px-4 shrink-0 border-b border-border/70 flex flex-row items-center justify-between gap-2">
+          <div className="min-w-0 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+              <span className="font-bold text-foreground">
+                {airport.iata ? `${airport.iata}` : airport.icao}
+              </span>
+              {board?.city && <span className="truncate">{board.city}</span>}
+              <span className="tabular-nums text-foreground/80">{airportLocalClock}</span>
+              <span className="text-[10px]">({airport.icao})</span>
               {weather && (
                 <Badge
                   variant={
@@ -221,22 +385,201 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                 </Badge>
               )}
             </div>
-            <p className="text-xs text-muted-foreground truncate">{board?.name || airport.name}</p>
+            <CardTitle className="font-display text-sm sm:text-base font-bold leading-tight text-foreground truncate">
+              {board?.name || airport.name}
+            </CardTitle>
           </div>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onClose}
-            aria-label="Close airport board"
-            className="shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </Button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onFocusAirfield && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onFocusAirfield}
+                title="Zoom radar onto airport taxiways and runways"
+              >
+                <Compass className="w-3.5 h-3.5 text-amber-500" />
+                <span className="hidden sm:inline">Airfield</span>
+              </Button>
+            )}
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={onClose}
+              aria-label="Close airport board"
+            >
+              <X className="w-4 h-4" />
+            </Button>
+          </div>
         </CardHeader>
 
-        <CardContent className="flex-1 overflow-y-auto flex flex-col gap-4 pt-0">
-          {/* Live Delay Index Cards */}
+        <CardContent className="flex-1 min-h-0 overflow-y-auto overscroll-contain pt-3 pb-6 [scrollbar-width:thin]">
+          <div className="space-y-3">
+            {/* FlightDeck-style Dark Airfield Schematic (Runways + Gold Taxiways for ALL Airports) */}
+            <div className="relative rounded-xl bg-[#0B0E14] text-white overflow-hidden border border-border">
+              <div className="h-[104px] w-full relative">
+                <svg
+                  viewBox="0 0 320 104"
+                  className="w-full h-full block"
+                  role="img"
+                  aria-label={`Runway schematic for ${airport.iata || airport.icao}`}
+                >
+                  <rect width="320" height="104" fill="#0B0E14" />
+                  <g stroke="rgba(255,255,255,0.045)" strokeWidth="1">
+                    <line x1="0" y1="26" x2="320" y2="26" />
+                    <line x1="0" y1="52" x2="320" y2="52" />
+                    <line x1="0" y1="78" x2="320" y2="78" />
+                    <line x1="80" y1="0" x2="80" y2="104" />
+                    <line x1="160" y1="0" x2="160" y2="104" />
+                    <line x1="240" y1="0" x2="240" y2="104" />
+                  </g>
+                  {airfieldSchematic.taxiways.map((twy) => (
+                    <polyline
+                      key={twy.id}
+                      points={twy.points}
+                      fill="none"
+                      stroke="rgba(250, 204, 21, 0.38)"
+                      strokeWidth="0.9"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  ))}
+                  {airfieldSchematic.runways.map((r) => (
+                    <g key={r.id}>
+                      <line
+                        x1={r.x1}
+                        y1={r.y1}
+                        x2={r.x2}
+                        y2={r.y2}
+                        stroke="rgba(255,255,255,0.22)"
+                        strokeWidth="5"
+                        strokeLinecap="round"
+                      />
+                      <line
+                        x1={r.x1}
+                        y1={r.y1}
+                        x2={r.x2}
+                        y2={r.y2}
+                        stroke="#F8FAFC"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                      />
+                      {r.labelA && (
+                        <text
+                          x={r.x1}
+                          y={Math.max(11, r.y1 - 4)}
+                          fill="rgba(248,250,252,0.88)"
+                          fontSize="8.5"
+                          fontFamily="JetBrains Mono, monospace"
+                          fontWeight="700"
+                          textAnchor="middle"
+                        >
+                          {r.labelA}
+                        </text>
+                      )}
+                      {r.labelB && (
+                        <text
+                          x={r.x2}
+                          y={Math.min(100, r.y2 + 10)}
+                          fill="rgba(248,250,252,0.88)"
+                          fontSize="8.5"
+                          fontFamily="JetBrains Mono, monospace"
+                          fontWeight="700"
+                          textAnchor="middle"
+                        >
+                          {r.labelB}
+                        </text>
+                      )}
+                    </g>
+                  ))}
+                  {airfieldSchematic.runways.length === 0 && (
+                    <text
+                      x="160"
+                      y="55"
+                      fill="rgba(248,250,252,0.55)"
+                      fontSize="10"
+                      fontFamily="JetBrains Mono, monospace"
+                      textAnchor="middle"
+                    >
+                      Loading {airport.icao} runway & taxiway geometry…
+                    </text>
+                  )}
+                </svg>
+                {onFocusAirfield && (
+                  <button
+                    type="button"
+                    onClick={onFocusAirfield}
+                    className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full bg-white/12 hover:bg-white/22 backdrop-blur-md px-2.5 py-0.5 text-[10.5px] font-medium text-white border border-white/15 cursor-pointer"
+                  >
+                    <Compass className="w-3 h-3 text-amber-300" />
+                    Zoom Airfield
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <p className="text-xs font-medium text-muted-foreground">{opsTone}</p>
+          {/* FlightDeck-style On-Time Today & Weather Summary Card */}
+          <div className="grid grid-cols-2 gap-2.5 rounded-xl border border-border bg-secondary/45 p-3">
+            <div className="space-y-1">
+              <div className="text-[11px] text-muted-foreground font-medium">On time today</div>
+              <div className="flex items-center gap-2">
+                <svg viewBox="0 0 24 24" className="w-5 h-5 shrink-0 -rotate-90" aria-hidden="true">
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="9"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeOpacity="0.18"
+                    strokeWidth="3"
+                  />
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="9"
+                    fill="none"
+                    stroke={
+                      onTimePct === null || onTimePct >= 80
+                        ? '#22c55e'
+                        : onTimePct >= 65
+                          ? '#f59e0b'
+                          : '#ef4444'
+                    }
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeDasharray={`${((onTimePct ?? 85) / 100) * 56.55} 56.55`}
+                  />
+                </svg>
+                <span className="font-mono text-lg font-bold text-foreground tabular-nums">
+                  {onTimePct !== null ? `${onTimePct}%` : '—'}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-1 border-l border-border pl-3">
+              <div className="text-[11px] text-muted-foreground font-medium">Weather</div>
+              <div className="font-mono text-sm font-bold text-foreground truncate tabular-nums">
+                {weather ? (
+                  <>
+                    {weather.tempC !== null ? `${Math.round(weather.tempC)}°C` : weather.flightCategory}{' '}
+                    <span className="font-sans text-xs font-semibold text-muted-foreground">
+                      {weather.wxString || weather.flightCategory}
+                    </span>
+                  </>
+                ) : (
+                  'Syncing METAR…'
+                )}
+              </div>
+              {weather && (
+                <div className="font-mono text-[10px] text-muted-foreground truncate tabular-nums">
+                  {weather.windDirDeg ?? 'VRB'}°/{weather.windSpeedKts}kt · Vis {weather.visibilitySm ?? '—'}SM
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Live Delay Index Breakdown Cards */}
           <div className="grid grid-cols-2 gap-2.5">
             <div className="rounded-xl border border-border bg-background/60 p-3">
               <div className="flex items-center justify-between gap-1">
@@ -536,6 +879,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                 );
               })
             )}
+          </div>
           </div>
         </CardContent>
       </Card>

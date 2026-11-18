@@ -50,6 +50,7 @@ import {
 } from './services/offlineStore';
 import type {
   AcarsMessage,
+  AirfieldSurfaceData,
   AirportBoardFlight,
   AirportBoardResponse,
   AirportDisruption,
@@ -156,6 +157,7 @@ export default function App() {
   } | null>(null);
   const [airportBoard, setAirportBoard] = useState<AirportBoardResponse | null>(null);
   const [airportBoardLoading, setAirportBoardLoading] = useState(false);
+  const [selectedAirportSurface, setSelectedAirportSurface] = useState<AirfieldSurfaceData | null>(null);
   const [airportTrafficFilter, setAirportTrafficFilter] = useState<
     'none' | 'all' | 'arrivals' | 'departures' | 'delayed'
   >('none');
@@ -183,6 +185,7 @@ export default function App() {
   boundsRef.current = bounds;
   const rawFlightsCountRef = useRef(0);
   rawFlightsCountRef.current = rawFlights.length;
+  const flightRegistryRef = useRef<Map<string, {flight: LiveFlight; seenAtMs: number}>>(new Map());
   const initialLocateAttemptedRef = useRef(false);
   const flightsAbortRef = useRef<AbortController | null>(null);
   const airportsAbortRef = useRef<AbortController | null>(null);
@@ -298,10 +301,71 @@ export default function App() {
         if (ac.signal.aborted) return;
 
         if (data.flights.length > 0) {
-          setRawFlights(data.flights);
+          const nowMs = Date.now();
+          const reg = flightRegistryRef.current;
+
+          for (const incoming of data.flights) {
+            const key = (incoming.icao24 || incoming.id).toLowerCase();
+            const prev = reg.get(key)?.flight;
+            const merged: LiveFlight = prev
+              ? {
+                  ...prev,
+                  ...incoming,
+                  dbFlags: (prev.dbFlags ?? 0) | (incoming.dbFlags ?? 0) || undefined,
+                  isLadd: Boolean(prev.isLadd || incoming.isLadd),
+                  isMilitary: Boolean(prev.isMilitary || incoming.isMilitary),
+                  isPia: Boolean(prev.isPia || incoming.isPia),
+                  ownerOperator: incoming.ownerOperator || prev.ownerOperator,
+                  registration: incoming.registration || prev.registration,
+                  aircraftType:
+                    incoming.aircraftType && incoming.aircraftType !== 'A320'
+                      ? incoming.aircraftType
+                      : prev.aircraftType || incoming.aircraftType,
+                  origin: incoming.origin || prev.origin,
+                  destination: incoming.destination || prev.destination,
+                  trail:
+                    incoming.trail && incoming.trail.length > 0 ? incoming.trail : prev.trail,
+                }
+              : incoming;
+            reg.set(key, {flight: merged, seenAtMs: nowMs});
+          }
+
+          // Prune stale aircraft (> 65 seconds unseen)
+          for (const [k, entry] of reg.entries()) {
+            if (nowMs - entry.seenAtMs > 65_000) {
+              reg.delete(k);
+            }
+          }
+
+          // Keep up to 2,600 tracked aircraft, prioritizing Emergency -> Flagged -> Recent/In-Bounds
+          const priorityRank = (e: {flight: LiveFlight; seenAtMs: number}) => {
+            const f = e.flight;
+            if (f.squawk === '7500' || f.squawk === '7600' || f.squawk === '7700') return 4;
+            if (f.isLadd || f.isMilitary || f.isPia) return 3;
+            const inB =
+              f.lat >= targetBounds.lamin &&
+              f.lat <= targetBounds.lamax &&
+              f.lon >= targetBounds.lomin &&
+              f.lon <= targetBounds.lomax;
+            if (inB && !f.onGround) return 2;
+            if (inB) return 1;
+            return 0;
+          };
+
+          const mergedList = Array.from(reg.values())
+            .sort((a, b) => {
+              const pa = priorityRank(a);
+              const pb = priorityRank(b);
+              if (pa !== pb) return pb - pa;
+              return b.seenAtMs - a.seenAtMs;
+            })
+            .slice(0, 2600)
+            .map((e) => e.flight);
+
+          setRawFlights(mergedList);
           setLastFetchedAt(data.fetchedAt);
           setFlightsError(null);
-          await saveFlightSnapshot(regionKey, data.flights, data.fetchedAt);
+          await saveFlightSnapshot(regionKey, mergedList.slice(0, 900), data.fetchedAt);
         } else {
           const cached = await loadFlightSnapshot(regionKey);
           if (cached && rawFlightsCountRef.current === 0) {
@@ -313,11 +377,11 @@ export default function App() {
       } catch (err) {
         if (ac.signal.aborted) return;
         const cached = await loadFlightSnapshot(regionKey);
-        if (cached) {
+        if (cached && rawFlightsCountRef.current === 0) {
           setRawFlights(cached.flights);
           setLastFetchedAt(cached.fetchedAt);
           setFlightsError('Using cached ADS-B snapshot with Dead-Reckoning');
-        } else {
+        } else if (rawFlightsCountRef.current === 0) {
           setFlightsError(err instanceof Error ? err.message : 'Unable to reach ADS-B feeds');
         }
       } finally {
@@ -638,7 +702,27 @@ export default function App() {
     setAirportTrafficFilter('none');
     setAirportBoardLoading(true);
     setAirportBoard(null);
+    setSelectedAirportSurface(null);
     setActiveView('radar');
+
+    const matchMarker =
+      mapAirports.find((m) => m.icao.toUpperCase() === ap.icao.toUpperCase()) ??
+      AIRPORT_CATALOG.find((c) => c.icao.toUpperCase() === ap.icao.toUpperCase());
+
+    if (matchMarker) {
+      apiFetchJson<AirfieldSurfaceData>(
+        `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${matchMarker.lat}&lon=${matchMarker.lon}`,
+      )
+        .then((surf) => setSelectedAirportSurface(surf))
+        .catch(() => {});
+    } else {
+      apiFetchJson<AirfieldSurfaceData>(
+        `/api/surface?icao=${encodeURIComponent(ap.icao || ap.iata)}`,
+      )
+        .then((surf) => setSelectedAirportSurface(surf))
+        .catch(() => {});
+    }
+
     try {
       const qs = new URLSearchParams({
         code: ap.iata || ap.icao,
@@ -646,12 +730,19 @@ export default function App() {
       });
       const data = await apiFetchJson<AirportBoardResponse>(`/api/airport-board?${qs.toString()}`);
       setAirportBoard(data);
+      if (!matchMarker && Number.isFinite(data.lat) && Number.isFinite(data.lon) && (data.lat !== 0 || data.lon !== 0)) {
+        apiFetchJson<AirfieldSurfaceData>(
+          `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${data.lat}&lon=${data.lon}`,
+        )
+          .then((surf) => setSelectedAirportSurface(surf))
+          .catch(() => {});
+      }
     } catch {
       // Keep panel open with local catalog info
     } finally {
       setAirportBoardLoading(false);
     }
-  }, []);
+  }, [mapAirports]);
 
   const handleSelectFlightFromBoard = useCallback(
     (item: AirportBoardFlight) => {
@@ -982,13 +1073,13 @@ export default function App() {
         className={
           isPortraitMobile
             ? `fixed left-0 right-0 bottom-16 z-[550] flex flex-col gap-1.5 rounded-t-3xl bg-card/96 backdrop-blur-md border-t border-border shadow-2xl transition-all duration-300 ease-out pb-safe ${
-                mobileSheetDetent === 'expanded' ? 'h-[80dvh]' : 'h-[45dvh]'
+                mobileSheetDetent === 'expanded' ? 'h-[82dvh]' : 'h-[48dvh]'
               } ${
                 sidebarOpen
                   ? 'translate-y-0 opacity-100 pointer-events-auto'
                   : 'translate-y-full opacity-0 pointer-events-none'
               }`
-            : `fixed top-3 left-3 bottom-20 z-[550] w-[min(400px,calc(100vw-24px))] flex flex-col gap-2 transition-all duration-300 ease-out ${
+            : `fixed top-3 left-3 bottom-[84px] z-[550] w-[min(410px,calc(100vw-24px))] flex flex-col gap-2 transition-all duration-300 ease-out ${
                 sidebarOpen
                   ? 'translate-x-0 opacity-100 pointer-events-auto'
                   : '-translate-x-6 opacity-0 pointer-events-none'
@@ -1040,20 +1131,38 @@ export default function App() {
           </div>
         )}
 
-        <div className={`flex-1 min-h-0 ${isPortraitMobile ? 'px-2 pb-2' : 'drop-shadow-xl'}`}>
+        <div className={`flex-1 min-h-0 flex flex-col ${isPortraitMobile ? 'px-2 pb-2' : 'drop-shadow-xl'}`}>
           {activeSidebarType === 'airport' && selectedAirport ? (
             <AirportBoardPanel
               airport={selectedAirport}
               board={airportBoard}
               loading={airportBoardLoading}
               weather={selectedAirportWeather}
+              surface={selectedAirportSurface}
               timeDisplayMode={radarSettings.timeDisplayMode}
               onTimeDisplayModeChange={(mode) => updateRadarSettings({timeDisplayMode: mode})}
               activeFilter={airportTrafficFilter}
               onFilterChange={setAirportTrafficFilter}
               onSelectFlightFromBoard={handleSelectFlightFromBoard}
+              onFocusAirfield={() => {
+                const coords =
+                  selectedAirportSurface ??
+                  airportBoard ??
+                  mapAirports.find((m) => m.icao.toUpperCase() === selectedAirport.icao.toUpperCase()) ??
+                  AIRPORT_CATALOG.find((c) => c.icao.toUpperCase() === selectedAirport.icao.toUpperCase());
+                if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lon)) {
+                  setFlyToLocation((prev) => ({
+                    lat: coords.lat,
+                    lon: coords.lon,
+                    zoom: 13.6,
+                    seq: (prev?.seq ?? 0) + 1,
+                  }));
+                  if (isPortraitMobile) setMobileSheetDetent('peek');
+                }
+              }}
               onClose={() => {
                 setSelectedAirport(null);
+                setSelectedAirportSurface(null);
                 setAirportTrafficFilter('none');
                 setSidebarMode(selectedFlight ? 'flight' : null);
               }}

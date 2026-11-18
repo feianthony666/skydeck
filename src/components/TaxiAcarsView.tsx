@@ -6,6 +6,7 @@ import {apiFetchJson} from '../services/directAviationClient';
 import {buildFr24AircraftSvg, resolveFr24ModelClass} from './aircraftIcons';
 import type {
   AcarsMessage,
+  AirfieldSurfaceData,
   AirportWeather,
   LiveFlight,
   TaxiwaySegment,
@@ -39,6 +40,7 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
   const [groundTraffic, setGroundTraffic] = useState<LiveFlight[]>([]);
   const [nearbyAirborne, setNearbyAirborne] = useState<LiveFlight[]>([]);
   const [segments, setSegments] = useState<TaxiwaySegment[]>([]);
+  const [surfaceData, setSurfaceData] = useState<AirfieldSurfaceData | null>(null);
   const [taxiLoading, setTaxiLoading] = useState(false);
   const [acarsFilter, setAcarsFilter] = useState<'ALL' | 'OOOI' | 'POS' | 'WX' | 'ATC' | 'MAINT'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
@@ -61,15 +63,22 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
 
   const fetchAirportTaxi = async (icao: string) => {
     setTaxiLoading(true);
+    const spec = AIRPORT_CATALOG.find((a) => a.icao === icao) ?? AIRPORT_CATALOG[0];
     try {
-      const data = await apiFetchJson<{
-        groundTraffic: LiveFlight[];
-        nearbyAirborne: LiveFlight[];
-        segments: TaxiwaySegment[];
-      }>(`/api/airport-taxi?icao=${encodeURIComponent(icao)}`);
-      setGroundTraffic(data.groundTraffic ?? []);
-      setNearbyAirborne(data.nearbyAirborne ?? []);
-      setSegments(data.segments ?? []);
+      const [taxiRes, surfRes] = await Promise.all([
+        apiFetchJson<{
+          groundTraffic: LiveFlight[];
+          nearbyAirborne: LiveFlight[];
+          segments: TaxiwaySegment[];
+        }>(`/api/airport-taxi?icao=${encodeURIComponent(icao)}`),
+        apiFetchJson<AirfieldSurfaceData>(
+          `/api/surface?icao=${encodeURIComponent(icao)}&lat=${spec.lat}&lon=${spec.lon}`,
+        ).catch(() => null),
+      ]);
+      setGroundTraffic(taxiRes.groundTraffic ?? []);
+      setNearbyAirborne(taxiRes.nearbyAirborne ?? []);
+      setSegments(taxiRes.segments ?? []);
+      if (surfRes) setSurfaceData(surfRes);
     } catch {
       // Keep cached state when offline
     } finally {
@@ -78,6 +87,7 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
   };
 
   useEffect(() => {
+    setSurfaceData(null);
     fetchAirportTaxi(selectedIcao);
     const id = window.setInterval(() => fetchAirportTaxi(selectedIcao), 10000);
     return () => clearInterval(id);
@@ -165,14 +175,179 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
     const layer = taxiGeomRef.current;
     if (!layer) return;
     layer.clearLayers();
-    for (const seg of segments) {
-      L.polyline(seg.coords, {
-        color: seg.kind === 'runway' ? '#38BDF8' : '#F59E0B',
-        weight: seg.kind === 'runway' ? 5 : 2,
-        opacity: seg.kind === 'runway' ? 0.8 : 0.65,
+
+    const aprons = surfaceData?.aprons ?? [];
+    for (const poly of aprons) {
+      L.polygon(poly, {
+        color: 'rgba(250, 204, 21, 0.25)',
+        weight: 0.9,
+        fillColor: theme === 'dark' ? '#0f141e' : '#263244',
+        fillOpacity: theme === 'dark' ? 0.65 : 0.45,
+        interactive: false,
       }).addTo(layer);
     }
-  }, [segments]);
+
+    const taxiways =
+      surfaceData && surfaceData.taxiways.length > 0
+        ? surfaceData.taxiways
+        : segments.filter((s) => s.kind === 'taxiway');
+
+    const placedRefs = new Set<string>();
+    for (const seg of taxiways) {
+      if (seg.coords.length < 2) continue;
+      L.polyline(seg.coords, {
+        color: 'rgba(250, 204, 21, 0.32)',
+        weight: 7,
+        opacity: 0.9,
+        interactive: false,
+      }).addTo(layer);
+      L.polyline(seg.coords, {
+        color: theme === 'dark' ? '#111622' : '#1e293b',
+        weight: 4.5,
+        opacity: 0.95,
+        interactive: false,
+      }).addTo(layer);
+      L.polyline(seg.coords, {
+        color: '#FACC15',
+        weight: 1,
+        opacity: 0.5,
+        interactive: false,
+      }).addTo(layer);
+
+      const mid = seg.coords[Math.floor(seg.coords.length / 2)];
+      if (seg.ref && !placedRefs.has(`${seg.ref}-${mid[0].toFixed(3)}`)) {
+        placedRefs.add(`${seg.ref}-${mid[0].toFixed(3)}`);
+        L.marker(mid, {
+          interactive: false,
+          icon: L.divIcon({
+            className: 'skydeck-taxi-badge',
+            iconSize: [28, 14],
+            iconAnchor: [14, 7],
+            html: `<span style="display:inline-flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:800;color:#FDE047;text-shadow:0 1px 3px rgba(0,0,0,0.95);">${seg.ref}</span>`,
+          }),
+        }).addTo(layer);
+      }
+
+      for (let i = 0; i < seg.coords.length; i += Math.max(1, Math.floor(seg.coords.length / 3))) {
+        L.circleMarker(seg.coords[i], {
+          radius: 1.4,
+          color: '#22c55e',
+          fillColor: '#4ade80',
+          fillOpacity: 0.88,
+          weight: 0,
+          interactive: false,
+        }).addTo(layer);
+        if (i === 0 && seg.coords.length >= 2) {
+          const p0 = seg.coords[0];
+          const p1 = seg.coords[1];
+          const dLat = p1[0] - p0[0];
+          const dLon = p1[1] - p0[1];
+          const len = Math.max(1e-6, Math.hypot(dLat, dLon));
+          const offLat = (-dLon / len) * 0.00011;
+          const offLon = (dLat / len) * 0.00011;
+          for (const sign of [-1, 1]) {
+            L.circleMarker([p0[0] + offLat * sign, p0[1] + offLon * sign], {
+              radius: 1.1,
+              color: '#0ea5e9',
+              fillColor: '#38bdf8',
+              fillOpacity: 0.8,
+              weight: 0,
+              interactive: false,
+            }).addTo(layer);
+          }
+        }
+      }
+    }
+
+    const runways =
+      surfaceData && surfaceData.runways.length > 0
+        ? surfaceData.runways
+        : segments.filter((s) => s.kind === 'runway');
+
+    for (const rwy of runways) {
+      if (rwy.coords.length < 2) continue;
+      const pA = rwy.coords[0];
+      const pB = rwy.coords[rwy.coords.length - 1];
+      const dLat = pB[0] - pA[0];
+      const dLon = pB[1] - pA[1];
+      const norm = Math.max(1e-6, Math.hypot(dLat, dLon));
+      const extLat = (dLat / norm) * 0.045;
+      const extLon = (dLon / norm) * 0.045;
+
+      // Dashed |- - - - -| approach paths
+      L.polyline([[pA[0] - extLat, pA[1] - extLon], pA], {
+        color: 'rgba(248, 250, 252, 0.5)',
+        weight: 1.3,
+        dashArray: '6 6',
+        interactive: false,
+      }).addTo(layer);
+      L.polyline([pB, [pB[0] + extLat, pB[1] + extLon]], {
+        color: 'rgba(248, 250, 252, 0.5)',
+        weight: 1.3,
+        dashArray: '6 6',
+        interactive: false,
+      }).addTo(layer);
+
+      L.polyline(rwy.coords, {
+        color: 'rgba(255,255,255,0.28)',
+        weight: 16,
+        opacity: 0.95,
+        lineCap: 'butt',
+        interactive: false,
+      }).addTo(layer);
+      L.polyline(rwy.coords, {
+        color: '#060910',
+        weight: 11,
+        opacity: 1,
+        lineCap: 'butt',
+        interactive: false,
+      }).addTo(layer);
+      L.polyline(rwy.coords, {
+        color: '#FFFFFF',
+        weight: 1.8,
+        dashArray: '8 8',
+        opacity: 0.95,
+        interactive: false,
+      }).addTo(layer);
+
+      for (const pt of [pA, pB]) {
+        L.circleMarker(pt, {
+          radius: 3.5,
+          color: '#ef4444',
+          fillColor: '#f87171',
+          fillOpacity: 0.95,
+          weight: 1,
+          interactive: false,
+        }).addTo(layer);
+      }
+
+      if (rwy.ref) {
+        const [aLbl, bLbl] = rwy.ref.split('/');
+        if (aLbl) {
+          L.marker(pA, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-runway-num',
+              iconSize: [28, 14],
+              iconAnchor: [14, 7],
+              html: `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:#FFFFFF;text-shadow:0 1px 4px rgba(0,0,0,0.95);">${aLbl.trim()}</span>`,
+            }),
+          }).addTo(layer);
+        }
+        if (bLbl) {
+          L.marker(pB, {
+            interactive: false,
+            icon: L.divIcon({
+              className: 'skydeck-runway-num',
+              iconSize: [28, 14],
+              iconAnchor: [14, 7],
+              html: `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:#FFFFFF;text-shadow:0 1px 4px rgba(0,0,0,0.95);">${bLbl.trim()}</span>`,
+            }),
+          }).addTo(layer);
+        }
+      }
+    }
+  }, [segments, surfaceData, theme]);
 
   useEffect(() => {
     const layer = taxiPlaneRef.current;

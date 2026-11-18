@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {AIRPORT_CATALOG, type RegionPreset} from '../data/aviationCatalog';
-import {apiFetchJson, DEFAULT_CF_WORKER_URL, getCloudflareWorkerUrl} from '../services/directAviationClient';
+import {apiFetchJson, DEFAULT_CF_WORKER_URL} from '../services/directAviationClient';
 import {
   buildFr24AircraftSvg,
   getDbFlagMeta,
@@ -220,61 +220,29 @@ export const RadarSettingsPopover: React.FC<{
 
       <Separator />
 
-      <div className="space-y-3">
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-medium text-foreground">Cloudflare Worker CORS Proxy</span>
-            <span className="text-[10px] font-mono text-primary">
-              {settings.cfWorkerUrl?.trim() || getCloudflareWorkerUrl() ? 'Worker Active' : 'Public Fallback'}
-            </span>
-          </div>
-          <input
-            type="url"
-            value={settings.cfWorkerUrl ?? ''}
-            onChange={(e) => {
-              const val = e.target.value;
-              onUpdateSettings({cfWorkerUrl: val});
-              try {
-                const clean = val.trim().replace(/\/+$/, '');
-                if (clean) window.localStorage.setItem('skydeck-cf-worker', clean);
-                else window.localStorage.removeItem('skydeck-cf-worker');
-              } catch {
-                // ignore storage errors
-              }
-            }}
-            placeholder={DEFAULT_CF_WORKER_URL}
-            aria-label="Cloudflare Worker CORS proxy URL"
-            className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          />
-          <p className="text-[10px] text-muted-foreground leading-snug">
-            Bypasses GitHub Pages / Surge CORS blocks on FR24, ADS-B.lol &amp; Overpass.
-          </p>
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between text-xs">
+          <span className="font-medium text-foreground">Custom Backend Relay (Optional)</span>
+          <span className="text-[10px] text-muted-foreground font-mono">Netlify / Node</span>
         </div>
-
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-medium text-foreground">Custom Backend Relay (Optional)</span>
-            <span className="text-[10px] text-muted-foreground font-mono">Netlify / Node</span>
-          </div>
-          <input
-            type="url"
-            value={settings.apiBaseUrl ?? ''}
-            onChange={(e) => {
-              const val = e.target.value;
-              onUpdateSettings({apiBaseUrl: val});
-              try {
-                const clean = val.trim().replace(/\/+$/, '');
-                if (clean) window.localStorage.setItem('skydeck-api-base', clean);
-                else window.localStorage.removeItem('skydeck-api-base');
-              } catch {
-                // ignore storage errors
-              }
-            }}
-            placeholder="Optional https://your-site.netlify.app"
-            aria-label="Custom SkyDeck API relay URL"
-            className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          />
-        </div>
+        <input
+          type="url"
+          value={settings.apiBaseUrl ?? ''}
+          onChange={(e) => {
+            const val = e.target.value;
+            onUpdateSettings({apiBaseUrl: val});
+            try {
+              const clean = val.trim().replace(/\/+$/, '');
+              if (clean) window.localStorage.setItem('skydeck-api-base', clean);
+              else window.localStorage.removeItem('skydeck-api-base');
+            } catch {
+              // ignore storage errors
+            }
+          }}
+          placeholder="Optional https://your-site.netlify.app"
+          aria-label="Custom SkyDeck API relay URL"
+          className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
       </div>
     </PopoverContent>
   </Popover>
@@ -499,101 +467,36 @@ function drawAltitudeGradientPath(
   }
 }
 
-function makePlaneIcon(
-  flight: LiveFlight,
-  isSelected: boolean,
-  baseSize: number,
-  isDark: boolean,
-  showLabel: boolean,
-  initialTrackDeg = flight.trueTrackDeg,
-): L.DivIcon {
-  const emerg = getEmergencySquawkMeta(flight.squawk);
-  const dbMeta = getDbFlagMeta(flight);
-  const modelClass = resolveFr24ModelClass(flight.aircraftType, flight.callsign);
+// Cached offscreen Canvas2D sprite stamps for zero-lag 60fps rendering of 2,500+ FR24 aircraft
+const planeSpriteCache = new Map<string, HTMLImageElement>();
+let onSpriteLoadedRedraw: (() => void) | null = null;
 
-  // Maintain #F9D949 for commercial, distinct LADD/MIL/PIA highlights, and crisp red alert for emergency squawks
-  const iconFill = emerg
-    ? '#EF4444'
-    : isSelected
-      ? '#F59E0B'
-      : dbMeta?.kind === 'LADD'
-        ? '#C084FC'
-        : dbMeta?.kind === 'MIL'
-          ? '#34D399'
-          : dbMeta?.kind === 'PIA'
-            ? '#22D3EE'
-            : '#F9D949';
-  const stroke = emerg
-    ? '#ffffff'
-    : isSelected
-      ? '#ffffff'
-      : dbMeta?.kind === 'LADD'
-        ? '#4C1D95'
-        : isDark
-          ? '#0B0E14'
-          : '#13233a';
-  const size = Math.max(
-    14,
-    Math.min(
-      42,
-      emerg
-        ? Math.max(baseSize + 6, 26)
-        : isSelected
-          ? baseSize + 6
-          : dbMeta
-            ? Math.max(baseSize + 2, 20)
-            : flight.onGround
-              ? Math.max(14, baseSize - 3)
-              : baseSize,
-    ),
-  );
-
-  const emergBadgeHtml = emerg
-    ? `<span style="margin-left:5px;padding:1px 7px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;white-space:nowrap;background:#DC2626;color:#ffffff;border:1.5px solid #ffffff;box-shadow:0 2px 8px rgba(220,38,38,0.65);letter-spacing:0.03em;">▲ ${emerg.shortLabel} · ${flight.callsign}</span>`
-    : '';
-
-  const flagTag = dbMeta ? `[${dbMeta.shortLabel}] ` : '';
-  const labelBg = dbMeta?.kind === 'LADD' ? '#7E22CE' : dbMeta?.kind === 'MIL' ? '#065F46' : '#F9D949';
-  const labelFg = dbMeta?.kind === 'LADD' || dbMeta?.kind === 'MIL' ? '#ffffff' : '#13233a';
-
-  const labelHtml = emerg
-    ? emergBadgeHtml
-    : showLabel || isSelected
-      ? `<span style="margin-left:5px;padding:1px 7px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;white-space:nowrap;background:${labelBg};color:${labelFg};border:1px solid ${
-          isSelected ? '#ffffff' : 'rgba(19,35,58,0.45)'
-        };box-shadow:0 1px 4px rgba(19,35,58,0.28);">${flagTag}${flight.callsign}${
-          flight.onGround ? ' GND' : ` FL${Math.round(flight.altitudeFt / 100)}`
-        }</span>`
-      : '';
-
-  const ringSize = size + 16;
-  const emergRingHtml = emerg
-    ? `<div class="skydeck-emerg-ring" style="width:${ringSize}px;height:${ringSize}px;"></div>`
-    : dbMeta?.kind === 'LADD'
-      ? `<div style="position:absolute;left:50%;top:50%;width:${size + 10}px;height:${size + 10}px;transform:translate(-50%,-50%);border-radius:9999px;border:1.5px dashed #A855F7;background:rgba(168,85,247,0.12);pointer-events:none;"></div>`
-      : '';
-
-  const svgHtml = buildFr24AircraftSvg(modelClass, size, iconFill, stroke);
-
-  return L.divIcon({
-    className: 'skydeck-plane-icon',
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-    html: `<div style="position:relative;width:${size}px;height:${size}px;display:flex;align-items:center;">
-      ${emergRingHtml}
-      <div class="skydeck-plane-rot" style="position:relative;z-index:2;width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transform:rotate(${initialTrackDeg.toFixed(
-        1,
-      )}deg);">
-        ${svgHtml}
-      </div>
-      ${labelHtml}
-    </div>`,
-  });
+function getPlaneSprite(
+  modelClass: ReturnType<typeof resolveFr24ModelClass>,
+  size: number,
+  fill: string,
+  stroke: string,
+): HTMLImageElement | null {
+  const bucketSize = Math.round(size / 2) * 2;
+  const key = `${modelClass}|${bucketSize}|${fill}|${stroke}`;
+  const existing = planeSpriteCache.get(key);
+  if (existing) {
+    return existing.complete && existing.naturalWidth > 0 ? existing : null;
+  }
+  const rawSvg = buildFr24AircraftSvg(modelClass, bucketSize * 2, fill, stroke);
+  const svg = rawSvg.includes('xmlns=')
+    ? rawSvg
+    : rawSvg.replace('<svg ', '<svg xmlns="http://www.w3.org/2000/svg" ');
+  const img = new Image();
+  img.onload = () => {
+    onSpriteLoadedRedraw?.();
+  };
+  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  planeSpriteCache.set(key, img);
+  return img.complete && img.naturalWidth > 0 ? img : null;
 }
 
-interface PooledFlightMarker {
-  marker: L.Marker;
-  visualKey: string;
+interface PooledFlightState {
   flight: LiveFlight;
   renderLat: number;
   renderLon: number;
@@ -607,6 +510,13 @@ interface PooledFlightMarker {
   blendStartMs: number;
   blendDurationMs: number;
   lastUpdateMs: number;
+}
+
+interface CanvasHitTarget {
+  x: number;
+  y: number;
+  r: number;
+  flight: LiveFlight;
 }
 
 function makeAirportIcon(
@@ -714,8 +624,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const radarLayerRef = useRef<L.TileLayer | null>(null);
   const surfaceLayerRef = useRef<L.LayerGroup | null>(null);
   const allPathsLayerRef = useRef<L.LayerGroup | null>(null);
-  const flightsLayerRef = useRef<L.LayerGroup | null>(null);
-  const flightMarkersRef = useRef<Map<string, PooledFlightMarker>>(new Map());
+  const flightsCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const flightPoolRef = useRef<Map<string, PooledFlightState>>(new Map());
+  const hitTargetsRef = useRef<CanvasHitTarget[]>([]);
+  const hoverTooltipRef = useRef<HTMLDivElement | null>(null);
+  const hoveredFlightIdRef = useRef<string | null>(null);
+  const needsCanvasRedrawRef = useRef(true);
   const isMapZoomingRef = useRef(false);
   const drLayerRef = useRef<L.LayerGroup | null>(null);
   const sigmetLayerRef = useRef<L.LayerGroup | null>(null);
@@ -728,8 +642,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const [radarPlaying, setRadarPlaying] = useState(false);
   const [viewportTick, setViewportTick] = useState(0);
   const [mapZoom, setMapZoom] = useState(activeRegion.zoom);
-  const [surfaceData, setSurfaceData] = useState<AirfieldSurfaceData | null>(null);
-  const lastSurfaceKeyRef = useRef<string>('');
+  const [surfaceList, setSurfaceList] = useState<AirfieldSurfaceData[]>([]);
+  const surfaceMemCacheRef = useRef<Map<string, AirfieldSurfaceData>>(new Map());
+  const lastSurfaceBatchKeyRef = useRef<string>('');
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const isDarkRef = useRef(theme === 'dark');
+  isDarkRef.current = theme === 'dark';
 
   const onBoundsRef = useRef(onBoundsChange);
   onBoundsRef.current = onBoundsChange;
@@ -804,7 +723,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const airportLayer = L.layerGroup().addTo(map);
     const trailLayer = L.layerGroup().addTo(map);
     const userLayer = L.layerGroup().addTo(map);
-    const flightsLayer = L.layerGroup().addTo(map);
 
     mapRef.current = map;
     surfaceLayerRef.current = surfaceLayer;
@@ -814,15 +732,107 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     airportLayerRef.current = airportLayer;
     trailLayerRef.current = trailLayer;
     userLayerRef.current = userLayer;
-    flightsLayerRef.current = flightsLayer;
 
-    const existingMarkerPool = flightMarkersRef.current;
+    // Dedicated HiDPI Canvas2D aircraft overlay above vector/runway layers and clickable with zero DOM node overhead
+    const canvas = document.createElement('canvas');
+    canvas.style.position = 'absolute';
+    canvas.style.inset = '0';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.zIndex = '610';
+    el.appendChild(canvas);
+    flightsCanvasRef.current = canvas;
 
+    onSpriteLoadedRedraw = () => {
+      needsCanvasRedrawRef.current = true;
+    };
+
+    const existingPool = flightPoolRef.current;
+
+    const pickHitFlight = (clientX: number, clientY: number): LiveFlight | null => {
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      const targets = hitTargetsRef.current;
+      // Search top-down (emergency / selected / airborne rendered last)
+      let best: LiveFlight | null = null;
+      let bestDist = Infinity;
+      for (let i = targets.length - 1; i >= 0; i--) {
+        const t = targets[i];
+        const d = Math.hypot(t.x - x, t.y - y);
+        if (d <= t.r && d < bestDist) {
+          bestDist = d;
+          best = t.flight;
+        }
+      }
+      return best;
+    };
+
+    map.on('click', (ev) => {
+      const targetEl = ev.originalEvent.target as HTMLElement | null;
+      if (targetEl?.closest('.skydeck-airport-label')) return;
+      const hit = pickHitFlight(ev.originalEvent.clientX, ev.originalEvent.clientY);
+      if (hit) {
+        onSelectRef.current(hit);
+      }
+    });
+
+    map.on('mousemove', (ev) => {
+      const tipEl = hoverTooltipRef.current;
+      const targetEl = ev.originalEvent.target as HTMLElement | null;
+      if (targetEl?.closest('.skydeck-airport-label')) {
+        el.style.cursor = 'pointer';
+        if (tipEl) tipEl.style.opacity = '0';
+        hoveredFlightIdRef.current = null;
+        return;
+      }
+      const hit = pickHitFlight(ev.originalEvent.clientX, ev.originalEvent.clientY);
+      if (hit) {
+        el.style.cursor = 'pointer';
+        hoveredFlightIdRef.current = hit.id;
+        if (tipEl) {
+          const rect = el.getBoundingClientRect();
+          const px = Math.min(rect.width - 210, Math.max(8, ev.originalEvent.clientX - rect.left + 14));
+          const py = Math.min(rect.height - 40, Math.max(8, ev.originalEvent.clientY - rect.top - 14));
+          const em = getEmergencySquawkMeta(hit.squawk);
+          const db = getDbFlagMeta(hit);
+          tipEl.textContent = `${em ? `[${em.shortLabel}] ` : ''}${db ? `[${db.shortLabel}] ` : ''}${
+            hit.callsign
+          } · ${hit.aircraftType}${
+            hit.origin && hit.destination ? ` · ${hit.origin}→${hit.destination}` : ''
+          } · ${hit.onGround ? 'GND' : `FL${Math.round(hit.altitudeFt / 100)}`}${
+            hit.squawk ? ` · SQK ${hit.squawk}` : ''
+          }`;
+          tipEl.style.transform = `translate(${Math.round(px)}px, ${Math.round(py)}px)`;
+          tipEl.style.opacity = '1';
+        }
+      } else {
+        el.style.cursor = '';
+        if (hoveredFlightIdRef.current) {
+          hoveredFlightIdRef.current = null;
+          if (tipEl) tipEl.style.opacity = '0';
+        }
+      }
+    });
+
+    map.on('mouseout', () => {
+      if (hoverTooltipRef.current) hoverTooltipRef.current.style.opacity = '0';
+      hoveredFlightIdRef.current = null;
+    });
+
+    map.on('move', () => {
+      needsCanvasRedrawRef.current = true;
+    });
+    map.on('zoom', () => {
+      needsCanvasRedrawRef.current = true;
+    });
     map.on('zoomstart', () => {
       isMapZoomingRef.current = true;
     });
     map.on('zoomend', () => {
       isMapZoomingRef.current = false;
+      needsCanvasRedrawRef.current = true;
       setMapZoom(map.getZoom());
     });
     map.on('dragstart', () => {
@@ -833,6 +843,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     map.on('moveend', () => {
       const z = map.getZoom();
       setMapZoom(z);
+      needsCanvasRedrawRef.current = true;
       setViewportTick((t) => t + 1);
       clearTimeout(moveTimer);
       moveTimer = window.setTimeout(() => {
@@ -846,11 +857,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           },
           z,
         );
-      }, 480);
+      }, 240);
     });
 
     const ro = new ResizeObserver(() => {
       map.invalidateSize();
+      needsCanvasRedrawRef.current = true;
       setViewportTick((t) => t + 1);
     });
     ro.observe(el);
@@ -858,7 +870,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     return () => {
       clearTimeout(moveTimer);
       ro.disconnect();
-      existingMarkerPool.clear();
+      onSpriteLoadedRedraw = null;
+      existingPool.clear();
+      canvas.remove();
+      flightsCanvasRef.current = null;
       map.remove();
       mapRef.current = null;
     };
@@ -1156,142 +1171,189 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     }
   }, [unifiedAirports, selectedAirportIcao, settings.showMetarDots]);
 
-  // Fetch detailed AIP/Overpass runway, apron & taxiway surface geometry when zoomed into an airfield (zoom >= 10.8)
+  // Fetch detailed AIP/Overpass runway, apron & taxiway surface geometry for ALL airports in viewport (zoom >= 9.6)
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || mapZoom < 10.8) {
-      setSurfaceData(null);
-      lastSurfaceKeyRef.current = '';
+    if (!map || mapZoom < 9.6) {
+      setSurfaceList([]);
+      lastSurfaceBatchKeyRef.current = '';
       return;
     }
 
+    const bounds = map.getBounds().pad(0.25);
     const center = map.getCenter();
-    let bestAp: {icao: string; lat: number; lon: number} | null = null;
-    let bestDist = 0.28;
-    for (const ap of unifiedAirports) {
-      const d = Math.hypot(ap.lat - center.lat, ap.lon - center.lng);
-      if (d < bestDist) {
-        bestDist = d;
-        bestAp = {icao: ap.icao, lat: ap.lat, lon: ap.lon};
-      }
-    }
+    const candidates = unifiedAirports
+      .filter((ap) => bounds.contains([ap.lat, ap.lon]))
+      .sort((a, b) => {
+        const dA = Math.hypot(a.lat - center.lat, a.lon - center.lng) + (a.tier - 1) * 0.08;
+        const dB = Math.hypot(b.lat - center.lat, b.lon - center.lng) + (b.tier - 1) * 0.08;
+        return dA - dB;
+      })
+      .slice(0, 3);
 
-    const targetLat = bestAp ? bestAp.lat : center.lat;
-    const targetLon = bestAp ? bestAp.lon : center.lng;
-    const targetIcao = bestAp?.icao ?? '';
-    const key = targetIcao || `${targetLat.toFixed(2)},${targetLon.toFixed(2)}`;
-    if (key === lastSurfaceKeyRef.current) return;
-    lastSurfaceKeyRef.current = key;
+    const targets: Array<{key: string; icao: string; lat: number; lon: number}> =
+      candidates.length > 0
+        ? candidates.map((ap) => ({key: ap.icao, icao: ap.icao, lat: ap.lat, lon: ap.lon}))
+        : [
+            {
+              key: selectedAirportIcao || `${center.lat.toFixed(2)},${center.lng.toFixed(2)}`,
+              icao: selectedAirportIcao ?? '',
+              lat: center.lat,
+              lon: center.lng,
+            },
+          ];
+
+    const batchKey = targets.map((t) => t.key).join('|');
+    if (batchKey === lastSurfaceBatchKeyRef.current) return;
+    lastSurfaceBatchKeyRef.current = batchKey;
+
+    const cache = surfaceMemCacheRef.current;
+    const immediate: AirfieldSurfaceData[] = [];
+    const missing: typeof targets = [];
+    for (const t of targets) {
+      const hit = cache.get(t.key);
+      if (hit) immediate.push(hit);
+      else missing.push(t);
+    }
+    if (immediate.length > 0) {
+      setSurfaceList(immediate);
+    }
+    if (missing.length === 0) return;
 
     const ac = new AbortController();
-    const qs = new URLSearchParams({
-      lat: targetLat.toFixed(4),
-      lon: targetLon.toFixed(4),
-      icao: targetIcao,
+    Promise.all(
+      missing.map((t) => {
+        const qs = new URLSearchParams({
+          lat: t.lat.toFixed(4),
+          lon: t.lon.toFixed(4),
+          icao: t.icao,
+        });
+        return apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`, ac.signal)
+          .then((data) => {
+            if (data) cache.set(t.key, data);
+            return data;
+          })
+          .catch(() => null);
+      }),
+    ).then((fetched) => {
+      if (ac.signal.aborted) return;
+      const merged: AirfieldSurfaceData[] = [];
+      for (const t of targets) {
+        const hit = cache.get(t.key);
+        if (hit) merged.push(hit);
+      }
+      if (merged.length > 0 || fetched.some(Boolean)) {
+        setSurfaceList(merged);
+      }
     });
-    apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`, ac.signal)
-      .then((data) => {
-        if (!ac.signal.aborted) setSurfaceData(data);
-      })
-      .catch(() => {
-        // optional overlay
-      });
+
     return () => {
       ac.abort();
     };
-  }, [mapZoom, viewportTick, unifiedAirports]);
+  }, [mapZoom, viewportTick, unifiedAirports, selectedAirportIcao]);
 
-  // Render FlightDeck-Precision Vectorized Runway, Taxiway, Approach Path & Flashing Approach Lighting Overlay
+  // Render FlightDeck-Precision Illuminated Airfields across ALL airports: Gold-trimmed Taxiways, Luminous White Runways, Red Threshold Clusters & Dashed Approach Guides
   useEffect(() => {
     const layer = surfaceLayerRef.current;
     const renderer = canvasRendererRef.current;
     if (!layer || !renderer) return;
     layer.clearLayers();
-    if (!surfaceData || mapZoom < 10.8) return;
+    if (surfaceList.length === 0 || mapZoom < 9.6) return;
 
-    const apronFill = isDark ? '#1e293b' : '#475569';
-    const apronStroke = isDark ? '#475569' : '#1e293b';
-    const taxiFill = isDark ? '#334155' : '#64748b';
-    const rwyCasing = isDark ? '#94a3b8' : '#1e293b';
-    const rwyAsphalt = '#0b1220';
+    const apronFill = isDark ? '#0f141e' : '#334155';
+    const apronStroke = isDark ? 'rgba(234, 179, 8, 0.28)' : 'rgba(245, 158, 11, 0.45)';
+    const taxiFill = isDark ? '#0b101b' : '#475569';
+    const taxiRim = isDark ? 'rgba(234, 179, 8, 0.44)' : 'rgba(245, 158, 11, 0.72)';
+    const rwyAsphalt = '#060910';
     const twyLabelSeen = new Set<string>();
 
-    // 1. Aprons
+    for (const surfaceData of surfaceList) {
+    // 1. Subtle Dark Aprons with Delicate Gold Perimeter
     for (const poly of surfaceData.aprons) {
       L.polygon(poly, {
         renderer,
         color: apronStroke,
-        weight: 1,
+        weight: 0.9,
         fillColor: apronFill,
-        fillOpacity: 0.72,
+        fillOpacity: isDark ? 0.52 : 0.44,
         interactive: false,
       }).addTo(layer);
     }
 
-    // 2. Taxiways + Amber Centerline + Realistic Green Centerline Lights + Blue Edge Lights + ICAO Signage
-    const twyWeight = mapZoom >= 15 ? 11 : mapZoom >= 13 ? 7 : 3.5;
+    // 2. FlightDeck Taxiway Network: Warm Gold-Trimmed Corridors + Delicate Green/Blue Lights + Unboxed Gold Letters
+    const twyWeight = mapZoom >= 15 ? 9 : mapZoom >= 13 ? 5.5 : 3;
     for (const twy of surfaceData.taxiways) {
+      // Gold shoulder outline
       L.polyline(twy.coords, {
         renderer,
-        color: taxiFill,
-        weight: twyWeight,
-        opacity: 0.94,
+        color: taxiRim,
+        weight: twyWeight + 2,
+        opacity: 0.9,
         lineCap: 'round',
         lineJoin: 'round',
         interactive: false,
       }).addTo(layer);
 
+      // Dark taxiway asphalt inside shoulders
       L.polyline(twy.coords, {
         renderer,
-        color: '#f59e0b',
-        weight: mapZoom >= 14 ? 1.5 : 0.9,
-        opacity: 0.8,
+        color: taxiFill,
+        weight: twyWeight,
+        opacity: 0.95,
+        lineCap: 'round',
+        lineJoin: 'round',
         interactive: false,
       }).addTo(layer);
 
-      if (mapZoom >= 13 && twy.coords.length >= 2) {
-        for (let segIdx = 0; segIdx < twy.coords.length - 1; segIdx++) {
+      // Crisp yellow/gold taxiway centerline
+      L.polyline(twy.coords, {
+        renderer,
+        color: '#FACC15',
+        weight: mapZoom >= 14 ? 1.3 : 0.9,
+        opacity: 0.72,
+        dashArray: mapZoom >= 13.5 ? undefined : '4 4',
+        interactive: false,
+      }).addTo(layer);
+
+      // Delicate green centerline & blue edge lighting at taxiway close-up
+      if (mapZoom >= 13.8 && twy.coords.length >= 2) {
+        const maxSegs = Math.min(twy.coords.length - 1, 8);
+        for (let segIdx = 0; segIdx < maxSegs; segIdx++) {
           const pA = twy.coords[segIdx];
           const pB = twy.coords[segIdx + 1];
           const brg = computeBearingDeg(pA, pB);
-          const subSteps = mapZoom >= 15 ? 3 : 1;
-          for (let k = 0; k < subSteps; k++) {
-            const frac = k / subSteps;
-            const pt: [number, number] = [
-              pA[0] + (pB[0] - pA[0]) * frac,
-              pA[1] + (pB[1] - pA[1]) * frac,
-            ];
-            L.circleMarker(pt, {
-              renderer,
-              radius: mapZoom >= 15 ? 2.0 : 1.4,
-              color: '#16a34a',
-              fillColor: '#4ade80',
-              fillOpacity: 0.96,
-              weight: 0,
-              interactive: false,
-            }).addTo(layer);
+          const midPt: [number, number] = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5];
+          L.circleMarker(midPt, {
+            renderer,
+            radius: mapZoom >= 15 ? 1.5 : 1.1,
+            color: '#22c55e',
+            fillColor: '#4ade80',
+            fillOpacity: 0.92,
+            weight: 0,
+            interactive: false,
+          }).addTo(layer);
 
-            if (mapZoom >= 14.2) {
-              const leftEdge = offsetLatLonMeters(pt[0], pt[1], brg, 0, -10.5);
-              const rightEdge = offsetLatLonMeters(pt[0], pt[1], brg, 0, 10.5);
-              for (const edgePt of [leftEdge, rightEdge]) {
-                L.circleMarker(edgePt, {
-                  renderer,
-                  radius: mapZoom >= 15.5 ? 1.8 : 1.4,
-                  color: '#0284c7',
-                  fillColor: '#38bdf8',
-                  fillOpacity: 0.94,
-                  weight: 0,
-                  interactive: false,
-                }).addTo(layer);
-              }
+          if (mapZoom >= 14.8) {
+            const leftEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, -9.5);
+            const rightEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, 9.5);
+            for (const edgePt of [leftEdge, rightEdge]) {
+              L.circleMarker(edgePt, {
+                renderer,
+                radius: 1.2,
+                color: '#0ea5e9',
+                fillColor: '#38bdf8',
+                fillOpacity: 0.85,
+                weight: 0,
+                interactive: false,
+              }).addTo(layer);
             }
           }
         }
       }
 
-      if (mapZoom >= 13 && twy.ref) {
-        const badgeKey = `${twy.ref}-${Math.round(twy.coords[0][0] * 140)}-${Math.round(twy.coords[0][1] * 140)}`;
+      // Clean unboxed amber-gold taxiway designator directly over centerline (just like FlightDeck PVG chart)
+      if (mapZoom >= 12.6 && twy.ref) {
+        const badgeKey = `${twy.ref}-${Math.round(twy.coords[0][0] * 110)}-${Math.round(twy.coords[0][1] * 110)}`;
         if (!twyLabelSeen.has(badgeKey)) {
           twyLabelSeen.add(badgeKey);
           const mid = twy.coords[Math.floor(twy.coords.length / 2)];
@@ -1299,18 +1361,21 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             interactive: false,
             icon: L.divIcon({
               className: 'skydeck-taxi-badge',
-              iconSize: [26, 16],
-              iconAnchor: [13, 8],
-              html: `<span style="display:inline-block;padding:0px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:800;background:#090d16;color:#FACC15;border:1px solid #FACC15;box-shadow:0 1px 3px rgba(0,0,0,0.45);">${twy.ref}</span>`,
+              iconSize: [32, 16],
+              iconAnchor: [16, 8],
+              html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
+                mapZoom >= 14 ? 10 : 9
+              }px;font-weight:800;color:#FDE047;text-shadow:0 0 3px #000,0 0 6px #000,0 1px 2px #000;letter-spacing:0.03em;white-space:nowrap;">${
+                twy.ref
+              }</span>`,
             }),
           }).addTo(layer);
         }
       }
     }
 
-    // 3. Runways + Piano Keys + Aiming Blocks + Flashing Sequenced Approach Lights ("Rabbit") + Dashed |- - - - -| Approach Paths
-    const rwyWeight = mapZoom >= 16 ? 32 : mapZoom >= 15 ? 24 : mapZoom >= 13.5 ? 15 : 9;
-    const approachLabelSeen = new Set<string>();
+    // 3. FlightDeck Luminous White Runways + Red Threshold Stop-Bars + Glowing Approach Beams
+    const rwyWeight = mapZoom >= 16 ? 26 : mapZoom >= 15 ? 20 : mapZoom >= 13.2 ? 12 : 7;
 
     for (const rwy of surfaceData.runways) {
       if (rwy.coords.length < 2) continue;
@@ -1321,60 +1386,57 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       const revBrg = (brg + 180) % 360;
       const [labelA, labelB] = deriveRunwayEndLabels(rwy.ref, brg);
 
-      // Extended Dashed Approach Path |- - - - -| from both runway thresholds
-      const drawApproachPath = (thresholdPt: [number, number], landingHeadingDeg: number, rwyLabel: string) => {
-        // Outbound opposite of landing heading (towards approaching traffic)
+      const drawApproachPath = (thresholdPt: [number, number], landingHeadingDeg: number) => {
         const outboundBrg = (landingHeadingDeg + 180) % 360;
-        const appEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 10186, 0); // 5.5 NM
+        const beamLenM = mapZoom >= 13 ? 2800 : 7500;
+        const appBeamEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, beamLenM, 0);
+        const appLongEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 10186, 0);
 
-        // Extended |- - - - -| dashed centerline
-        L.polyline([thresholdPt, appEnd], {
+        // Extended |- - - - -| approach dashed path
+        L.polyline([appBeamEnd, appLongEnd], {
           renderer,
-          color: isDark ? '#38BDF8' : '#0369A1',
-          weight: mapZoom >= 13 ? 1.8 : 1.4,
-          opacity: 0.82,
-          dashArray: '8 7',
+          color: isDark ? 'rgba(248, 250, 252, 0.56)' : '#0369A1',
+          weight: 1.4,
+          opacity: 0.78,
+          dashArray: '7 7',
           interactive: false,
         }).addTo(layer);
 
-        // Perpendicular | range gate ticks every 1 NM (1852 m)
+        // Glowing white FlightDeck approach centerline lead-in halo + core
+        L.polyline([thresholdPt, appBeamEnd], {
+          renderer,
+          color: 'rgba(255, 255, 255, 0.34)',
+          weight: mapZoom >= 13.5 ? 8 : 5,
+          opacity: 0.9,
+          interactive: false,
+        }).addTo(layer);
+        L.polyline([thresholdPt, appBeamEnd], {
+          renderer,
+          color: '#ffffff',
+          weight: mapZoom >= 13.5 ? 2.6 : 1.8,
+          opacity: 0.98,
+          interactive: false,
+        }).addTo(layer);
+
+        // Subtle perpendicular | range gate ticks every 1 NM
         for (let nm = 1; nm <= 5; nm++) {
           const distM = nm * 1852;
-          const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -170);
-          const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 170);
+          const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -110);
+          const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 110);
           L.polyline([barL, barR], {
             renderer,
-            color: isDark ? '#7DD3FC' : '#0284C7',
-            weight: 1.5,
-            opacity: 0.85,
+            color: isDark ? 'rgba(248, 250, 252, 0.48)' : '#0284C7',
+            weight: 1.1,
+            opacity: 0.75,
             interactive: false,
           }).addTo(layer);
         }
 
-        // Approach identifier badge at ~3.1 NM
-        if (mapZoom >= 11.2 && !approachLabelSeen.has(`${rwyLabel}-${Math.round(thresholdPt[0] * 100)}`)) {
-          approachLabelSeen.add(`${rwyLabel}-${Math.round(thresholdPt[0] * 100)}`);
-          const tagPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 5700, 0);
-          L.marker(tagPt, {
-            interactive: false,
-            icon: L.divIcon({
-              className: 'skydeck-approach-badge',
-              iconSize: [96, 18],
-              iconAnchor: [48, 9],
-              html: `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;white-space:nowrap;background:${
-                isDark ? 'rgba(11,14,20,0.88)' : 'rgba(242,247,254,0.94)'
-              };color:${isDark ? '#7DD3FC' : '#0369A1'};border:1px solid ${
-                isDark ? 'rgba(56,189,248,0.55)' : 'rgba(3,105,161,0.45)'
-              };">APP ${rwyLabel} · ${String(Math.round(landingHeadingDeg)).padStart(3, '0')}°</span>`,
-            }),
-          }).addTo(layer);
-        }
-
-        // Flashing Sequenced Approach Lights ("Rabbit" strobes) + ALSF-II crossbars on approach zoom
-        if (mapZoom >= 12.5) {
+        // Flashing Sequenced Approach Lights ("Rabbit" strobes) + Red pre-threshold decision bar (like PVG screenshot)
+        if (mapZoom >= 12.0) {
           const strobeCount = 7;
           for (let s = 1; s <= strobeCount; s++) {
-            const distFromThresholdM = 120 + (strobeCount - s) * 115; // flashes sweep inward toward runway
+            const distFromThresholdM = 110 + (strobeCount - s) * 115;
             const sPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distFromThresholdM, 0);
             const delaySec = (s * 0.14).toFixed(2);
             L.marker(sPt, {
@@ -1387,34 +1449,46 @@ export const RadarMap: React.FC<RadarMapProps> = ({
               }),
             }).addTo(layer);
           }
-          // 300m decision crossbar
-          const cbL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 300, -28);
-          const cbR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 300, 28);
-          L.polyline([cbL, cbR], {
-            renderer,
-            color: '#f8fafc',
-            weight: 2.2,
-            opacity: 0.9,
-            dashArray: '3 4',
-            interactive: false,
-          }).addTo(layer);
+
+          // Iconic red threshold / stop-bar light clusters with soft halo (as seen in PVG screenshot)
+          for (const d of [45, 220]) {
+            const rPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, d, 0);
+            L.circleMarker(rPt, {
+              renderer,
+              radius: mapZoom >= 14 ? 6.5 : 4.5,
+              color: '#ef4444',
+              fillColor: '#ef4444',
+              fillOpacity: 0.35,
+              weight: 0,
+              interactive: false,
+            }).addTo(layer);
+            L.circleMarker(rPt, {
+              renderer,
+              radius: mapZoom >= 14 ? 2.6 : 1.9,
+              color: '#fca5a5',
+              fillColor: '#ef4444',
+              fillOpacity: 1,
+              weight: 0.8,
+              interactive: false,
+            }).addTo(layer);
+          }
         }
       };
 
-      drawApproachPath(startPt, brg, labelA);
-      drawApproachPath(endPt, revBrg, labelB);
+      drawApproachPath(startPt, brg);
+      drawApproachPath(endPt, revBrg);
 
-      // Shoulder casing
+      // Luminous outer runway glow halo
       L.polyline(rwy.coords, {
         renderer,
-        color: rwyCasing,
-        weight: rwyWeight + 3,
-        opacity: 0.96,
+        color: isDark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(15, 23, 42, 0.28)',
+        weight: rwyWeight + 7,
+        opacity: 0.9,
         lineCap: 'butt',
         interactive: false,
       }).addTo(layer);
 
-      // Asphalt runway surface
+      // Dark runway asphalt bed
       L.polyline(rwy.coords, {
         renderer,
         color: rwyAsphalt,
@@ -1424,19 +1498,19 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         interactive: false,
       }).addTo(layer);
 
-      // Centerline dashed white markings
+      // Bright crisp white runway centerline beam
       L.polyline(rwy.coords, {
         renderer,
-        color: '#f8fafc',
-        weight: mapZoom >= 14 ? 1.9 : 1.2,
-        opacity: 0.92,
-        dashArray: mapZoom >= 14 ? '10 10' : '6 6',
+        color: '#ffffff',
+        weight: mapZoom >= 14 ? 2.2 : 1.6,
+        opacity: 0.96,
+        dashArray: mapZoom >= 14.5 ? '10 8' : undefined,
         interactive: false,
       }).addTo(layer);
 
-      // Runway edge lights (white/amber last 600m)
-      if (mapZoom >= 12.2) {
-        const steps = 18;
+      // Dense luminous runway edge light chain (white + amber caution ends)
+      if (mapZoom >= 11.5) {
+        const steps = 28;
         const halfW = (rwy.widthM ?? 45) * 0.5;
         for (let s = 0; s <= steps; s++) {
           const frac = s / steps;
@@ -1446,14 +1520,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           const rEdge = offsetLatLonMeters(lat, lon, brg, 0, halfW);
           const isEnd = s === 0 || s === steps;
           const isCautionZone = !isEnd && (s <= 2 || s >= steps - 2);
-          const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#f8fafc';
+          const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#ffffff';
           for (const pt of [lEdge, rEdge]) {
             L.circleMarker(pt, {
               renderer,
-              radius: mapZoom >= 14.5 ? 2.1 : 1.4,
+              radius: mapZoom >= 14.5 ? 1.8 : 1.3,
               color: lightColor,
               fillColor: lightColor,
-              fillOpacity: 0.95,
+              fillOpacity: 0.96,
               weight: 0,
               interactive: false,
             }).addTo(layer);
@@ -1461,65 +1535,50 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
       }
 
-      // Piano-key threshold markings, aiming point blocks, green threshold lights & rotated runway designator
+      // Runway thresholds: green/red bar + ICAO piano keys + unboxed bold white threshold labels
       const drawEnd = (pt: [number, number], endBrg: number, rwyNum: string) => {
-        const halfW = (rwy.widthM ?? 45) * 0.45;
+        const halfW = (rwy.widthM ?? 45) * 0.46;
         for (let t = -3; t <= 3; t++) {
           const tPt = offsetLatLonMeters(pt[0], pt[1], endBrg, 0, (t / 3) * halfW);
           L.circleMarker(tPt, {
             renderer,
-            radius: mapZoom >= 14 ? 2.3 : 1.6,
+            radius: mapZoom >= 14 ? 2.1 : 1.5,
             color: '#16a34a',
             fillColor: '#4ade80',
-            fillOpacity: 1,
+            fillOpacity: 0.96,
             weight: 0,
             interactive: false,
           }).addTo(layer);
         }
 
-        if (mapZoom >= 13) {
-          // Longitudinal ICAO Piano-Key Threshold Bars
-          const numKeys = 6;
+        if (mapZoom >= 13.5) {
+          const numKeys = 5;
           for (let k = -numKeys; k <= numKeys; k++) {
             if (k === 0) continue;
             const latOffset = (k / numKeys) * (halfW * 0.85);
             const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
-            const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 48, latOffset);
+            const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
             L.polyline([p1, p2], {
               renderer,
               color: '#ffffff',
-              weight: mapZoom >= 15 ? 2.4 : 1.5,
-              opacity: 0.92,
+              weight: mapZoom >= 15 ? 2.1 : 1.4,
+              opacity: 0.9,
               lineCap: 'butt',
               interactive: false,
             }).addTo(layer);
           }
-
-          // Touchdown Aiming Point Blocks (~260m from threshold)
-          if (mapZoom >= 14) {
-            for (const side of [-1, 1]) {
-              const a1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 240, side * halfW * 0.45);
-              const a2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 285, side * halfW * 0.45);
-              L.polyline([a1, a2], {
-                renderer,
-                color: '#ffffff',
-                weight: mapZoom >= 15.5 ? 4.5 : 3,
-                opacity: 0.92,
-                lineCap: 'butt',
-                interactive: false,
-              }).addTo(layer);
-            }
-          }
         }
 
-        const numPos = offsetLatLonMeters(pt[0], pt[1], endBrg, 105, 0);
+        const numPos = offsetLatLonMeters(pt[0], pt[1], endBrg, 115, 0);
         L.marker(numPos, {
           interactive: false,
           icon: L.divIcon({
             className: 'skydeck-runway-num',
-            iconSize: [38, 20],
-            iconAnchor: [19, 10],
-            html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:0.05em;background:rgba(11,18,32,0.92);color:#ffffff;border:1px solid rgba(255,255,255,0.7);box-shadow:0 1px 4px rgba(0,0,0,0.45);transform:rotate(${Math.round(
+            iconSize: [40, 20],
+            iconAnchor: [20, 10],
+            html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
+              mapZoom >= 14 ? 12 : 10.5
+            }px;font-weight:800;letter-spacing:0.06em;color:#ffffff;text-shadow:0 0 4px #000,0 0 7px #000,0 1px 3px #000;transform:rotate(${Math.round(
               endBrg,
             )}deg);">${rwyNum}</span>`,
           }),
@@ -1530,8 +1589,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       drawEnd(endPt, revBrg, labelB);
     }
 
-    // 4. Gate / Stand Labels on Close Zoom
-    if (mapZoom >= 14.5) {
+    // 4. Subtle Terminal Gate / Stand Designators on Close Zoom
+    if (mapZoom >= 14.8) {
       for (const gate of surfaceData.gates) {
         L.marker([gate.lat, gate.lon], {
           interactive: false,
@@ -1539,21 +1598,21 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             className: 'skydeck-taxi-badge',
             iconSize: [24, 14],
             iconAnchor: [12, 7],
-            html: `<span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:600;color:#e2e8f0;background:rgba(15,23,42,0.82);padding:0 3px;border-radius:3px;">${gate.ref}</span>`,
+            html: `<span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:#cbd5e1;text-shadow:0 0 3px #000;">${gate.ref}</span>`,
           }),
         }).addTo(layer);
       }
     }
-  }, [surfaceData, mapZoom, isDark]);
+    }
+  }, [surfaceList, mapZoom, isDark]);
 
-  // Smooth 60fps Interpolated & Forward-Gliding Flight Markers + FOV-Clipped GeoFS Paths + Isolation Filter
+  // Sync flight pool & FOV trails (up to 2,200+ flights rendered at 60fps via Canvas2D without DOM lag)
   useEffect(() => {
-    const fLayer = flightsLayerRef.current;
     const pLayer = allPathsLayerRef.current;
     const drLayer = drLayerRef.current;
     const map = mapRef.current;
     const renderer = canvasRendererRef.current;
-    if (!fLayer || !pLayer || !drLayer || !renderer) return;
+    if (!pLayer || !drLayer || !renderer) return;
 
     pLayer.clearLayers();
     drLayer.clearLayers();
@@ -1566,36 +1625,38 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         : baseVisible;
 
     const activeIds = new Set<string>();
-    const markerPool = flightMarkersRef.current;
+    const pool = flightPoolRef.current;
     const nowMs = performance.now();
+    let backgroundTrailCount = 0;
+    const maxBackgroundTrails = mapZoom >= 8 ? 360 : 140;
 
     for (const f of visibleFlights) {
       const id = f.id;
       activeIds.add(id);
 
       const isSelected = selectedFlight?.id === id;
-      const emerg = getEmergencySquawkMeta(f.squawk);
       const inView = mapBounds ? mapBounds.contains([f.lat, f.lon]) : true;
 
-      // Flown routes strictly only for aircraft inside user FOV + GeoFS altitude gradient (hidden for non-selected when isolated)
-      if (!isolateSelected && settings.flightPathMode === 'all' && !f.onGround && !isSelected && inView) {
+      if (
+        !isolateSelected &&
+        settings.flightPathMode === 'all' &&
+        !f.onGround &&
+        !isSelected &&
+        inView &&
+        backgroundTrailCount < maxBackgroundTrails
+      ) {
         const key = f.icao24 || id;
         const rawTrail = clientTrailMapRef.current.get(key) ?? [];
-        const smoothedChains = sanitizeAndSmoothTrail(rawTrail.slice(-28), f, mapBounds);
-        for (const chain of smoothedChains) {
-          drawAltitudeGradientPath(pLayer, renderer, chain, 2.1, isDark ? 0.8 : 0.9);
+        if (rawTrail.length >= 2) {
+          const smoothedChains = sanitizeAndSmoothTrail(rawTrail.slice(-24), f, mapBounds);
+          for (const chain of smoothedChains) {
+            drawAltitudeGradientPath(pLayer, renderer, chain, 2.0, isDark ? 0.78 : 0.88);
+          }
+          backgroundTrailCount++;
         }
       }
 
-      const dbMeta = getDbFlagMeta(f);
-      const visualKey = `${isSelected ? 1 : 0}-${settings.planeSize}-${settings.showPlaneLabels ? 1 : 0}-${
-        isDark ? 1 : 0
-      }-${f.onGround ? 1 : 0}-${f.callsign}-${f.aircraftType}-${f.squawk}-${emerg?.code ?? ''}-${
-        dbMeta?.kind ?? ''
-      }-${f.dbFlags ?? 0}-${Math.round(f.altitudeFt / 500)}`;
-
-      const zOffset = emerg ? 1500 : isSelected ? 1000 : f.isLadd ? 350 : f.isMilitary ? 250 : f.onGround ? 10 : 120;
-      const pooled = markerPool.get(id);
+      const pooled = pool.get(id);
       if (pooled) {
         const movedTarget =
           Math.abs(f.lat - pooled.targetLat) > 1e-6 ||
@@ -1613,7 +1674,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             pooled.renderLon = f.lon;
             pooled.fromTrack = f.trueTrackDeg;
             pooled.renderTrack = f.trueTrackDeg;
-            pooled.marker.setLatLng([f.lat, f.lon]);
           } else {
             pooled.fromLat = pooled.renderLat;
             pooled.fromLon = pooled.renderLon;
@@ -1626,39 +1686,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           pooled.blendDurationMs = 1500;
           pooled.lastUpdateMs = nowMs;
         }
-        pooled.marker.setZIndexOffset(zOffset);
-        if (pooled.visualKey !== visualKey) {
-          pooled.visualKey = visualKey;
-          pooled.marker.setIcon(
-            makePlaneIcon(f, isSelected, settings.planeSize, isDark, settings.showPlaneLabels, pooled.renderTrack),
-          );
-        }
       } else {
-        const marker = L.marker([f.lat, f.lon], {
-          icon: makePlaneIcon(f, isSelected, settings.planeSize, isDark, settings.showPlaneLabels, f.trueTrackDeg),
-          zIndexOffset: zOffset,
-        });
-        marker.on('click', () => {
-          const latest = markerPool.get(id)?.flight ?? f;
-          onSelectRef.current(latest);
-        });
-        marker.bindTooltip(
-          () => {
-            const latest = markerPool.get(id)?.flight ?? f;
-            const em = getEmergencySquawkMeta(latest.squawk);
-            const db = getDbFlagMeta(latest);
-            return `${em ? `[${em.shortLabel}] ` : ''}${db ? `[${db.shortLabel}] ` : ''}${latest.callsign} · ${
-              latest.aircraftType
-            }${latest.origin && latest.destination ? ` · ${latest.origin} → ${latest.destination}` : ''} · ${
-              latest.onGround ? 'GND' : `FL${Math.round(latest.altitudeFt / 100)}`
-            }${latest.squawk ? ` · SQK ${latest.squawk}` : ''}${latest.isEstimated ? ' [DR-EST]' : ''}`;
-          },
-          {direction: 'right', offset: [10, 0]},
-        );
-        marker.addTo(fLayer);
-        markerPool.set(id, {
-          marker,
-          visualKey,
+        pool.set(id, {
           flight: f,
           renderLat: f.lat,
           renderLon: f.lon,
@@ -1689,13 +1718,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }
     }
 
-    // Remove markers that left visible set
-    for (const [id, entry] of markerPool.entries()) {
+    for (const id of pool.keys()) {
       if (!activeIds.has(id)) {
-        fLayer.removeLayer(entry.marker);
-        markerPool.delete(id);
+        pool.delete(id);
       }
     }
+    needsCanvasRedrawRef.current = true;
   }, [
     flights,
     selectedFlight,
@@ -1706,37 +1734,72 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     settings.showGroundTraffic,
     settings.showDrRings,
     isDark,
+    mapZoom,
     viewportTick,
   ]);
 
-  // Continuous 60fps Aircraft Kinematic Glide + Zoom-Preserving Follow Pan Loop
+  // Continuous 60fps Canvas2D Kinematic Aircraft Sprite Renderer + Zoom-Preserving Follow Pan Loop
   useEffect(() => {
     let rafId = 0;
-    let lastTickMs = 0;
+    let lastDrawMs = 0;
     let lastFollowPanMs = 0;
 
-    const step = (frameMs: number) => {
-      rafId = window.requestAnimationFrame(step);
-      if (isMapZoomingRef.current || frameMs - lastTickMs < 24) return;
-      lastTickMs = frameMs;
-
+    const drawFrame = (frameMs: number) => {
+      rafId = window.requestAnimationFrame(drawFrame);
       const map = mapRef.current;
-      if (!map) return;
-      const bounds = map.getBounds().pad(0.25);
+      const canvas = flightsCanvasRef.current;
+      if (!map || !canvas) return;
 
-      for (const entry of flightMarkersRef.current.values()) {
+      const intervalMs = isMapZoomingRef.current ? 16 : needsCanvasRedrawRef.current ? 16 : 30;
+      if (frameMs - lastDrawMs < intervalMs) return;
+      lastDrawMs = frameMs;
+      needsCanvasRedrawRef.current = false;
+
+      const size = map.getSize();
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const targetW = Math.max(1, Math.round(size.x * dpr));
+      const targetH = Math.max(1, Math.round(size.y * dpr));
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, size.x, size.y);
+
+      const bounds = map.getBounds().pad(0.18);
+      const curSettings = settingsRef.current;
+      const dark = isDarkRef.current;
+      const selId = selectedFlightIdRef.current;
+      const poolEntries = Array.from(flightPoolRef.current.values());
+
+      // Draw ground -> airborne -> flagged -> selected -> emergency order so alerts stay cleanly on top
+      poolEntries.sort((a, b) => {
+        const aScore =
+          getEmergencySquawkMeta(a.flight.squawk) ? 4 : a.flight.id === selId ? 3 : a.flight.isLadd ? 2 : a.flight.isMilitary ? 1 : a.flight.onGround ? -1 : 0;
+        const bScore =
+          getEmergencySquawkMeta(b.flight.squawk) ? 4 : b.flight.id === selId ? 3 : b.flight.isLadd ? 2 : b.flight.isMilitary ? 1 : b.flight.onGround ? -1 : 0;
+        return aScore - bScore;
+      });
+
+      const nextHits: CanvasHitTarget[] = [];
+      const pulsePhase = (frameMs % 1400) / 1400;
+
+      for (const entry of poolEntries) {
         const f = entry.flight;
-        const isFollowed = followSelectedRef.current && selectedFlightIdRef.current === f.id;
+        const isSelected = f.id === selId;
+        const isFollowed = followSelectedRef.current && isSelected;
         if (!isFollowed && !bounds.contains([entry.targetLat, entry.targetLon])) continue;
 
-        // 1. Eased convergence from previous rendered point to latest ADS-B report
         const t =
           entry.blendDurationMs > 0
             ? Math.min(1, Math.max(0, (frameMs - entry.blendStartMs) / entry.blendDurationMs))
             : 1;
         const ease = 1 - Math.pow(1 - t, 3);
 
-        // 2. Smooth forward dead-reckoned glide between polls (capped at 9s to avoid overshoot)
         const glideMaxSec = f.onGround ? 4.5 : 9.0;
         const glideSec = Math.min(glideMaxSec, Math.max(0, (frameMs - entry.lastUpdateMs) / 1000));
         let extLat = entry.targetLat;
@@ -1754,30 +1817,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
         const nextLat = entry.fromLat + (extLat - entry.fromLat) * ease;
         const nextLon = entry.fromLon + (extLon - entry.fromLon) * ease;
-
-        // 3. Shortest-angle smooth heading rotation
         const angleDelta = ((entry.targetTrack - entry.fromTrack + 540) % 360) - 180;
         const nextTrack = (entry.fromTrack + angleDelta * ease + 360) % 360;
 
-        if (
-          Math.abs(nextLat - entry.renderLat) > 1e-6 ||
-          Math.abs(nextLon - entry.renderLon) > 1e-6
-        ) {
-          entry.renderLat = nextLat;
-          entry.renderLon = nextLon;
-          entry.marker.setLatLng([nextLat, nextLon]);
-        }
+        entry.renderLat = nextLat;
+        entry.renderLon = nextLon;
+        entry.renderTrack = nextTrack;
 
-        if (Math.abs(((nextTrack - entry.renderTrack + 540) % 360) - 180) > 0.25) {
-          entry.renderTrack = nextTrack;
-          const el = entry.marker.getElement();
-          const rotEl = el?.querySelector('.skydeck-plane-rot') as HTMLElement | null;
-          if (rotEl) {
-            rotEl.style.transform = `rotate(${nextTrack.toFixed(1)}deg)`;
-          }
-        }
-
-        // 4. Follow Mode: Keep aircraft centered at the user's current zoom level
         if (isFollowed && frameMs - lastFollowPanMs > 110) {
           lastFollowPanMs = frameMs;
           const c = map.getCenter();
@@ -1785,10 +1831,152 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             map.panTo([nextLat, nextLon], {animate: false});
           }
         }
+
+        const pt = map.latLngToContainerPoint([nextLat, nextLon]);
+        if (pt.x < -36 || pt.y < -36 || pt.x > size.x + 36 || pt.y > size.y + 36) continue;
+
+        const emerg = getEmergencySquawkMeta(f.squawk);
+        const dbMeta = getDbFlagMeta(f);
+        const modelClass = resolveFr24ModelClass(f.aircraftType, f.callsign);
+
+        const baseSize = curSettings.planeSize;
+        const iconSize = Math.max(
+          13,
+          Math.min(
+            40,
+            emerg
+              ? Math.max(baseSize + 6, 25)
+              : isSelected
+                ? baseSize + 6
+                : dbMeta
+                  ? Math.max(baseSize + 2, 19)
+                  : f.onGround
+                    ? Math.max(13, baseSize - 3)
+                    : baseSize,
+          ),
+        );
+
+        const iconFill = emerg
+          ? '#EF4444'
+          : isSelected
+            ? '#F59E0B'
+            : dbMeta?.kind === 'LADD'
+              ? '#C084FC'
+              : dbMeta?.kind === 'MIL'
+                ? '#34D399'
+                : dbMeta?.kind === 'PIA'
+                  ? '#22D3EE'
+                  : '#F9D949';
+        const stroke = emerg
+          ? '#ffffff'
+          : isSelected
+            ? '#ffffff'
+            : dbMeta?.kind === 'LADD'
+              ? '#4C1D95'
+              : dark
+                ? '#0B0E14'
+                : '#13233a';
+
+        // Pulsing Emergency Squawk Ring
+        if (emerg) {
+          const ringR = (iconSize * 0.5 + 4) * (0.8 + pulsePhase * 1.1);
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, ringR, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(239, 68, 68, ${Math.max(0, 1 - pulsePhase)})`;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.restore();
+        } else if (dbMeta?.kind === 'LADD') {
+          ctx.save();
+          ctx.beginPath();
+          ctx.setLineDash([3, 3]);
+          ctx.arc(pt.x, pt.y, iconSize * 0.5 + 5, 0, Math.PI * 2);
+          ctx.strokeStyle = '#A855F7';
+          ctx.lineWidth = 1.4;
+          ctx.fillStyle = 'rgba(168, 85, 247, 0.14)';
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        } else if (isSelected) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, iconSize * 0.5 + 6, 0, Math.PI * 2);
+          ctx.strokeStyle = '#F59E0B';
+          ctx.lineWidth = 2;
+          ctx.fillStyle = 'rgba(245, 158, 11, 0.16)';
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        const sprite = getPlaneSprite(modelClass, iconSize, iconFill, stroke);
+        ctx.save();
+        ctx.translate(pt.x, pt.y);
+        ctx.rotate((nextTrack * Math.PI) / 180);
+        if (sprite) {
+          ctx.drawImage(sprite, -iconSize / 2, -iconSize / 2, iconSize, iconSize);
+        } else {
+          // Instant crisp fallback delta shape on first microsecond while sprite decodes
+          ctx.beginPath();
+          ctx.moveTo(0, -iconSize * 0.45);
+          ctx.lineTo(iconSize * 0.35, iconSize * 0.35);
+          ctx.lineTo(0, iconSize * 0.18);
+          ctx.lineTo(-iconSize * 0.35, iconSize * 0.35);
+          ctx.closePath();
+          ctx.fillStyle = iconFill;
+          ctx.fill();
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // Compact Pill Labels for Emergencies, Selected Aircraft, or when "Plane Labels" toggle is active
+        if (emerg || isSelected || curSettings.showPlaneLabels) {
+          const text = emerg
+            ? `▲ ${emerg.shortLabel} · ${f.callsign}`
+            : `${dbMeta ? `[${dbMeta.shortLabel}] ` : ''}${f.callsign}${
+                f.onGround ? ' GND' : ` FL${Math.round(f.altitudeFt / 100)}`
+              }`;
+          ctx.font = '700 10px "JetBrains Mono", monospace';
+          const tw = ctx.measureText(text).width;
+          const bx = pt.x + iconSize * 0.5 + 4;
+          const by = pt.y - 8;
+          const bw = tw + 10;
+          const bh = 16;
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(bx, by, bw, bh, 8);
+          ctx.fillStyle = emerg
+            ? '#DC2626'
+            : dbMeta?.kind === 'LADD'
+              ? '#7E22CE'
+              : dbMeta?.kind === 'MIL'
+                ? '#065F46'
+                : '#F9D949';
+          ctx.fill();
+          ctx.strokeStyle = emerg || isSelected ? '#ffffff' : 'rgba(19,35,58,0.45)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.fillStyle = emerg || dbMeta?.kind === 'LADD' || dbMeta?.kind === 'MIL' ? '#ffffff' : '#13233a';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(text, bx + 5, by + 8.5);
+          ctx.restore();
+        }
+
+        nextHits.push({
+          x: pt.x,
+          y: pt.y,
+          r: Math.max(14, iconSize * 0.65),
+          flight: f,
+        });
       }
+
+      hitTargetsRef.current = nextHits;
     };
 
-    rafId = window.requestAnimationFrame(step);
+    rafId = window.requestAnimationFrame(drawFrame);
     return () => window.cancelAnimationFrame(rafId);
   }, []);
 
@@ -1901,6 +2089,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   return (
     <div className={`relative w-full h-full overflow-hidden bg-card ${isMobilePortrait ? 'skydeck-mobile-map' : ''}`}>
       <div ref={mapDivRef} className="w-full h-full" />
+
+      {/* Crisp Floating Aircraft Hover Tooltip for Canvas2D Plane Targets */}
+      <div
+        ref={hoverTooltipRef}
+        className="pointer-events-none fixed left-0 top-0 z-[720] rounded-lg border border-border bg-card/95 px-2.5 py-1 font-mono text-[11px] font-medium text-foreground shadow-lg backdrop-blur-md transition-opacity duration-100 whitespace-nowrap"
+        style={{opacity: 0}}
+      />
 
       {/* Top-Right Compact GeoFS Altitude Legend & Optional Weather Radar Player */}
       <div className="hidden md:flex absolute top-3 right-14 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card/90 backdrop-blur-md border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm transition-all">
