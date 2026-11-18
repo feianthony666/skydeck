@@ -1,6 +1,28 @@
-const FR24_URL =
-  'https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=85,-85,-180,180&faa=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&estimated=1&maxage=14400&gliders=1&stats=1';
+const FR24_TILE_BOUNDS = [
+  [85, 45, -180, -90],
+  [85, 45, -90, 0],
+  [85, 45, 0, 90],
+  [85, 45, 90, 180],
+  [45, 0, -180, -90],
+  [45, 0, -90, 0],
+  [45, 0, 0, 90],
+  [45, 0, 90, 180],
+  [0, -45, -180, -90],
+  [0, -45, -90, 0],
+  [0, -45, 0, 90],
+  [0, -45, 90, 180],
+  [-45, -85, -180, -90],
+  [-45, -85, -90, 0],
+  [-45, -85, 0, 90],
+  [-45, -85, 90, 180],
+];
+
+function fr24TileUrl([north, south, west, east]) {
+  return `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${north},${south},${west},${east}&faa=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&estimated=1&maxage=14400&gliders=1&stats=1`;
+}
 const ADSB_LOL_URL = 'https://api.adsb.lol/v2/all';
+const ADSB_FI_URL = 'https://opendata.adsb.fi/api/v2/all';
+const OPENSKY_URL = 'https://opensky-network.org/api/states/all';
 
 async function fetchJson(url, timeoutMs) {
   const response = await fetch(url, {
@@ -116,18 +138,112 @@ function parseAdsbLol(raw) {
     });
 }
 
-const [fr24Result, adsbResult] = await Promise.allSettled([
-  fetchJson(FR24_URL, 20000),
+function parseAdsbFi(raw) {
+  return (raw.aircraft ?? [])
+    .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
+    .map((a) => {
+      const icao24 = String(a.hex ?? '').toUpperCase();
+      const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
+      const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
+      const dbFlags = Number(a.dbFlags ?? 0) || 0;
+      return {
+        id: icao24,
+        icao24,
+        callsign,
+        flightNumber: callsign,
+        registration: String(a.r ?? ''),
+        airlineIcao: callSignToAirline(callsign),
+        airlineName: String(a.ownOp ?? '') || callSignToAirline(callsign),
+        aircraftType: String(a.t ?? 'A320').toUpperCase(),
+        lat: Number(a.lat),
+        lon: Number(a.lon),
+        altitudeFt: onGround ? 0 : Math.max(0, Math.round(Number(a.alt_baro ?? a.alt_geom ?? 0))),
+        groundSpeedKts: Math.round(Number(a.gs ?? 0)),
+        trueTrackDeg: Math.round(Number(a.track ?? 0)),
+        verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
+        onGround,
+        squawk: String(a.squawk ?? ''),
+        origin: '',
+        destination: '',
+        lastContactEpoch: Math.floor((raw.now ?? Date.now()) / 1000) - Math.round(Number(a.seen_pos ?? 0)),
+        source: 'adsb-fi-github-actions',
+        isEstimated: false,
+        uncertaintyNm: 0,
+        dbFlags,
+        isMilitary: (dbFlags & 1) !== 0,
+        isPia: (dbFlags & 4) !== 0,
+        isLadd: (dbFlags & 8) !== 0,
+      };
+    });
+}
+
+function parseOpenSky(raw) {
+  const nowSec = raw.time ?? Math.floor(Date.now() / 1000);
+  return (raw.states ?? [])
+    .filter((state) => Number.isFinite(Number(state[6])) && Number.isFinite(Number(state[5])))
+    .map((state) => {
+      const icao24 = String(state[0] ?? '').toUpperCase();
+      const callsign = String(state[1] ?? icao24).trim().toUpperCase();
+      const onGround = Boolean(state[8]);
+      const altFt = onGround ? 0 : Math.round(Number(state[7] ?? state[13] ?? 0) * 3.28084);
+      return {
+        id: icao24,
+        icao24,
+        callsign: callsign || icao24,
+        flightNumber: callsign || icao24,
+        registration: '',
+        airlineIcao: callSignToAirline(callsign),
+        airlineName: callSignToAirline(callsign),
+        aircraftType: 'A320',
+        lat: Number(state[6]),
+        lon: Number(state[5]),
+        altitudeFt: Math.max(0, altFt),
+        groundSpeedKts: Math.round(Number(state[9] ?? 0) * 1.94384),
+        trueTrackDeg: Math.round(Number(state[10] ?? 0)),
+        verticalRateFpm: Math.round(Number(state[11] ?? 0) * 196.85),
+        onGround,
+        squawk: state[14] ? String(state[14]) : '',
+        origin: '',
+        destination: '',
+        lastContactEpoch: Number(state[4] ?? state[3] ?? nowSec),
+        source: 'opensky-github-actions',
+        isEstimated: false,
+        uncertaintyNm: 0,
+        dbFlags: 0,
+      };
+    });
+}
+
+const [
+  fr24BatchResult,
+  adsbResult,
+  adsbFiResult,
+  openSkyResult,
+] = await Promise.allSettled([
+  Promise.allSettled(FR24_TILE_BOUNDS.map((bounds) =>
+    fetchJson(fr24TileUrl(bounds), 20000),
+  )),
   fetchJson(ADSB_LOL_URL, 20000),
+  fetchJson(ADSB_FI_URL, 20000),
+  fetchJson(OPENSKY_URL, 20000),
 ]);
 
-const fr24Flights =
-  fr24Result.status === 'fulfilled' ? parseFr24(fr24Result.value) : [];
+const fr24Results =
+  fr24BatchResult.status === 'fulfilled'
+    ? fr24BatchResult.value
+    : [];
+const fr24Flights = fr24Results
+  .filter((result) => result.status === 'fulfilled')
+  .flatMap((result) => parseFr24(result.value));
 const adsbFlights =
   adsbResult.status === 'fulfilled' ? parseAdsbLol(adsbResult.value) : [];
+const adsbFiFlights =
+  adsbFiResult.status === 'fulfilled' ? parseAdsbFi(adsbFiResult.value) : [];
+const openSkyFlights =
+  openSkyResult.status === 'fulfilled' ? parseOpenSky(openSkyResult.value) : [];
 
 const merged = new Map();
-for (const flight of [...adsbFlights, ...fr24Flights]) {
+for (const flight of [...fr24Flights, ...adsbFlights, ...adsbFiFlights, ...openSkyFlights]) {
   const key = flight.icao24 || flight.callsign || flight.id;
   const existing = merged.get(key);
   if (!existing) {
@@ -157,13 +273,23 @@ const payload = {
   providers: [
     {
       provider: 'fr24-github-snapshot',
-      ok: fr24Result.status === 'fulfilled',
+      ok: fr24Flights.length > 0,
       count: fr24Flights.length,
     },
     {
       provider: 'adsb-lol-github-snapshot',
       ok: adsbResult.status === 'fulfilled',
       count: adsbFlights.length,
+    },
+    {
+      provider: 'adsb-fi-github-snapshot',
+      ok: adsbFiResult.status === 'fulfilled',
+      count: adsbFiFlights.length,
+    },
+    {
+      provider: 'opensky-github-snapshot',
+      ok: openSkyResult.status === 'fulfilled',
+      count: openSkyFlights.length,
     },
   ],
   fetchedAt: Date.now(),
