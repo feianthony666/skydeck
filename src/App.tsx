@@ -359,7 +359,7 @@ export default function App() {
               if (pa !== pb) return pb - pa;
               return b.seenAtMs - a.seenAtMs;
             })
-            .slice(0, 10000)
+            .slice(0, 50000)
             .map((e) => e.flight);
 
           setRawFlights(mergedList);

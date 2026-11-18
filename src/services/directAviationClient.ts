@@ -619,6 +619,7 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
 
     const latSpan = lamax - lamin;
     const lonSpan = lomax - lomin;
+    const isGlobal = latSpan >= 160 && lonSpan >= 340;
     const frMinLat = Math.max(-85, lamin);
     const frMaxLat = Math.min(85, lamax);
     const frMinLon = Math.max(-180, lomin);
@@ -636,10 +637,14 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
       const makeFr24Url = (bMinLat: number, bMaxLat: number, bMinLon: number, bMaxLon: number) =>
         `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${bMaxLat.toFixed(3)},${bMinLat.toFixed(3)},${bMinLon.toFixed(3)},${bMaxLon.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
       const fr24Url = makeFr24Url(frMinLat, frMaxLat, frMinLon, frMaxLon);
-      const lolUrl = `https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/${radiusNm}`;
+      const lolUrl = isGlobal
+        ? 'https://api.adsb.lol/v2/all'
+        : `https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/${radiusNm}`;
       const milUrl = `https://api.adsb.lol/v2/mil`;
       const laddUrl = `https://api.adsb.lol/v2/ladd`;
-      const fiUrl = `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${radiusNm}`;
+      const fiUrl = isGlobal
+        ? 'https://opendata.adsb.fi/api/v2/all'
+        : `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${radiusNm}`;
       const directOut: LiveFlight[] = [];
 
       const directFetches = await Promise.allSettled([
@@ -935,7 +940,7 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
         if (a.onGround !== b.onGround) return a.onGround ? 1 : -1;
         return 0;
       })
-      .slice(0, 10000);
+      .slice(0, 50000);
 
     for (const f of flights) {
       recordBrowserBreadcrumb(f);
