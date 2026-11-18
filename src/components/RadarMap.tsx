@@ -32,7 +32,7 @@ export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
   planeSize: 20,
   basemapStyle: 'auto',
   flightPathMode: 'all',
-  locateMeEnabled: true,
+  locateMeEnabled: false,
   timeDisplayMode: 'airport',
   showPlaneLabels: false,
   showMetarDots: true,

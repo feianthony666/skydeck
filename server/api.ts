@@ -366,14 +366,15 @@ async function fetchPlanespottersPhoto(icao24: string, reg: string): Promise<Air
     return null;
   };
 
-  const [wmPhoto, psHexPhoto] = await Promise.all([
-    tryWikimedia(),
-    icao24 ? tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`) : Promise.resolve(null),
-  ]);
-
-  let photo: AircraftPhoto | null = wmPhoto ?? psHexPhoto;
+  const psHexPhoto = icao24
+    ? await tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`)
+    : null;
+  let photo: AircraftPhoto | null = psHexPhoto;
   if (!photo && reg) {
     photo = await tryPlanespotters(`https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}`);
+  }
+  if (!photo) {
+    photo = await tryWikimedia();
   }
   if (!photo && icao24) {
     try {
@@ -2082,6 +2083,59 @@ export function createApiRouter(): express.Router {
       trail: bestTrail,
       source: playbackTrail.length > 0 ? 'fr24-playback' : cachedFlight?.source ?? 'adsb',
     } satisfies FlightDetail);
+  });
+
+  // 2a1. Aviation Safety Network registration history
+  router.get('/safety-record', async (req, res) => {
+    const registration = String(req.query.registration ?? '').trim().toUpperCase();
+    if (!registration) {
+      res.status(400).json({error: 'Missing registration'});
+      return;
+    }
+    const safeReg = registration.replace(/[^A-Z0-9-]/g, '');
+    const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(safeReg)}`;
+    try {
+      const response = await fetch(searchUrl, {
+        headers: {'User-Agent': API_USER_AGENT, Accept: 'text/html'},
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const items: Array<{date: string; type: string; registration: string; operator: string; location: string; damage: string; url: string}> = [];
+      const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      let rowMatch;
+      while ((rowMatch = rowPattern.exec(html)) !== null && items.length < 40) {
+        const row = rowMatch[1];
+        const hrefMatch = row.match(/href="([^"]*asndb[^"]+)"/i);
+        const cells = Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi))
+          .map((cell) => String(cell[1]).replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim());
+        if (cells.length < 5) continue;
+        items.push({
+          date: cells[0] || '',
+          type: cells[1] || '',
+          registration: cells[2] || safeReg,
+          operator: cells[3] || '',
+          location: cells[4] || '',
+          damage: cells[5] || '',
+          url: hrefMatch ? new URL(hrefMatch[1].replace(/&amp;/g, '&'), 'https://aviation-safety.net').toString() : searchUrl,
+        });
+      }
+      res.json({
+        registration: safeReg,
+        items,
+        searchUrl,
+        source: 'aviation-safety.net',
+        fetchedAt: Date.now(),
+      });
+    } catch (err) {
+      res.status(502).json({
+        registration: safeReg,
+        items: [],
+        searchUrl,
+        source: 'aviation-safety.net',
+        error: err instanceof Error ? err.message : 'ASN unavailable',
+      });
+    }
   });
 
   // 2b. Live Airport Arrivals, Departures & Delay Index Board

@@ -1107,7 +1107,41 @@ async function fetchDirectWeather(params: URLSearchParams): Promise<{airports: A
 }
 
 async function fetchDirectPhoto(icao24: string, reg: string): Promise<AircraftPhoto | null> {
-  // 1. Wikimedia Commons full-frame photo search by registration (native CORS via origin=*)
+  // 1. Planespotters.net is the primary source for aircraft-specific photos.
+  for (const url of [
+    icao24 ? `https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}` : '',
+    reg ? `https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}` : '',
+  ]) {
+    if (!url) continue;
+    try {
+      const r = await fetch(url, {signal: AbortSignal.timeout(3500)});
+      if (!r.ok) continue;
+      const json = await r.json() as {
+        photos?: Array<{
+          thumbnail?: {src?: string};
+          thumbnail_large?: {src?: string; size?: {width?: number; height?: number}};
+          photographer?: string;
+          link?: string;
+        }>;
+      };
+      const p = json.photos?.[0];
+      if (p?.thumbnail_large?.src && p.link) {
+        return {
+          url: p.thumbnail_large.src,
+          thumbUrl: p.thumbnail?.src,
+          photographer: p.photographer || 'Planespotters.net contributor',
+          link: p.link,
+          source: 'planespotters.net',
+          width: p.thumbnail_large.size?.width,
+          height: p.thumbnail_large.size?.height,
+        };
+      }
+    } catch {
+      // Continue to the other indexed sources.
+    }
+  }
+
+  // 2. Wikimedia Commons fallback for full-frame images.
   const normReg = reg.replace(/[^A-Z0-9]/gi, '').toUpperCase();
   if (normReg.length >= 4) {
     try {
@@ -1866,6 +1900,17 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
   }
   if (path === '/api/airport-board') {
     return fetchDirectAirportBoard(params);
+  }
+  if (path === '/api/safety-record') {
+    const registration = (params.get('registration') ?? '').trim().toUpperCase();
+    const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(registration)}`;
+    return {
+      registration,
+      items: [],
+      searchUrl,
+      source: 'aviation-safety.net',
+      fetchedAt: Date.now(),
+    };
   }
   if (path === '/api/airport-taxi') {
     const icao = (params.get('icao') ?? 'ZBAA').toUpperCase();

@@ -53,6 +53,14 @@ export interface AircraftGeometrySpec {
 
 export const REGION_PRESETS: RegionPreset[] = [
   {
+    id: 'global',
+    label: 'Global',
+    subtitle: 'All live ADS-B sectors worldwide',
+    center: [20, 0],
+    zoom: 3,
+    bounds: {lamin: -85, lomin: -180, lamax: 85, lomax: 180},
+  },
+  {
     id: 'china-east',
     label: 'China & East Asia',
     subtitle: 'Beijing · Shanghai · Guangzhou · Chengdu · Hong Kong',
