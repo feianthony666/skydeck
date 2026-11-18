@@ -42,7 +42,11 @@ let browserLaddCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: n
 let relayQueue: Promise<void> = Promise.resolve();
 let flightPollCycle = 0;
 
-export const DEFAULT_CF_WORKER_URL = 'https://royal-cherry-f2c2.feianthony666.workers.dev';
+export const DEFAULT_CF_WORKER_URL = '';
+
+const RETIRED_CF_WORKER_URLS = new Set([
+  'https://royal-cherry-f2c2.feianthony666.workers.dev',
+]);
 
 interface CorsRelayState {
   id: string;
@@ -108,28 +112,32 @@ function normalizeBaseUrl(raw: string): string {
 export function getCloudflareWorkerUrl(): string {
   if (typeof window === 'undefined') return '';
   const cleanWorker = (u: string) => normalizeBaseUrl(u).replace(/\?url=.*$/i, '');
+  const isUsableWorker = (u: string) =>
+    /^https?:\/\//i.test(u) && !RETIRED_CF_WORKER_URLS.has(u.toLowerCase());
   try {
     const qs = new URLSearchParams(window.location.search);
     const paramW = qs.get('worker') ? cleanWorker(qs.get('worker')!) : '';
-    if (paramW && /^https?:\/\//i.test(paramW)) {
+    if (paramW && isUsableWorker(paramW)) {
       window.localStorage.setItem('skydeck-cf-worker', paramW);
       return paramW;
     }
     const stored = cleanWorker(window.localStorage.getItem('skydeck-cf-worker') ?? '');
-    if (stored && /^https?:\/\//i.test(stored)) return stored;
+    if (stored && isUsableWorker(stored)) return stored;
 
     const settingsRaw = window.localStorage.getItem('skydeck-radar-settings-v1');
     if (settingsRaw) {
       const parsed = JSON.parse(settingsRaw) as {cfWorkerUrl?: string; apiBaseUrl?: string};
       const w = parsed.cfWorkerUrl ? cleanWorker(parsed.cfWorkerUrl) : '';
-      if (w && /^https?:\/\//i.test(w)) return w;
-      if (parsed.apiBaseUrl && /\.workers\.dev/i.test(parsed.apiBaseUrl)) {
-        return cleanWorker(parsed.apiBaseUrl);
+      if (w && isUsableWorker(w)) return w;
+      if (parsed.apiBaseUrl) {
+        const apiWorker = cleanWorker(parsed.apiBaseUrl);
+        if (isUsableWorker(apiWorker) && /\.workers\.dev/i.test(apiWorker)) return apiWorker;
       }
     }
     const legacyApi = window.localStorage.getItem('skydeck-api-base') ?? '';
     if (/\.workers\.dev/i.test(legacyApi)) {
-      return cleanWorker(legacyApi);
+      const legacyWorker = cleanWorker(legacyApi);
+      if (isUsableWorker(legacyWorker)) return legacyWorker;
     }
   } catch {
     // ignore
@@ -137,7 +145,8 @@ export function getCloudflareWorkerUrl(): string {
   const envWorker =
     typeof import.meta !== 'undefined' &&
     (import.meta as unknown as {env?: Record<string, string | undefined>}).env?.VITE_CF_WORKER_URL;
-  return cleanWorker(envWorker || DEFAULT_CF_WORKER_URL);
+  const fallback = cleanWorker(envWorker || DEFAULT_CF_WORKER_URL);
+  return isUsableWorker(fallback) ? fallback : '';
 }
 
 function getCustomApiBase(): string {
