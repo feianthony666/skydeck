@@ -9,6 +9,7 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  actions: write
 
 jobs:
   snapshot:
@@ -34,3 +35,7 @@ jobs:
             git commit -m "Update live flight snapshot"
             git push
           fi
+      - name: Deploy updated snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --ref main
