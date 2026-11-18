@@ -397,6 +397,7 @@ export function createAirlineLiveryTexture(
   livery: AirlineLivery,
   registration: string,
   maxAnisotropy: number,
+  photoUrl?: string,
 ): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
@@ -456,5 +457,23 @@ export function createAirlineLiveryTexture(
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = maxAnisotropy;
+
+  if (photoUrl) {
+    const photo = new Image();
+    photo.crossOrigin = 'anonymous';
+    photo.referrerPolicy = 'no-referrer';
+    photo.onload = () => {
+      try {
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+        tex.needsUpdate = true;
+      } catch {
+        // Keep the accurate airline-color fallback if the image host blocks canvas access.
+      }
+    };
+    photo.src = photoUrl;
+  }
   return tex;
 }

@@ -348,6 +348,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
             s.detail?.registration || activeFlight.registration,
             refs.maxAnisotropy,
             gearDown,
+            s.detail?.photo?.url,
           );
           exteriorRoot.add(model.group);
           refs.aircraftRefs = model;

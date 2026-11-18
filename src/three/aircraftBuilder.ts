@@ -17,11 +17,12 @@ export function buildProceduralAircraft(
   registration: string,
   maxAnisotropy: number,
   gearExtended: boolean,
+  photoUrl?: string,
 ): AircraftModelRefs {
   const group = new THREE.Group();
   const disposables: Array<{dispose: () => void}> = [];
 
-  const fuselageTex = createAirlineLiveryTexture(livery, registration, maxAnisotropy);
+  const fuselageTex = createAirlineLiveryTexture(livery, registration, maxAnisotropy, photoUrl);
   disposables.push(fuselageTex);
 
   const r = spec.fuselageRadius;

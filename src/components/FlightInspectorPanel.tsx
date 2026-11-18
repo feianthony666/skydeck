@@ -150,6 +150,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     dynamics: boolean;
     airframe: boolean;
     acars: boolean;
+    charts: boolean;
   }>({
     route: true,
     profile: true,
@@ -157,6 +158,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     dynamics: false,
     airframe: false,
     acars: false,
+    charts: false,
   });
 
   const toggleSection = (key: keyof typeof openSections) => {
@@ -938,6 +940,42 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
           </CollapsibleSection>
 
           {/* 6. Matched ACARS & Ground Mode */}
+          <CollapsibleSection
+            title="Official Aerodrome & Approach Charts"
+            subtitle={`${originCode} departure · ${destCode} arrival`}
+            icon={<MapPin className="w-3.5 h-3.5" />}
+            open={openSections.charts}
+            onToggle={() => toggleSection('charts')}
+          >
+            <div className="grid grid-cols-1 gap-2">
+              {[originCode, destCode]
+                .filter((code, index, codes) => code !== '—' && codes.indexOf(code) === index)
+                .map((code) => (
+                  <div key={code} className="rounded-lg border border-border p-2">
+                    <div className="text-[10px] font-mono text-muted-foreground mb-1.5">{code}</div>
+                    <div className="flex flex-wrap gap-2">
+                      <a
+                        href={`https://skyvector.com/airport/${encodeURIComponent(code)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+                      >
+                        Airport charts <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <a
+                        href={`https://www.google.com/search?q=${encodeURIComponent(`${code} official aerodrome and approach charts`)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+                      >
+                        Official AIP / approach charts <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </CollapsibleSection>
+
           {matchingAcars.length > 0 && (
             <CollapsibleSection
               title={`Matched ACARS (${matchingAcars.length})`}
