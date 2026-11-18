@@ -574,6 +574,17 @@ export const AIRLINE_LIVERIES: Record<string, AirlineLivery> = {
   AFR: {icao: 'AFR', iata: 'AF', name: 'Air France', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#DC2626', bellyHex: '#E2E8F0', titleColor: '#1E3A8A'},
   UAE: {icao: 'UAE', iata: 'EK', name: 'Emirates', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#16A34A', bellyHex: '#E2E8F0', titleColor: '#B45309'},
   SIA: {icao: 'SIA', iata: 'SQ', name: 'Singapore Airlines', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#F59E0B', bellyHex: '#E2E8F0', titleColor: '#1E3A8A'},
+  QFA: {icao: 'QFA', iata: 'QF', name: 'Qantas', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#F8FAFC', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
+  VIR: {icao: 'VIR', iata: 'VS', name: 'Virgin Atlantic', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
+  ACA: {icao: 'ACA', iata: 'AC', name: 'Air Canada', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
+  SAS: {icao: 'SAS', iata: 'SK', name: 'SAS', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#38BDF8', bellyHex: '#CBD5E1', titleColor: '#1E3A8A'},
+  SWR: {icao: 'SWR', iata: 'LX', name: 'Swiss', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
+  TAP: {icao: 'TAP', iata: 'TP', name: 'TAP Air Portugal', fuselageHex: '#F8FAFC', tailHex: '#16A34A', accentHex: '#DC2626', bellyHex: '#CBD5E1', titleColor: '#166534'},
+  THA: {icao: 'THA', iata: 'TG', name: 'Thai Airways', fuselageHex: '#A855F7', tailHex: '#7E22CE', accentHex: '#FACC15', bellyHex: '#D8B4FE', titleColor: '#581C87'},
+  TGW: {icao: 'TGW', iata: 'TR', name: 'Scoot', fuselageHex: '#FDE047', tailHex: '#FACC15', accentHex: '#1E293B', bellyHex: '#FEF3C7', titleColor: '#713F12'},
+  QTR: {icao: 'QTR', iata: 'QR', name: 'Qatar Airways', fuselageHex: '#F8FAFC', tailHex: '#7F1D1D', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#7F1D1D'},
+  ETD: {icao: 'ETD', iata: 'EY', name: 'Etihad Airways', fuselageHex: '#F8FAFC', tailHex: '#9A3412', accentHex: '#C2410C', bellyHex: '#CBD5E1', titleColor: '#7C2D12'},
+  KLM: {icao: 'KLM', iata: 'KL', name: 'KLM', fuselageHex: '#F8FAFC', tailHex: '#38BDF8', accentHex: '#0284C7', bellyHex: '#CBD5E1', titleColor: '#0369A1'},
 };
 
 export function resolveAirlineLivery(airlineIcao: string, callsign?: string): AirlineLivery {
@@ -595,11 +606,20 @@ export function resolveAirlineLivery(airlineIcao: string, callsign?: string): Ai
 
 export function resolveAircraftSpec(typeCode: string): AircraftGeometrySpec {
   const t = (typeCode || 'A320').toUpperCase();
-  if (/^(A38|B74)/.test(t)) {
-    return {code: t, name: t.startsWith('A38') ? 'Airbus A380' : 'Boeing 747', category: 'widebody', lengthScale: 1.38, wingspanScale: 1.42, fuselageRadius: 0.56, engines: 4, winglets: true};
+  if (/^(A388|A389|A38)/.test(t)) {
+    return {code: t, name: 'Airbus A380', category: 'widebody', lengthScale: 1.48, wingspanScale: 1.48, fuselageRadius: 0.60, engines: 4, winglets: true};
   }
-  if (/^(A35|B77|B78|A33|A34|B76)/.test(t)) {
-    return {code: t, name: t, category: 'widebody', lengthScale: 1.24, wingspanScale: 1.28, fuselageRadius: 0.46, engines: t.startsWith('A34') ? 4 : 2, winglets: true};
+  if (/^(B748|B747|B744|B743|B742)/.test(t)) {
+    return {code: t, name: 'Boeing 747', category: 'widebody', lengthScale: 1.44, wingspanScale: 1.42, fuselageRadius: 0.56, engines: 4, winglets: true};
+  }
+  if (/^(A359|A350|A351|A35)/.test(t)) {
+    return {code: t, name: t, category: 'widebody', lengthScale: 1.30, wingspanScale: 1.34, fuselageRadius: 0.46, engines: 2, winglets: true};
+  }
+  if (/^(B789|B788|B787|B78)/.test(t)) {
+    return {code: t, name: t, category: 'widebody', lengthScale: 1.28, wingspanScale: 1.32, fuselageRadius: 0.46, engines: 2, winglets: true};
+  }
+  if (/^(B773|B772|B77|A333|A332|A330|A343|A346|B764|B763|B762)/.test(t)) {
+    return {code: t, name: t, category: 'widebody', lengthScale: 1.24, wingspanScale: 1.28, fuselageRadius: 0.46, engines: /^(A34|A346)/.test(t) ? 4 : 2, winglets: true};
   }
   if (/^(C919|A32|A20|A21|A31|B73|B38|B39)/.test(t)) {
     return {code: t, name: t === 'C919' ? 'COMAC C919' : t, category: 'narrowbody', lengthScale: 1.0, wingspanScale: 1.0, fuselageRadius: 0.34, engines: 2, winglets: true};

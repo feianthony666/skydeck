@@ -413,6 +413,25 @@ export function createAirlineLiveryTexture(
   ctx.fillStyle = livery.accentHex;
   ctx.fillRect(0, 154, 512, 10);
 
+  if (livery.icao === 'UAE') {
+    ctx.fillStyle = '#16A34A';
+    ctx.fillRect(0, 146, 512, 5);
+    ctx.fillStyle = '#DC2626';
+    ctx.fillRect(0, 151, 512, 3);
+  } else if (livery.icao === 'KLM') {
+    ctx.fillStyle = '#0284C7';
+    ctx.fillRect(0, 150, 512, 14);
+  } else if (livery.icao === 'QFA') {
+    ctx.fillStyle = '#DC2626';
+    ctx.fillRect(0, 150, 512, 6);
+  } else if (livery.icao === 'THA') {
+    ctx.fillStyle = '#7E22CE';
+    ctx.fillRect(0, 148, 512, 8);
+  } else if (livery.icao === 'TGW') {
+    ctx.fillStyle = '#1E293B';
+    ctx.fillRect(0, 150, 512, 7);
+  }
+
   // Cabin passenger windows
   ctx.fillStyle = '#0F172A';
   for (let x = 58; x < 458; x += 15) {

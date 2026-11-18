@@ -897,7 +897,7 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
         if (a.onGround !== b.onGround) return a.onGround ? 1 : -1;
         return 0;
       })
-      .slice(0, 2200);
+      .slice(0, 10000);
 
     for (const f of flights) {
       recordBrowserBreadcrumb(f);

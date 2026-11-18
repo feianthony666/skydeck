@@ -59,7 +59,7 @@ function getDb() {
 export async function saveFlightSnapshot(key: string, flights: LiveFlight[], fetchedAt: number) {
   try {
     const db = await getDb();
-    await db.put('snapshots', {key, flights: flights.slice(0, 400), fetchedAt});
+    await db.put('snapshots', {key, flights: flights.slice(0, 5000), fetchedAt});
   } catch {
     // ignore storage quota failures
   }

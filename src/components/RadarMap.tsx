@@ -711,6 +711,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       maxZoom: 20,
       zoomControl: false,
       preferCanvas: true,
+      zoomAnimation: true,
+      markerZoomAnimation: true,
+      fadeAnimation: true,
+      zoomSnap: 0.25,
+      zoomDelta: 0.25,
+      wheelPxPerZoomLevel: 120,
+      wheelDebounceTime: 35,
+      zoomAnimationThreshold: 8,
     });
 
     // Subtle top-right zoom controls that don't clash with the Left Sidebar or Bottom Dock

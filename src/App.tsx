@@ -359,13 +359,13 @@ export default function App() {
               if (pa !== pb) return pb - pa;
               return b.seenAtMs - a.seenAtMs;
             })
-            .slice(0, 2600)
+            .slice(0, 10000)
             .map((e) => e.flight);
 
           setRawFlights(mergedList);
           setLastFetchedAt(data.fetchedAt);
           setFlightsError(null);
-          await saveFlightSnapshot(regionKey, mergedList.slice(0, 900), data.fetchedAt);
+          await saveFlightSnapshot(regionKey, mergedList.slice(0, 5000), data.fetchedAt);
         } else {
           const cached = await loadFlightSnapshot(regionKey);
           if (cached && rawFlightsCountRef.current === 0) {
@@ -1242,6 +1242,7 @@ export default function App() {
             <div className="h-[calc(100%-64px)] min-h-[380px]">
               <FlightDeck3D
                 flight={selectedFlight}
+                detail={selectedDetail}
                 allFlights={flights}
                 groundTraffic={groundTraffic}
                 nearestWeather={nearestWeather}
@@ -1343,7 +1344,7 @@ export default function App() {
                           </TableCell>
                         </TableRow>
                       ) : (
-                        filteredFlights.slice(0, 120).map((f) => {
+                        filteredFlights.map((f) => {
                           const db = getDbFlagMeta(f);
                           return (
                             <TableRow
