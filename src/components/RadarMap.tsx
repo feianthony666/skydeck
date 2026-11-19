@@ -1584,8 +1584,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const surfaceQueryBucket = useMemo(() => (mapZoom >= 8.2 ? 1 : 0), [mapZoom]);
   const surfaceRenderZoom = useMemo(() => {
     if (mapZoom < 8.2) return 0;
-    // Surface geometry is expensive to rebuild; integer zoom buckets avoid redraws on every 0.25/0.5 zoom step.
-    return Math.round(mapZoom);
+    return Math.round(mapZoom * 2) / 2;
   }, [mapZoom]);
 
   useEffect(() => {
@@ -2183,11 +2182,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (rwy.coords.length < 2) continue;
 
         const rwyWidthM = rwy.widthM ?? 45;
-        // Screen-space runway overlay: once zoomed in, keep pavement at a stable width
-        // to match the underlying basemap runway. Only allow it to shrink as we zoom out.
-        const RUNWAY_SCREEN_WIDTH = 60;
-        const rwyWeight = z >= 14 ? RUNWAY_SCREEN_WIDTH : pxFromMeters(rwyWidthM, mPerPx, 12, RUNWAY_SCREEN_WIDTH);
-        const shoulderWeight = rwyWeight + (z >= 14 ? 6 : pxFromMeters(8, mPerPx, 2.0, 6));
+        const rwyWeight = pxFromMeters(rwyWidthM, mPerPx, 4.5, 48);
+        const shoulderWeight = rwyWeight + pxFromMeters(8, mPerPx, 2.0, 9);
         const startPt = rwy.coords[0];
         const endPt = rwy.coords[rwy.coords.length - 1];
         const brg = computeBearingDeg(startPt, endPt);
@@ -2362,16 +2358,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
           // ICAO piano keys + aiming point blocks + TDZ barrettes (zoom >= 13.5)
           if (z >= 13.5) {
-            // Draw ten evenly spaced, symmetric piano-key bars. The previous +/-5
-            // loop skipped the center but placed bars unevenly and made them appear
-            // crowded/overlapping at high zoom. Keep them inside the runway width.
-            const keyCount = 10;
-            const keyW = 3; // Fixed screen-space width: never gets thinner when zooming.
-            for (let k = 0; k < keyCount; k++) {
-              const latOffset = ((k + 0.5) / keyCount - 0.5) * (halfEndW * 1.68);
-              const keyLengthM = mPerPx * 32; // Fixed 32px screen-space length at every zoom.
-              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 8, latOffset);
-              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 8 + keyLengthM, latOffset);
+            const numKeys = 5;
+            const keyW = pxFromMeters(1.8, mPerPx, 1.1, 3.2);
+            for (let k = -numKeys; k <= numKeys; k++) {
+              if (k === 0) continue;
+              const latOffset = (k / numKeys) * (halfEndW * 0.84);
+              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
+              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
               L.polyline([p1, p2], {
                 renderer,
                 color: '#f8fafc',
