@@ -1584,7 +1584,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const surfaceQueryBucket = useMemo(() => (mapZoom >= 8.2 ? 1 : 0), [mapZoom]);
   const surfaceRenderZoom = useMemo(() => {
     if (mapZoom < 8.2) return 0;
-    return Math.round(mapZoom * 2) / 2;
+    // Surface geometry is expensive to rebuild; integer zoom buckets avoid redraws on every 0.25/0.5 zoom step.
+    return Math.round(mapZoom);
   }, [mapZoom]);
 
   useEffect(() => {
@@ -2358,13 +2359,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
           // ICAO piano keys + aiming point blocks + TDZ barrettes (zoom >= 13.5)
           if (z >= 13.5) {
-            const numKeys = 5;
-            const keyW = pxFromMeters(1.8, mPerPx, 1.1, 3.2);
-            for (let k = -numKeys; k <= numKeys; k++) {
-              if (k === 0) continue;
-              const latOffset = (k / numKeys) * (halfEndW * 0.84);
-              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
-              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
+            // Draw ten evenly spaced, symmetric piano-key bars. The previous +/-5
+            // loop skipped the center but placed bars unevenly and made them appear
+            // crowded/overlapping at high zoom. Keep them inside the runway width.
+            const keyCount = 10;
+            const keyW = pxFromMeters(1.6, mPerPx, 1.0, 2.6);
+            for (let k = 0; k < keyCount; k++) {
+              const latOffset = ((k + 0.5) / keyCount - 0.5) * (halfEndW * 1.68);
+              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 12, latOffset);
+              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 42, latOffset);
               L.polyline([p1, p2], {
                 renderer,
                 color: '#f8fafc',
