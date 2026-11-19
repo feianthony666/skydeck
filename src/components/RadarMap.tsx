@@ -2183,7 +2183,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (rwy.coords.length < 2) continue;
 
         const rwyWidthM = rwy.widthM ?? 45;
-        const rwyWeight = pxFromMeters(rwyWidthM, mPerPx, 4.5, 48);
+        const rwyWeight = pxFromMeters(rwyWidthM, mPerPx, 12, 48);
         const shoulderWeight = rwyWeight + pxFromMeters(8, mPerPx, 2.0, 9);
         const startPt = rwy.coords[0];
         const endPt = rwy.coords[rwy.coords.length - 1];
@@ -2363,11 +2363,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             // loop skipped the center but placed bars unevenly and made them appear
             // crowded/overlapping at high zoom. Keep them inside the runway width.
             const keyCount = 10;
-            const keyW = pxFromMeters(1.6, mPerPx, 1.0, 2.6);
+            const keyW = 3; // Fixed screen-space width: never gets thinner when zooming.
             for (let k = 0; k < keyCount; k++) {
               const latOffset = ((k + 0.5) / keyCount - 0.5) * (halfEndW * 1.68);
-              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 12, latOffset);
-              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 42, latOffset);
+              const keyLengthM = mPerPx * 32; // Fixed 32px screen-space length at every zoom.
+              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 8, latOffset);
+              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 8 + keyLengthM, latOffset);
               L.polyline([p1, p2], {
                 renderer,
                 color: '#f8fafc',
