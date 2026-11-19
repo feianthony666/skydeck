@@ -2183,8 +2183,11 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (rwy.coords.length < 2) continue;
 
         const rwyWidthM = rwy.widthM ?? 45;
-        const rwyWeight = pxFromMeters(rwyWidthM, mPerPx, 12, 48);
-        const shoulderWeight = rwyWeight + pxFromMeters(8, mPerPx, 2.0, 9);
+        // Screen-space runway overlay: once zoomed in, keep pavement at a stable width
+        // to match the underlying basemap runway. Only allow it to shrink as we zoom out.
+        const RUNWAY_SCREEN_WIDTH = 60;
+        const rwyWeight = z >= 14 ? RUNWAY_SCREEN_WIDTH : pxFromMeters(rwyWidthM, mPerPx, 12, RUNWAY_SCREEN_WIDTH);
+        const shoulderWeight = rwyWeight + (z >= 14 ? 6 : pxFromMeters(8, mPerPx, 2.0, 6));
         const startPt = rwy.coords[0];
         const endPt = rwy.coords[rwy.coords.length - 1];
         const brg = computeBearingDeg(startPt, endPt);
