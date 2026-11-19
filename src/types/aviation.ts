@@ -239,6 +239,14 @@ export interface AirfieldStandFeature {
   coords?: Array<[number, number]>;
 }
 
+export interface AirfieldHoldingPosition {
+  id: string;
+  lat: number;
+  lon: number;
+  ref?: string;
+  coords?: Array<[number, number]>;
+}
+
 export interface AirfieldSurfaceData {
   icao: string;
   iata: string;
@@ -248,6 +256,7 @@ export interface AirfieldSurfaceData {
   labeledAprons?: AirfieldPolygonFeature[];
   terminals?: AirfieldPolygonFeature[];
   stands?: AirfieldStandFeature[];
+  holdingPositions?: AirfieldHoldingPosition[];
   runways: TaxiwaySegment[];
   taxiways: TaxiwaySegment[];
   gates: AirfieldSurfaceGate[];

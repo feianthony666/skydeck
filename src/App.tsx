@@ -253,11 +253,14 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      setNowEpochSec(Math.floor(Date.now() / 1000));
-    }, 2000);
+    const id = window.setInterval(
+      () => {
+        setNowEpochSec(Math.floor(Date.now() / 1000));
+      },
+      isOnline ? 5000 : 2000,
+    );
     return () => clearInterval(id);
-  }, []);
+  }, [isOnline]);
 
   const fetchAirportsInView = useCallback(
     async (targetBounds = boundsRef.current, zoom = activeRegion.zoom) => {
@@ -533,7 +536,8 @@ export default function App() {
   }, [fetchWeatherAndHazards, fetchAcars]);
 
   const flights = useMemo(() => {
-    return rawFlights.map((f) => deadReckonFlight(f, nowEpochSec, !isOnline));
+    if (isOnline) return rawFlights;
+    return rawFlights.map((f) => deadReckonFlight(f, nowEpochSec, true));
   }, [rawFlights, nowEpochSec, isOnline]);
 
   const availableModels = useMemo(() => {

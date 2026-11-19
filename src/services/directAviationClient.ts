@@ -1662,6 +1662,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
   let labeledAprons: AirfieldPolygonFeature[] = [];
   let terminals: AirfieldPolygonFeature[] = [];
   let stands: AirfieldStandFeature[] = [];
+  let holdingPositions: NonNullable<AirfieldSurfaceData['holdingPositions']> = [];
   let osmRunways: TaxiwaySegment[] = [];
   let taxiways: TaxiwaySegment[] = [];
   let gates: AirfieldSurfaceGate[] = [];
@@ -1709,6 +1710,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
       labeledAprons = parsed.labeledAprons;
       terminals = parsed.terminals;
       stands = parsed.stands;
+      holdingPositions = parsed.holdingPositions;
       gates = parsed.gates;
       osmSucceeded =
         osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
@@ -1831,6 +1833,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     labeledAprons,
     terminals,
     stands,
+    holdingPositions,
     runways,
     taxiways,
     gates,

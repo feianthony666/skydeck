@@ -1,4 +1,5 @@
 import type {
+  AirfieldHoldingPosition,
   AirfieldPolygonFeature,
   AirfieldStandFeature,
   AirfieldSurfaceGate,
@@ -49,7 +50,7 @@ export function buildOverpassAirfieldQuery(lat: number, lon: number): string {
   const n = (lat + 0.055).toFixed(4);
   const e = (lon + 0.080).toFixed(4);
   const bbox = `${s},${w},${n},${e}`;
-  return `[out:json][timeout:14];(way["aeroway"~"^(runway|taxiway|taxilane|apron|terminal|parking_position)$"](${bbox});relation["aeroway"~"^(apron|terminal)$"](${bbox});way["building"="terminal"](${bbox});relation["building"="terminal"](${bbox});node["aeroway"~"^(gate|parking_position|terminal)$"](${bbox}););out geom qt;`;
+  return `[out:json][timeout:14];(way["aeroway"~"^(runway|taxiway|taxilane|apron|terminal|parking_position|holding_position)$"](${bbox});relation["aeroway"~"^(apron|terminal)$"](${bbox});way["building"="terminal"](${bbox});relation["building"="terminal"](${bbox});node["aeroway"~"^(gate|parking_position|terminal|holding_position)$"](${bbox}););out geom qt;`;
 }
 
 function cleanTaxiwayRef(raw?: string): string | undefined {
@@ -288,6 +289,7 @@ export function parseOverpassAirfieldElements(elements: OverpassElement[]): {
   labeledAprons: AirfieldPolygonFeature[];
   terminals: AirfieldPolygonFeature[];
   stands: AirfieldStandFeature[];
+  holdingPositions: AirfieldHoldingPosition[];
   gates: AirfieldSurfaceGate[];
 } {
   const osmRunways: TaxiwaySegment[] = [];
@@ -296,6 +298,7 @@ export function parseOverpassAirfieldElements(elements: OverpassElement[]): {
   const labeledAprons: AirfieldPolygonFeature[] = [];
   const terminals: AirfieldPolygonFeature[] = [];
   const stands: AirfieldStandFeature[] = [];
+  const holdingPositions: AirfieldHoldingPosition[] = [];
   const standDedupe = new Set<string>();
 
   for (const el of elements) {
@@ -304,7 +307,14 @@ export function parseOverpassAirfieldElements(elements: OverpassElement[]): {
     const bld = tags.building;
 
     if (el.type === 'node' && Number.isFinite(el.lat) && Number.isFinite(el.lon)) {
-      if (aw === 'gate' || aw === 'parking_position') {
+      if (aw === 'holding_position') {
+        holdingPositions.push({
+          id: `hold-node-${el.id}`,
+          lat: el.lat!,
+          lon: el.lon!,
+          ref: (tags.ref || tags.name || '').trim() || undefined,
+        });
+      } else if (aw === 'gate' || aw === 'parking_position') {
         const ref = (tags.ref || tags.name || '').trim();
         if (ref) {
           const key = `${ref}-${Math.round(el.lat! * 2500)}-${Math.round(el.lon! * 2500)}`;
@@ -378,6 +388,15 @@ export function parseOverpassAirfieldElements(elements: OverpassElement[]): {
           kind: 'parking_position',
           lat: mid[0],
           lon: mid[1],
+          coords,
+        });
+      } else if (aw === 'holding_position') {
+        const mid = coords[Math.floor(coords.length / 2)];
+        holdingPositions.push({
+          id: `hold-way-${el.id}`,
+          lat: mid[0],
+          lon: mid[1],
+          ref: (tags.ref || tags.name || '').trim() || undefined,
           coords,
         });
       } else if (aw === 'apron' && coords.length >= 3) {
@@ -457,6 +476,7 @@ export function parseOverpassAirfieldElements(elements: OverpassElement[]): {
     labeledAprons,
     terminals: finalTerminals,
     stands,
+    holdingPositions,
     gates,
   };
 }

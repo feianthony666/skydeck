@@ -2453,6 +2453,7 @@ export function createApiRouter(): express.Router {
     let labeledAprons: AirfieldPolygonFeature[] = [];
     let terminals: AirfieldPolygonFeature[] = [];
     let stands: AirfieldStandFeature[] = [];
+    let holdingPositions: NonNullable<AirfieldSurfaceData['holdingPositions']> = [];
     let osmRunways: TaxiwaySegment[] = [];
     let taxiways: TaxiwaySegment[] = [];
     let gates: AirfieldSurfaceGate[] = [];
@@ -2489,6 +2490,7 @@ export function createApiRouter(): express.Router {
         labeledAprons = parsed.labeledAprons;
         terminals = parsed.terminals;
         stands = parsed.stands;
+        holdingPositions = parsed.holdingPositions;
         gates = parsed.gates;
         osmSucceeded =
           osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
@@ -2611,6 +2613,7 @@ export function createApiRouter(): express.Router {
       labeledAprons,
       terminals,
       stands,
+      holdingPositions,
       runways,
       taxiways,
       gates,
