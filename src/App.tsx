@@ -189,6 +189,7 @@ export default function App() {
   const initialLocateAttemptedRef = useRef(false);
   const flightsAbortRef = useRef<AbortController | null>(null);
   const airportsAbortRef = useRef<AbortController | null>(null);
+  const airportSelectionRequestRef = useRef(0);
 
   useEffect(() => {
     const updateViewport = () => setIsPortraitMobile(detectPortraitMobileViewport());
@@ -691,6 +692,7 @@ export default function App() {
   }, []);
 
   const handleSelectAirport = useCallback(async (ap: {icao: string; iata: string; name: string}) => {
+    const requestId = ++airportSelectionRequestRef.current;
     setSelectedAirport(ap);
     setSidebarMode('airport');
     setMobileSheetDetent('peek');
@@ -708,13 +710,17 @@ export default function App() {
       apiFetchJson<AirfieldSurfaceData>(
         `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${matchMarker.lat}&lon=${matchMarker.lon}`,
       )
-        .then((surf) => setSelectedAirportSurface(surf))
+        .then((surf) => {
+          if (airportSelectionRequestRef.current === requestId) setSelectedAirportSurface(surf);
+        })
         .catch(() => {});
     } else {
       apiFetchJson<AirfieldSurfaceData>(
         `/api/surface?icao=${encodeURIComponent(ap.icao || ap.iata)}`,
       )
-        .then((surf) => setSelectedAirportSurface(surf))
+        .then((surf) => {
+          if (airportSelectionRequestRef.current === requestId) setSelectedAirportSurface(surf);
+        })
         .catch(() => {});
     }
 
@@ -724,18 +730,21 @@ export default function App() {
         icao: ap.icao,
       });
       const data = await apiFetchJson<AirportBoardResponse>(`/api/airport-board?${qs.toString()}`);
+      if (airportSelectionRequestRef.current !== requestId) return;
       setAirportBoard(data);
       if (!matchMarker && Number.isFinite(data.lat) && Number.isFinite(data.lon) && (data.lat !== 0 || data.lon !== 0)) {
         apiFetchJson<AirfieldSurfaceData>(
           `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${data.lat}&lon=${data.lon}`,
         )
-          .then((surf) => setSelectedAirportSurface(surf))
+          .then((surf) => {
+            if (airportSelectionRequestRef.current === requestId) setSelectedAirportSurface(surf);
+          })
           .catch(() => {});
       }
     } catch {
       // Keep panel open with local catalog info
     } finally {
-      setAirportBoardLoading(false);
+      if (airportSelectionRequestRef.current === requestId) setAirportBoardLoading(false);
     }
   }, [mapAirports]);
 

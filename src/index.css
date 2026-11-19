@@ -129,6 +129,17 @@
 .leaflet-container {
   background: #10141c;
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-pane,
+.leaflet-overlay-pane {
+  image-rendering: auto;
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
 }
 
 html:not(.dark) .leaflet-container {
@@ -173,6 +184,8 @@ html:not(.dark) .leaflet-control-attribution a {
   border: none !important;
   box-shadow: none !important;
   padding: 0 !important;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
 @keyframes skydeck-rabbit {

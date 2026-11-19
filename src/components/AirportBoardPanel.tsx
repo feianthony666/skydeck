@@ -660,6 +660,9 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                   ? `${delayIdx.departuresDelayAvgMin} min avg`
                   : delayLabel(delayIdx?.departuresIndex ?? null)}
               </div>
+              {delayIdx?.departuresIndex !== null && delayIdx?.departuresIndex !== undefined && (
+                <div className="text-[9.5px] text-muted-foreground">Raw provider delay index</div>
+              )}
               <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">
                 {delayIdx?.departuresDelayedPct !== null && delayIdx?.departuresDelayedPct !== undefined
                   ? `${delayIdx.departuresDelayedPct}% delayed · ${delayIdx.departuresDelayedCount ?? 0}/${
@@ -686,6 +689,9 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                   ? `${delayIdx.arrivalsDelayAvgMin} min avg`
                   : delayLabel(delayIdx?.arrivalsIndex ?? null)}
               </div>
+              {delayIdx?.arrivalsIndex !== null && delayIdx?.arrivalsIndex !== undefined && (
+                <div className="text-[9.5px] text-muted-foreground">Raw provider delay index</div>
+              )}
               <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">
                 {delayIdx?.arrivalsDelayedPct !== null && delayIdx?.arrivalsDelayedPct !== undefined
                   ? `${delayIdx.arrivalsDelayedPct}% delayed · ${delayIdx.arrivalsDelayedCount ?? 0}/${

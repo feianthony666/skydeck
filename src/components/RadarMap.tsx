@@ -532,7 +532,7 @@ function makeAirportIcon(
     isSelected ? '#F59E0B' : dotBg
   };border:2px solid #ffffff;box-shadow:0 1px 4px rgba(19,35,58,0.45);flex-shrink:0;"></div>`;
 
-  const fontSize = tier === 3 ? 9 : 10;
+  const fontSize = tier === 3 ? 11 : isSelected ? 14 : 13;
   const labelHtml = `<span style="margin-left:4px;padding:1px ${tier === 3 ? 5 : 6}px;border-radius:9999px;font-family:'JetBrains Mono',monospace;font-size:${fontSize}px;font-weight:${
     tier === 1 ? 700 : 600
   };letter-spacing:0.02em;white-space:nowrap;background:${
@@ -543,7 +543,7 @@ function makeAirportIcon(
 
   return L.divIcon({
     className: 'skydeck-airport-label',
-    iconSize: [72, 20],
+    iconSize: [96, 22],
     iconAnchor: [dotSize / 2, 10],
     html: `<div style="display:inline-flex;align-items:center;cursor:pointer;">${pinHtml}${labelHtml}</div>`,
   });
@@ -713,11 +713,11 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       preferCanvas: true,
       zoomAnimation: true,
       markerZoomAnimation: true,
-      fadeAnimation: true,
+      fadeAnimation: false,
       zoomSnap: 1,
       zoomDelta: 1,
-      wheelPxPerZoomLevel: 55,
-      wheelDebounceTime: 12,
+      wheelPxPerZoomLevel: 42,
+      wheelDebounceTime: 8,
       zoomAnimationThreshold: 8,
     });
 
@@ -853,6 +853,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       setMapZoom(z);
       needsCanvasRedrawRef.current = true;
       setViewportTick((t) => t + 1);
+      if (followSelectedRef.current) return;
       clearTimeout(moveTimer);
       moveTimer = window.setTimeout(() => {
         const b = map.getBounds();
@@ -958,6 +959,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       keepBuffer: 4,
       updateWhenIdle: true,
       updateWhenZooming: false,
+      detectRetina: true,
     };
 
     if (effectiveStyle === 'satellite') {
@@ -967,16 +969,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           {
             ...tileOpts,
             attribution: 'Tiles &copy; Esri',
-            maxNativeZoom: 17,
-            maxZoom: 20,
+            maxNativeZoom: 19,
+            maxZoom: 19,
           },
         ),
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
           {
             ...tileOpts,
-            maxNativeZoom: 15,
-            maxZoom: 20,
+            maxNativeZoom: 18,
+            maxZoom: 19,
             opacity: 0.85,
           },
         ),
@@ -987,7 +989,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           ...tileOpts,
           attribution: '&copy; OpenStreetMap contributors',
           maxNativeZoom: 19,
-          maxZoom: 20,
+          maxZoom: 19,
         }),
       );
     } else if (effectiveStyle === 'light') {
@@ -997,16 +999,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           {
             ...tileOpts,
             attribution: 'Tiles &copy; Esri',
-            maxNativeZoom: 16,
-            maxZoom: 20,
+            maxNativeZoom: 18,
+            maxZoom: 19,
           },
         ),
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
           {
             ...tileOpts,
-            maxNativeZoom: 15,
-            maxZoom: 20,
+            maxNativeZoom: 18,
+            maxZoom: 19,
           },
         ),
       );
@@ -1017,16 +1019,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           {
             ...tileOpts,
             attribution: 'Tiles &copy; Esri',
-            maxNativeZoom: 16,
-            maxZoom: 20,
+            maxNativeZoom: 18,
+            maxZoom: 19,
           },
         ),
         L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
           {
             ...tileOpts,
-            maxNativeZoom: 15,
-            maxZoom: 20,
+            maxNativeZoom: 18,
+            maxZoom: 19,
           },
         ),
       );
@@ -1151,8 +1153,27 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }
     }
 
-    return Array.from(merged.values());
-  }, [airports, mapAirports]);
+    const map = mapRef.current;
+    const viewport = map?.getBounds().pad(mapZoom < 5 ? 0.8 : 0.35);
+    const candidates = Array.from(merged.values()).filter((ap) => {
+      if (!viewport) return true;
+      if (!viewport.contains([ap.lat, ap.lon])) return false;
+      if (mapZoom < 5) return ap.tier === 1;
+      if (mapZoom < 7) return ap.tier <= 2;
+      return true;
+    });
+
+    if (mapZoom >= 12) return candidates;
+
+    const grouped = new Map<string, (typeof candidates)[number]>();
+    const cellSize = mapZoom < 5 ? 5 : mapZoom < 7 ? 2 : 1;
+    for (const ap of candidates) {
+      const key = `${Math.round(ap.lat / cellSize)}:${Math.round(ap.lon / cellSize)}`;
+      const existing = grouped.get(key);
+      if (!existing || (ap.tier < existing.tier)) grouped.set(key, ap);
+    }
+    return Array.from(grouped.values());
+  }, [airports, mapAirports, mapZoom, viewportTick]);
 
   useEffect(() => {
     const layer = airportLayerRef.current;
@@ -1201,7 +1222,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         const dB = Math.hypot(b.lat - center.lat, b.lon - center.lng) + (b.tier - 1) * 0.08;
         return dA - dB;
       })
-      .slice(0, 3);
+      .slice(0, mapZoom >= 12 ? 3 : 1);
 
     const targets: Array<{key: string; icao: string; lat: number; lon: number}> =
       candidates.length > 0
@@ -1331,7 +1352,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           interactive: false,
         }).addTo(layer);
 
-        if (mapZoom >= 12.8) {
+        if (mapZoom >= 14.8) {
           let minLat = Infinity;
           let maxLat = -Infinity;
           let minLon = Infinity;
@@ -1377,7 +1398,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }).addTo(layer);
 
         const termLabel = term.name || term.ref;
-        if (mapZoom >= 12.1 && termLabel && (!viewBounds || viewBounds.contains(term.center))) {
+        if (mapZoom >= 13.8 && termLabel && (!viewBounds || viewBounds.contains(term.center))) {
           const tKey = `${termLabel.toUpperCase()}-${Math.round(term.center[0] * 260)}-${Math.round(
             term.center[1] * 260,
           )}`;
@@ -1413,7 +1434,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }
 
       // 4. FlightDeck Taxiway Network: All Taxiways & Taxilanes + Green/Blue Lights + Unboxed Gold Letters
-      const twyWeight = mapZoom >= 15 ? 9 : mapZoom >= 13 ? 5.5 : 3;
+      const twyWeight = mapZoom >= 15 ? 5.5 : mapZoom >= 13 ? 3.8 : 2.2;
       for (const twy of surfaceData.taxiways) {
         const isLane = twy.kind === 'taxilane';
         const w = isLane ? Math.max(2, twyWeight * 0.65) : twyWeight;
@@ -1451,7 +1472,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (mapZoom >= 13.8 && !isLane && twy.coords.length >= 2) {
           const midCheck = twy.coords[Math.floor(twy.coords.length / 2)];
           if (!viewBounds || viewBounds.contains(midCheck)) {
-            const maxSegs = Math.min(twy.coords.length - 1, 6);
+            const maxSegs = Math.min(twy.coords.length - 1, 4);
             for (let segIdx = 0; segIdx < maxSegs; segIdx++) {
               const pA = twy.coords[segIdx];
               const pB = twy.coords[segIdx + 1];
@@ -1487,7 +1508,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
 
         // Clean unboxed amber-gold taxiway designator directly over centerline (~320m spatial grid)
-        if (mapZoom >= 12.2 && twy.ref) {
+        if (mapZoom >= 14.2 && twy.ref) {
           const mid = twy.coords[Math.floor(twy.coords.length / 2)];
           if (!viewBounds || viewBounds.contains(mid)) {
             const badgeKey = `${twy.ref}-${Math.round(mid[0] * 320)}-${Math.round(mid[1] * 320)}`;
@@ -1640,6 +1661,27 @@ export const RadarMap: React.FC<RadarMapProps> = ({
               }).addTo(layer);
             }
           }
+
+          // Precision Approach Path Indicator lights: two compact banks, red/white over approach.
+          if (mapZoom >= 14.5) {
+            for (const side of [-1, 1]) {
+              for (let light = 0; light < 4; light++) {
+                const along = 360 + light * 54;
+                const across = side * (18 + Math.abs(light - 1.5) * 2.2);
+                const papiPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, along, across);
+                const papiColor = light < 2 ? '#ef4444' : '#ffffff';
+                L.circleMarker(papiPt, {
+                  renderer,
+                  radius: 1.8,
+                  color: papiColor,
+                  fillColor: papiColor,
+                  fillOpacity: 1,
+                  weight: 0.6,
+                  interactive: false,
+                }).addTo(layer);
+              }
+            }
+          }
         };
 
         drawApproachPath(startPt, brg);
@@ -1677,7 +1719,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
         // Dense luminous runway edge light chain (white + amber caution ends)
         if (mapZoom >= 11.5) {
-          const steps = 28;
+          const steps = mapZoom >= 15 ? 22 : 16;
           const halfW = (rwy.widthM ?? 45) * 0.5;
           for (let s = 0; s <= steps; s++) {
             const frac = s / steps;
@@ -1904,7 +1946,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       const canvas = flightsCanvasRef.current;
       if (!map || !canvas) return;
 
-      const intervalMs = isMapZoomingRef.current ? 16 : needsCanvasRedrawRef.current ? 16 : 30;
+      const intervalMs = isMapZoomingRef.current
+        ? 16
+        : followSelectedRef.current
+          ? 16
+          : needsCanvasRedrawRef.current
+            ? 16
+            : 100;
       if (frameMs - lastDrawMs < intervalMs) return;
       lastDrawMs = frameMs;
       needsCanvasRedrawRef.current = false;
@@ -1930,14 +1978,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       const selId = selectedFlightIdRef.current;
       const poolEntries = Array.from(flightPoolRef.current.values());
 
-      // Draw ground -> airborne -> flagged -> selected -> emergency order so alerts stay cleanly on top
-      poolEntries.sort((a, b) => {
-        const aScore =
-          getEmergencySquawkMeta(a.flight.squawk) ? 4 : a.flight.id === selId ? 3 : a.flight.isLadd ? 2 : a.flight.isMilitary ? 1 : a.flight.onGround ? -1 : 0;
-        const bScore =
-          getEmergencySquawkMeta(b.flight.squawk) ? 4 : b.flight.id === selId ? 3 : b.flight.isLadd ? 2 : b.flight.isMilitary ? 1 : b.flight.onGround ? -1 : 0;
-        return aScore - bScore;
-      });
 
       const nextHits: CanvasHitTarget[] = [];
       const pulsePhase = (frameMs % 1400) / 1400;
@@ -2093,7 +2133,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             : `${dbMeta ? `[${dbMeta.shortLabel}] ` : ''}${f.callsign}${
                 f.onGround ? ' GND' : ` FL${Math.round(f.altitudeFt / 100)}`
               }`;
-          ctx.font = '700 10px "JetBrains Mono", monospace';
+          ctx.font = '700 12.5px "JetBrains Mono", monospace';
           const tw = ctx.measureText(text).width;
           const bx = pt.x + iconSize * 0.5 + 4;
           const by = pt.y - 8;
