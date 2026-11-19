@@ -16,10 +16,14 @@ import type {
   AirportWeather,
   FlightDetail,
   FlightsResponse,
+  HazardCategory,
   LiveFlight,
+  PastFlightRecord,
   ProviderStatus,
   RainViewerMeta,
   RunwayCondition,
+  SafetyRecordItem,
+  SafetyRecordResponse,
   SigmetHazard,
   TaxiwaySegment,
   TrailPoint,
@@ -54,8 +58,12 @@ const hexDbCache = new Map<string, {ts: number; meta: Record<string, string> | n
 const airportBoardCache = new Map<string, {ts: number; board: AirportBoardResponse}>();
 const surfaceCache = new Map<string, {ts: number; data: AirfieldSurfaceData}>();
 const openSkySectorCache = new Map<string, {ts: number; flights: LiveFlight[]}>();
+const safetyRecordCache = new Map<string, {ts: number; data: SafetyRecordResponse}>();
+const pastFlightsCache = new Map<string, {ts: number; items: PastFlightRecord[]}>();
 let adsbMilFeedCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let adsbLaddFeedCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
+let adsbLolAllCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
+let adsbFiAllCache: {ts: number; aircraft: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let globalAirportsCache: {ts: number; airports: AirportMarker[]} | null = null;
 interface AipRunwayEntry {
   airportIdent: string;
@@ -366,15 +374,14 @@ async function fetchPlanespottersPhoto(icao24: string, reg: string): Promise<Air
     return null;
   };
 
-  const psHexPhoto = icao24
-    ? await tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`)
-    : null;
-  let photo: AircraftPhoto | null = psHexPhoto;
+  const [wmPhoto, psHexPhoto] = await Promise.all([
+    tryWikimedia(),
+    icao24 ? tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`) : Promise.resolve(null),
+  ]);
+
+  let photo: AircraftPhoto | null = wmPhoto ?? psHexPhoto;
   if (!photo && reg) {
     photo = await tryPlanespotters(`https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}`);
-  }
-  if (!photo) {
-    photo = await tryWikimedia();
   }
   if (!photo && icao24) {
     try {
@@ -530,25 +537,37 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=${page}&limit=100`;
 
   try {
-    const boardPages = [1, 2, 3, 4, 5];
-    const fetchPage = (mode: 'departures' | 'arrivals', page: number) =>
-      fetch(makeBoardUrl(mode, page), {
+    const [depRes1, depRes2, arrRes1, arrRes2] = await Promise.all([
+      fetch(makeBoardUrl('departures', 1), {
         headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
         signal: AbortSignal.timeout(5200),
-      }).catch(() => null);
-    const [depResponses, arrResponses] = await Promise.all([
-      Promise.all(boardPages.map((page) => fetchPage('departures', page))),
-      Promise.all(boardPages.map((page) => fetchPage('arrivals', page))),
+      }).catch(() => null),
+      fetch(makeBoardUrl('departures', 2), {
+        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
+        signal: AbortSignal.timeout(5200),
+      }).catch(() => null),
+      fetch(makeBoardUrl('arrivals', 1), {
+        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
+        signal: AbortSignal.timeout(5200),
+      }).catch(() => null),
+      fetch(makeBoardUrl('arrivals', 2), {
+        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
+        signal: AbortSignal.timeout(5200),
+      }).catch(() => null),
     ]);
 
     type Fr24ApResp = {result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}};
-    const [depJsons, arrJsons] = await Promise.all([
-      Promise.all(depResponses.map((res) => safeJson<Fr24ApResp>(res))),
-      Promise.all(arrResponses.map((res) => safeJson<Fr24ApResp>(res))),
+    const [depJson1, depJson2, arrJson1, arrJson2] = await Promise.all([
+      safeJson<Fr24ApResp>(depRes1),
+      safeJson<Fr24ApResp>(depRes2),
+      safeJson<Fr24ApResp>(arrRes1),
+      safeJson<Fr24ApResp>(arrRes2),
     ]);
 
-    const pdDep1 = depJsons[0]?.result?.response?.airport?.pluginData ?? {};
-    const pdArr1 = arrJsons[0]?.result?.response?.airport?.pluginData ?? {};
+    const pdDep1 = depJson1?.result?.response?.airport?.pluginData ?? {};
+    const pdDep2 = depJson2?.result?.response?.airport?.pluginData ?? {};
+    const pdArr1 = arrJson1?.result?.response?.airport?.pluginData ?? {};
+    const pdArr2 = arrJson2?.result?.response?.airport?.pluginData ?? {};
     const details = ((pdDep1.details ?? pdArr1.details) ?? {}) as Record<string, unknown>;
     const stats = (details.stats ?? {}) as Record<string, unknown>;
     const codeObj = (details.code ?? {}) as Record<string, unknown>;
@@ -574,7 +593,7 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     const depPct = (depRecent.percentage ?? {}) as Record<string, unknown>;
     const depQty = (depRecent.quantity ?? {}) as Record<string, unknown>;
 
-    const delayIndex: AirportDelaySummary = {
+    const rawDelayIndex: AirportDelaySummary = {
       arrivalsIndex: Number.isFinite(Number(arrRecent.delayIndex)) ? Number(arrRecent.delayIndex) : null,
       arrivalsDelayAvgMin: Number.isFinite(Number(arrRecent.delayAvg)) ? Number(arrRecent.delayAvg) : null,
       arrivalsDelayedPct: Number.isFinite(Number(arrPct.delayed)) ? Math.round(Number(arrPct.delayed) * 100) : null,
@@ -604,12 +623,8 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
       return Array.from(seen.values());
     };
 
-    const depRows = depJsons.flatMap((json) =>
-      getRows(json?.result?.response?.airport?.pluginData ?? {}, 'departures'),
-    );
-    const arrRows = arrJsons.flatMap((json) =>
-      getRows(json?.result?.response?.airport?.pluginData ?? {}, 'arrivals'),
-    );
+    const depRows = [...getRows(pdDep1, 'departures'), ...getRows(pdDep2, 'departures')];
+    const arrRows = [...getRows(pdArr1, 'arrivals'), ...getRows(pdArr2, 'arrivals')];
 
     const departures = dedupeBoardRows(
       depRows.filter((r) => r.flight).map((r) => mapFr24ScheduleRow(r.flight!, 'departures', iata, icao, name)),
@@ -617,6 +632,8 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     const arrivals = dedupeBoardRows(
       arrRows.filter((r) => r.flight).map((r) => mapFr24ScheduleRow(r.flight!, 'arrivals', iata, icao, name)),
     );
+
+    const delayIndex = computeDelaySummaryFromRows(departures, arrivals, rawDelayIndex);
 
     if (departures.length > 0 || arrivals.length > 0 || delayIndex.departuresIndex !== null || delayIndex.arrivalsIndex !== null) {
       const board: AirportBoardResponse = {
@@ -643,6 +660,68 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     // fallback below
   }
   return null;
+}
+
+function deriveSideDelayStats(rows: AirportBoardFlight[]) {
+  if (rows.length === 0) {
+    return {
+      index: null as number | null,
+      avgMin: null as number | null,
+      delayedPct: null as number | null,
+      onTimeCount: undefined as number | undefined,
+      delayedCount: undefined as number | undefined,
+      canceledCount: undefined as number | undefined,
+    };
+  }
+  let delayed = 0;
+  let canceled = 0;
+  let onTime = 0;
+  let totalDelayMin = 0;
+  for (const r of rows) {
+    if (r.isCancelled) {
+      canceled++;
+      continue;
+    }
+    const refTs = r.actualTime || r.estimatedTime;
+    const diffMin = r.scheduledTime && refTs ? Math.round((refTs - r.scheduledTime) / 60) : r.isDelayed ? 22 : 0;
+    if (r.isDelayed || diffMin >= 15) {
+      delayed++;
+      totalDelayMin += Math.max(15, diffMin);
+    } else {
+      onTime++;
+    }
+  }
+  const activeCount = Math.max(1, rows.length - canceled);
+  const delayedPct = Math.round(((delayed + canceled) / rows.length) * 100);
+  const avgMin = delayed > 0 ? Math.round(totalDelayMin / delayed) : 0;
+  const rawIdx = Math.min(5, (delayedPct / 100) * 3.8 + Math.min(avgMin, 60) / 50 + (canceled / activeCount) * 1.4);
+  const index = Number(rawIdx.toFixed(1));
+  return {index, avgMin, delayedPct, onTimeCount: onTime, delayedCount: delayed, canceledCount: canceled};
+}
+
+function computeDelaySummaryFromRows(
+  departures: AirportBoardFlight[],
+  arrivals: AirportBoardFlight[],
+  raw?: AirportDelaySummary | null,
+): AirportDelaySummary {
+  const d = deriveSideDelayStats(departures);
+  const a = deriveSideDelayStats(arrivals);
+  return {
+    arrivalsIndex: raw?.arrivalsIndex ?? a.index,
+    arrivalsDelayAvgMin: raw?.arrivalsDelayAvgMin ?? a.avgMin,
+    arrivalsDelayedPct: raw?.arrivalsDelayedPct ?? a.delayedPct,
+    arrivalsOnTimeCount: raw?.arrivalsOnTimeCount ?? a.onTimeCount,
+    arrivalsDelayedCount: raw?.arrivalsDelayedCount ?? a.delayedCount,
+    arrivalsCanceledCount: raw?.arrivalsCanceledCount ?? a.canceledCount,
+    arrivalsTrend: raw?.arrivalsTrend,
+    departuresIndex: raw?.departuresIndex ?? d.index,
+    departuresDelayAvgMin: raw?.departuresDelayAvgMin ?? d.avgMin,
+    departuresDelayedPct: raw?.departuresDelayedPct ?? d.delayedPct,
+    departuresOnTimeCount: raw?.departuresOnTimeCount ?? d.onTimeCount,
+    departuresDelayedCount: raw?.departuresDelayedCount ?? d.delayedCount,
+    departuresCanceledCount: raw?.departuresCanceledCount ?? d.canceledCount,
+    departuresTrend: raw?.departuresTrend,
+  };
 }
 
 function recordFlightBreadcrumb(f: LiveFlight) {
@@ -779,24 +858,7 @@ async function fetchFr24Web(
     const lonSpan = lomax - lomin;
     // Tile wide/zoomed-out viewports into a 2x2 grid so FR24's per-request ~1500 aircraft zone limit doesn't drop planes
     const boxes: Array<[number, number, number, number]> =
-      latSpan >= 160 && lonSpan >= 340
-        ? (() => {
-            const latBands = [-85, -45, 0, 45, 85];
-            const lonBands = [-180, -90, 0, 90, 180];
-            const tiles: Array<[number, number, number, number]> = [];
-            for (let latIndex = 0; latIndex < latBands.length - 1; latIndex++) {
-              for (let lonIndex = 0; lonIndex < lonBands.length - 1; lonIndex++) {
-                tiles.push([
-                  latBands[latIndex],
-                  lonBands[lonIndex],
-                  latBands[latIndex + 1],
-                  lonBands[lonIndex + 1],
-                ]);
-              }
-            }
-            return tiles;
-          })()
-        : latSpan > 16 || lonSpan > 24
+      latSpan > 16 || lonSpan > 24
         ? (() => {
             const midLat = (lamin + lamax) / 2;
             const midLon = (lomin + lomax) / 2;
@@ -1038,23 +1100,40 @@ async function fetchAdsbLol(
   centerLat: number,
   centerLon: number,
   radiusNm: number,
+  isGlobal = false,
 ): Promise<{flights: LiveFlight[]; status: ProviderStatus}> {
   const start = Date.now();
   const r = Math.min(250, Math.max(25, Math.round(radiusNm)));
   try {
-    const res = await fetch(`https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/dist/${r}`.replace('/dist/', '/'), {
-      headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-      signal: AbortSignal.timeout(2800),
-    });
-    if (!res.ok) {
-      return {
-        flights: [],
-        status: {provider: 'adsb.lol', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
-      };
+    let acRows: Array<Record<string, unknown>> = [];
+    let nowSec = Math.floor(Date.now() / 1000);
+
+    if (isGlobal && adsbLolAllCache && Date.now() - adsbLolAllCache.ts < 12000) {
+      acRows = adsbLolAllCache.ac;
+      nowSec = adsbLolAllCache.nowSec;
+    } else {
+      const targetUrl = isGlobal
+        ? 'https://api.adsb.lol/v2/all'
+        : `https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/${r}`;
+      const res = await fetch(targetUrl, {
+        headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+        signal: AbortSignal.timeout(isGlobal ? 5200 : 2800),
+      });
+      if (!res.ok) {
+        return {
+          flights: [],
+          status: {provider: 'adsb.lol', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
+        };
+      }
+      const json = (await res.json()) as {ac?: Array<Record<string, unknown>>; now?: number};
+      acRows = json.ac ?? [];
+      nowSec = Math.floor((json.now ?? Date.now()) / 1000);
+      if (isGlobal && acRows.length > 0) {
+        adsbLolAllCache = {ts: Date.now(), ac: acRows, nowSec};
+      }
     }
-    const json = (await res.json()) as {ac?: Array<Record<string, unknown>>; now?: number};
-    const nowSec = Math.floor((json.now ?? Date.now()) / 1000);
-    const flights: LiveFlight[] = (json.ac ?? [])
+
+    const flights: LiveFlight[] = acRows
       .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
       .map((a) => {
         const icao24 = String(a.hex ?? '').toUpperCase();
@@ -1421,23 +1500,40 @@ async function fetchAdsbFi(
   centerLat: number,
   centerLon: number,
   radiusNm: number,
+  isGlobal = false,
 ): Promise<{flights: LiveFlight[]; status: ProviderStatus}> {
   const start = Date.now();
   const r = Math.min(250, Math.max(25, Math.round(radiusNm)));
   try {
-    const res = await fetch(`https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${r}`, {
-      headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-      signal: AbortSignal.timeout(2800),
-    });
-    if (!res.ok) {
-      return {
-        flights: [],
-        status: {provider: 'adsb.fi', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
-      };
+    let aircraftRows: Array<Record<string, unknown>> = [];
+    let nowSec = Math.floor(Date.now() / 1000);
+
+    if (isGlobal && adsbFiAllCache && Date.now() - adsbFiAllCache.ts < 12000) {
+      aircraftRows = adsbFiAllCache.aircraft;
+      nowSec = adsbFiAllCache.nowSec;
+    } else {
+      const targetUrl = isGlobal
+        ? 'https://opendata.adsb.fi/api/v2/all'
+        : `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${r}`;
+      const res = await fetch(targetUrl, {
+        headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+        signal: AbortSignal.timeout(isGlobal ? 5200 : 2800),
+      });
+      if (!res.ok) {
+        return {
+          flights: [],
+          status: {provider: 'adsb.fi', ok: false, count: 0, latencyMs: Date.now() - start, note: `HTTP ${res.status}`},
+        };
+      }
+      const json = (await res.json()) as {aircraft?: Array<Record<string, unknown>>; now?: number};
+      aircraftRows = json.aircraft ?? [];
+      nowSec = Math.floor((json.now ?? Date.now()) / 1000);
+      if (isGlobal && aircraftRows.length > 0) {
+        adsbFiAllCache = {ts: Date.now(), aircraft: aircraftRows, nowSec};
+      }
     }
-    const json = (await res.json()) as {aircraft?: Array<Record<string, unknown>>; now?: number};
-    const nowSec = Math.floor((json.now ?? Date.now()) / 1000);
-    const flights: LiveFlight[] = (json.aircraft ?? [])
+
+    const flights: LiveFlight[] = aircraftRows
       .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
       .map((a) => {
         const icao24 = String(a.hex ?? '').toUpperCase();
@@ -1595,138 +1691,22 @@ export function createApiRouter(): express.Router {
       return;
     }
 
+    const isGlobal = lamax - lamin >= 150 && lomax - lomin >= 320;
     const centerLat = (lamin + lamax) / 2;
     const centerLon = (lomin + lomax) / 2;
     const latSpanNm = Math.abs(lamax - lamin) * 60;
     const lonSpanNm = Math.abs(lomax - lomin) * 60 * Math.cos((centerLat * Math.PI) / 180);
     const radiusNm = Math.min(250, Math.max(40, Math.hypot(latSpanNm, lonSpanNm) / 2));
-    const isGlobal =
-      lamax - lamin >= 160 &&
-      lomax - lomin >= 340;
 
-    const globalAdsbLolPromise = isGlobal
-      ? (async (): Promise<{flights: LiveFlight[]; status: ProviderStatus}> => {
-          const start = Date.now();
-          try {
-            const res = await fetch('https://api.adsb.lol/v2/all', {
-              headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-              signal: AbortSignal.timeout(15000),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const json = await res.json() as {ac?: Array<Record<string, unknown>>; now?: number};
-            const nowSec = Math.floor((json.now ?? Date.now()) / 1000);
-            const flights = (json.ac ?? [])
-              .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
-              .map((a) => {
-                const icao24 = String(a.hex ?? '').toUpperCase();
-                const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
-                const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
-                return {
-                  id: icao24,
-                  icao24,
-                  callsign,
-                  flightNumber: callsign,
-                  registration: String(a.r ?? ''),
-                  airlineIcao: String(a.call ?? '').slice(0, 3).toUpperCase(),
-                  airlineName: String(a.ownOp ?? ''),
-                  aircraftType: String(a.t ?? 'A320').toUpperCase(),
-                  lat: Number(a.lat),
-                  lon: Number(a.lon),
-                  altitudeFt: onGround ? 0 : Math.max(0, Math.round(Number(a.alt_baro ?? a.alt_geom ?? 0))),
-                  groundSpeedKts: Math.round(Number(a.gs ?? 0)),
-                  trueTrackDeg: Math.round(Number(a.track ?? 0)),
-                  verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
-                  onGround,
-                  squawk: String(a.squawk ?? ''),
-                  origin: '',
-                  destination: '',
-                  lastContactEpoch: nowSec - Math.round(Number(a.seen_pos ?? 0)),
-                  source: 'adsb.lol',
-                  isEstimated: false,
-                  uncertaintyNm: 0,
-                  dbFlags: Number(a.dbFlags ?? 0) || 0,
-                } satisfies LiveFlight;
-              });
-            return {
-              flights,
-              status: {provider: 'adsb.lol-global', ok: true, count: flights.length, latencyMs: Date.now() - start},
-            };
-          } catch (err) {
-            return {
-              flights: [],
-              status: {provider: 'adsb.lol-global', ok: false, count: 0, latencyMs: Date.now() - start, note: err instanceof Error ? err.message : 'Timeout'},
-            };
-          }
-        })()
-      : Promise.resolve({flights: [], status: {provider: 'adsb.lol-global', ok: false, count: 0, latencyMs: 0, note: 'Regional sector'}});
-
-    const globalAdsbFiPromise = isGlobal
-      ? (async (): Promise<{flights: LiveFlight[]; status: ProviderStatus}> => {
-          const start = Date.now();
-          try {
-            const res = await fetch('https://opendata.adsb.fi/api/v2/all', {
-              headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-              signal: AbortSignal.timeout(15000),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const json = await res.json() as {aircraft?: Array<Record<string, unknown>>; now?: number};
-            const nowSec = Math.floor((json.now ?? Date.now()) / 1000);
-            const flights = (json.aircraft ?? [])
-              .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
-              .map((a) => {
-                const icao24 = String(a.hex ?? '').toUpperCase();
-                const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
-                const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
-                return {
-                  id: icao24,
-                  icao24,
-                  callsign,
-                  flightNumber: callsign,
-                  registration: String(a.r ?? ''),
-                  airlineIcao: '',
-                  airlineName: String(a.ownOp ?? ''),
-                  aircraftType: String(a.t ?? 'A320').toUpperCase(),
-                  lat: Number(a.lat),
-                  lon: Number(a.lon),
-                  altitudeFt: onGround ? 0 : Math.max(0, Math.round(Number(a.alt_baro ?? a.alt_geom ?? 0))),
-                  groundSpeedKts: Math.round(Number(a.gs ?? 0)),
-                  trueTrackDeg: Math.round(Number(a.track ?? 0)),
-                  verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
-                  onGround,
-                  squawk: String(a.squawk ?? ''),
-                  origin: '',
-                  destination: '',
-                  lastContactEpoch: nowSec - Math.round(Number(a.seen_pos ?? 0)),
-                  source: 'adsb.fi',
-                  isEstimated: false,
-                  uncertaintyNm: 0,
-                  dbFlags: Number(a.dbFlags ?? 0) || 0,
-                } satisfies LiveFlight;
-              });
-            return {
-              flights,
-              status: {provider: 'adsb.fi-global', ok: true, count: flights.length, latencyMs: Date.now() - start},
-            };
-          } catch (err) {
-            return {
-              flights: [],
-              status: {provider: 'adsb.fi-global', ok: false, count: 0, latencyMs: Date.now() - start, note: err instanceof Error ? err.message : 'Timeout'},
-            };
-          }
-        })()
-      : Promise.resolve({flights: [], status: {provider: 'adsb.fi-global', ok: false, count: 0, latencyMs: 0, note: 'Regional sector'}});
-
-    const [fr24Res, adsbRes, adsbMilRes, adsbLaddRes, adsbFiRes, openSkyRes, airNavRes, variFlightRes, globalAdsbLolRes, globalAdsbFiRes] = await Promise.all([
+    const [fr24Res, adsbRes, adsbMilRes, adsbLaddRes, adsbFiRes, openSkyRes, airNavRes, variFlightRes] = await Promise.all([
       fetchFr24Web(lamin, lomin, lamax, lomax),
-      fetchAdsbLol(centerLat, centerLon, radiusNm),
+      fetchAdsbLol(centerLat, centerLon, radiusNm, isGlobal),
       fetchAdsbMil(lamin, lomin, lamax, lomax),
       fetchAdsbLadd(lamin, lomin, lamax, lomax),
-      fetchAdsbFi(centerLat, centerLon, radiusNm),
+      fetchAdsbFi(centerLat, centerLon, radiusNm, isGlobal),
       fetchOpenSky(lamin, lomin, lamax, lomax),
       fetchAirNavWeb(lamin, lomin, lamax, lomax),
       fetchVariFlightWeb(lamin, lomin, lamax, lomax),
-      globalAdsbLolPromise,
-      globalAdsbFiPromise,
     ]);
 
     const mergedMap = new Map<string, LiveFlight>();
@@ -1734,8 +1714,6 @@ export function createApiRouter(): express.Router {
       variFlightRes.flights,
       airNavRes.flights,
       fr24Res.flights,
-      globalAdsbLolRes.flights,
-      globalAdsbFiRes.flights,
       adsbLaddRes.flights,
       adsbMilRes.flights,
       adsbRes.flights,
@@ -1781,7 +1759,7 @@ export function createApiRouter(): express.Router {
         if (a.onGround !== b.onGround) return a.onGround ? 1 : -1;
         return 0;
       })
-      .slice(0, isGlobal ? 50000 : 10000);
+      .slice(0, 50000);
 
     for (const f of flights) {
       recordFlightBreadcrumb(f);
@@ -1800,7 +1778,6 @@ export function createApiRouter(): express.Router {
       variFlightRes.status,
       airNavRes.status,
       openSkyRes.status,
-      ...(isGlobal ? [globalAdsbLolRes.status, globalAdsbFiRes.status] : []),
     ];
 
     const payload: FlightsResponse = {
@@ -2085,59 +2062,6 @@ export function createApiRouter(): express.Router {
     } satisfies FlightDetail);
   });
 
-  // 2a1. Aviation Safety Network registration history
-  router.get('/safety-record', async (req, res) => {
-    const registration = String(req.query.registration ?? '').trim().toUpperCase();
-    if (!registration) {
-      res.status(400).json({error: 'Missing registration'});
-      return;
-    }
-    const safeReg = registration.replace(/[^A-Z0-9-]/g, '');
-    const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(safeReg)}`;
-    try {
-      const response = await fetch(searchUrl, {
-        headers: {'User-Agent': API_USER_AGENT, Accept: 'text/html'},
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const html = await response.text();
-      const items: Array<{date: string; type: string; registration: string; operator: string; location: string; damage: string; url: string}> = [];
-      const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-      let rowMatch;
-      while ((rowMatch = rowPattern.exec(html)) !== null && items.length < 40) {
-        const row = rowMatch[1];
-        const hrefMatch = row.match(/href="([^"]*asndb[^"]+)"/i);
-        const cells = Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi))
-          .map((cell) => String(cell[1]).replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim());
-        if (cells.length < 5) continue;
-        items.push({
-          date: cells[0] || '',
-          type: cells[1] || '',
-          registration: cells[2] || safeReg,
-          operator: cells[3] || '',
-          location: cells[4] || '',
-          damage: cells[5] || '',
-          url: hrefMatch ? new URL(hrefMatch[1].replace(/&amp;/g, '&'), 'https://aviation-safety.net').toString() : searchUrl,
-        });
-      }
-      res.json({
-        registration: safeReg,
-        items,
-        searchUrl,
-        source: 'aviation-safety.net',
-        fetchedAt: Date.now(),
-      });
-    } catch (err) {
-      res.status(502).json({
-        registration: safeReg,
-        items: [],
-        searchUrl,
-        source: 'aviation-safety.net',
-        error: err instanceof Error ? err.message : 'ASN unavailable',
-      });
-    }
-  });
-
   // 2b. Live Airport Arrivals, Departures & Delay Index Board
   router.get('/airport-board', async (req, res) => {
     const code = String(req.query.code ?? '').trim().toUpperCase();
@@ -2224,19 +2148,238 @@ export function createApiRouter(): express.Router {
       country: catalog?.country ?? dirMatch?.country ?? '',
       lat: catalog?.lat ?? dirMatch?.lat ?? 0,
       lon: catalog?.lon ?? dirMatch?.lon ?? 0,
-      delayIndex: {
-        arrivalsIndex: null,
-        arrivalsDelayAvgMin: null,
-        arrivalsDelayedPct: null,
-        departuresIndex: null,
-        departuresDelayAvgMin: null,
-        departuresDelayedPct: null,
-      },
+      delayIndex: computeDelaySummaryFromRows(departures, arrivals, null),
       arrivals,
       departures,
       fetchedAt: Date.now(),
       source: 'adsb-fallback',
     } satisfies AirportBoardResponse);
+  });
+
+  // 2e. Aviation Safety Network (ASN) Registration Incident & Accident Records
+  router.get('/safety-record', async (req, res) => {
+    const registration = String(req.query.registration ?? req.query.reg ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9-]/g, '');
+    if (!registration) {
+      res.status(400).json({error: 'Missing registration'});
+      return;
+    }
+
+    const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(registration)}`;
+    const cached = safetyRecordCache.get(registration);
+    if (cached && Date.now() - cached.ts < 3600000) {
+      res.json(cached.data);
+      return;
+    }
+
+    const stripTags = (s: string) =>
+      s
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n)))
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const items: SafetyRecordItem[] = [];
+    let note: string | undefined;
+
+    try {
+      const asnRes = await fetch(searchUrl, {
+        headers: {
+          ...BROWSER_HEADERS,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          Referer: 'https://aviation-safety.net/database/registration/',
+        },
+        signal: AbortSignal.timeout(5500),
+      });
+      if (!asnRes.ok) {
+        note = `ASN HTTP ${asnRes.status}`;
+      } else {
+        const html = await asnRes.text();
+        if (/just a moment|cloudflare|cf-challenge/i.test(html) && !html.includes('wikibase') && !html.includes('<table')) {
+          note = 'ASN browser verification active — click View ASN Record';
+        } else {
+          const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+          let m: RegExpExecArray | null;
+          while ((m = rowRegex.exec(html)) !== null) {
+            const rowHtml = m[1];
+            if (/<th\b/i.test(rowHtml)) continue;
+            const cells = Array.from(rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)).map((c) => c[1]);
+            if (cells.length < 4) continue;
+            const hrefMatch = rowHtml.match(/href=["']([^"']*(?:wikibase|database\/record)[^"']*)["']/i);
+            const hrefRaw = hrefMatch ? hrefMatch[1] : '';
+            const href = hrefRaw
+              ? hrefRaw.startsWith('http')
+                ? hrefRaw
+                : `https://aviation-safety.net${hrefRaw.startsWith('/') ? '' : '/'}${hrefRaw}`
+              : searchUrl;
+            const dateText = stripTags(cells[0]);
+            if (!dateText || !/\d{4}/.test(dateText)) continue;
+            items.push({
+              date: dateText,
+              type: stripTags(cells[1] ?? ''),
+              operator: stripTags(cells[3] ?? cells[2] ?? ''),
+              fatalities: stripTags(cells[4] ?? '0'),
+              location: stripTags(cells[5] ?? ''),
+              damage: stripTags(cells[7] ?? cells[6] ?? ''),
+              href,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      note = err instanceof Error ? err.message : 'ASN lookup timeout';
+    }
+
+    const payload: SafetyRecordResponse = {
+      registration,
+      items: items.slice(0, 30),
+      searchUrl,
+      source: 'aviation-safety.net',
+      fetchedAt: Date.now(),
+      note,
+    };
+    safetyRecordCache.set(registration, {ts: Date.now(), data: payload});
+    res.json(payload);
+  });
+
+  // 2f. Past Flights Lookup by Flight Number or Aircraft Tail Registration
+  router.get('/past-flights', async (req, res) => {
+    const rawQuery = String(req.query.query ?? '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    const icao24Param = String(req.query.icao24 ?? '').trim().toUpperCase();
+    if (!rawQuery && !icao24Param) {
+      res.status(400).json({error: 'Missing query'});
+      return;
+    }
+
+    const cacheKey = `${rawQuery}|${icao24Param}`;
+    const cached = pastFlightsCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 120000) {
+      res.json({query: rawQuery, items: cached.items, fetchedAt: Date.now(), cached: true});
+      return;
+    }
+
+    const isReg = /-/.test(rawQuery) || /^[BNVGDF][A-Z0-9]{3,}$/.test(rawQuery);
+    const items: PastFlightRecord[] = [];
+    const seen = new Set<string>();
+
+    const fr24Promise = (async () => {
+      if (!rawQuery) return;
+      const modes = isReg ? ['reg', 'flight'] : ['flight', 'reg'];
+      for (const fetchBy of modes) {
+        try {
+          const url = `https://api.flightradar24.com/common/v1/flight/list.json?fetchBy=${fetchBy}&page=1&limit=16&query=${encodeURIComponent(rawQuery)}`;
+          const r = await fetch(url, {
+            headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
+            signal: AbortSignal.timeout(4800),
+          });
+          const json = await safeJson<{result?: {response?: {data?: Array<Record<string, unknown>>}}}>(r);
+          const rows = json?.result?.response?.data ?? [];
+          for (const row of rows) {
+            const ident = (row.identification ?? {}) as Record<string, unknown>;
+            const num = (ident.number ?? {}) as Record<string, unknown>;
+            const ap = (row.airport ?? {}) as Record<string, unknown>;
+            const orig = (ap.origin ?? {}) as Record<string, unknown>;
+            const dest = (ap.destination ?? {}) as Record<string, unknown>;
+            const origCode = (orig.code ?? {}) as Record<string, unknown>;
+            const destCode = (dest.code ?? {}) as Record<string, unknown>;
+            const ac = (row.aircraft ?? {}) as Record<string, unknown>;
+            const acModel = (ac.model ?? {}) as Record<string, unknown>;
+            const timeObj = (row.time ?? {}) as Record<string, unknown>;
+            const sched = (timeObj.scheduled ?? {}) as Record<string, unknown>;
+            const real = (timeObj.real ?? {}) as Record<string, unknown>;
+            const statusObj = (row.status ?? {}) as Record<string, unknown>;
+            const fnum = String(num.default ?? ident.callsign ?? rawQuery).toUpperCase();
+            const depTs = Number(real.departure ?? sched.departure ?? 0) || undefined;
+            const id = String(ident.id ?? `${fnum}-${depTs ?? items.length}`);
+            if (seen.has(id)) continue;
+            seen.add(id);
+            items.push({
+              id,
+              flightNumber: fnum,
+              callsign: String(ident.callsign ?? fnum).toUpperCase(),
+              registration: String(ac.registration ?? (isReg ? rawQuery : '')),
+              originIata: String(origCode.iata ?? '').toUpperCase(),
+              originIcao: String(origCode.icao ?? '').toUpperCase(),
+              originName: String(orig.name ?? ''),
+              destinationIata: String(destCode.iata ?? '').toUpperCase(),
+              destinationIcao: String(destCode.icao ?? '').toUpperCase(),
+              destinationName: String(dest.name ?? ''),
+              scheduledDep: Number(sched.departure ?? 0) || undefined,
+              actualDep: Number(real.departure ?? 0) || undefined,
+              scheduledArr: Number(sched.arrival ?? 0) || undefined,
+              actualArr: Number(real.arrival ?? 0) || undefined,
+              statusText: String(statusObj.text ?? 'Completed'),
+              aircraftCode: String(acModel.code ?? ''),
+              source: 'fr24-history',
+            });
+          }
+          if (items.length > 0) break;
+        } catch {
+          // continue
+        }
+      }
+    })();
+
+    const openSkyPromise = (async () => {
+      let hex = icao24Param.toLowerCase();
+      if (!hex && rawQuery) {
+        const match = Array.from(flightIndexMap.values()).find(
+          (f) =>
+            f.registration.toUpperCase() === rawQuery ||
+            f.callsign.toUpperCase() === rawQuery ||
+            f.flightNumber.toUpperCase() === rawQuery,
+        );
+        if (match?.icao24) hex = match.icao24.toLowerCase();
+      }
+      if (!hex) return;
+      try {
+        const endSec = Math.floor(Date.now() / 1000);
+        const beginSec = endSec - 7 * 86400;
+        const r = await fetch(
+          `https://opensky-network.org/api/flights/aircraft?icao24=${encodeURIComponent(hex)}&begin=${beginSec}&end=${endSec}`,
+          {headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'}, signal: AbortSignal.timeout(4500)},
+        );
+        const rows = (await safeJson<Array<Record<string, unknown>>>(r)) ?? [];
+        for (const row of rows.slice(0, 12)) {
+          const cs = String(row.callsign ?? hex).trim().toUpperCase();
+          const firstSeen = Number(row.firstSeen ?? 0) || undefined;
+          const lastSeen = Number(row.lastSeen ?? 0) || undefined;
+          const id = `os-${hex}-${firstSeen ?? items.length}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          items.push({
+            id,
+            flightNumber: cs,
+            callsign: cs,
+            registration: isReg ? rawQuery : '',
+            originIata: '',
+            originIcao: String(row.estDepartureAirport ?? '').toUpperCase(),
+            originName: String(row.estDepartureAirport ?? ''),
+            destinationIata: '',
+            destinationIcao: String(row.estArrivalAirport ?? '').toUpperCase(),
+            destinationName: String(row.estArrivalAirport ?? ''),
+            scheduledDep: firstSeen,
+            actualDep: firstSeen,
+            scheduledArr: lastSeen,
+            actualArr: lastSeen,
+            statusText: 'Recorded Track',
+            aircraftCode: '',
+            source: 'opensky-log',
+          });
+        }
+      } catch {
+        // optional
+      }
+    })();
+
+    await Promise.all([fr24Promise, openSkyPromise]);
+    items.sort((a, b) => (b.actualDep ?? b.scheduledDep ?? 0) - (a.actualDep ?? a.scheduledDep ?? 0));
+    pastFlightsCache.set(cacheKey, {ts: Date.now(), items});
+    res.json({query: rawQuery || icao24Param, items: items.slice(0, 24), fetchedAt: Date.now()});
   });
 
   // 2c. Global Airports within Radar Viewport (All Airports)
@@ -2675,19 +2818,23 @@ export function createApiRouter(): express.Router {
     }
   });
 
-  // 5. Live Weather Hazards (NOAA SIGMETs + RainViewer)
+  // 5. Live Weather Hazards (NOAA SIGMETs + G-AIRMET Turbulence/Icing/Advisories + RainViewer)
   router.get('/weather/hazards', async (_req, res) => {
     if (hazardsCache && Date.now() - hazardsCache.ts < 60000) {
       res.json({sigmets: hazardsCache.sigmets, rainviewer: hazardsCache.rainviewer, cached: true});
       return;
     }
 
-    const [airSigRes, iSigRes, rvRes] = await Promise.all([
+    const [airSigRes, iSigRes, gAirRes, rvRes] = await Promise.all([
       fetch('https://aviationweather.gov/api/data/airsigmet?format=json', {
         headers: {'User-Agent': API_USER_AGENT},
         signal: AbortSignal.timeout(4500),
       }).catch(() => null),
       fetch('https://aviationweather.gov/api/data/isigmet?format=json', {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(4500),
+      }).catch(() => null),
+      fetch('https://aviationweather.gov/api/data/gairmet?format=json', {
         headers: {'User-Agent': API_USER_AGENT},
         signal: AbortSignal.timeout(4500),
       }).catch(() => null),
@@ -2697,6 +2844,13 @@ export function createApiRouter(): express.Router {
       }).catch(() => null),
     ]);
 
+    const classifyHazard = (haz: string, raw: string): HazardCategory => {
+      const text = `${haz} ${raw}`.toUpperCase();
+      if (/TURB|LLWS|MTW|CAT/.test(text)) return 'turbulence';
+      if (/ICE|ICG|FZLVL|FZL|MIX|CLR/.test(text)) return 'icing';
+      return 'advisory';
+    };
+
     const sigmets: SigmetHazard[] = [];
     const ingestSigmetList = (rows: Array<Record<string, unknown>>, source: string) => {
       for (const r of rows) {
@@ -2705,15 +2859,18 @@ export function createApiRouter(): express.Router {
           .filter((c) => Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lon)))
           .map((c) => [Number(c.lat), Number(c.lon)]);
         if (coords.length < 3) continue;
+        const hazard = String(r.hazard ?? r.product ?? 'SIGMET').toUpperCase();
+        const rawText = String(r.rawAirSigmet ?? r.rawSigmet ?? r.dueTo ?? '');
         sigmets.push({
           id: String(r.airSigmetId ?? r.isigmetId ?? `${source}-${sigmets.length}`),
-          hazard: String(r.hazard ?? 'SIGMET').toUpperCase(),
+          hazard,
           qualifier: String(r.severity ?? r.qualifier ?? ''),
-          validFrom: String(r.validTimeFrom ?? ''),
-          validTo: String(r.validTimeTo ?? ''),
+          category: classifyHazard(hazard, rawText),
+          validFrom: String(r.validTimeFrom ?? r.issueTime ?? ''),
+          validTo: String(r.validTimeTo ?? r.expireTime ?? ''),
           baseFt: r.altitudeLow1 !== undefined && r.altitudeLow1 !== null ? Number(r.altitudeLow1) : null,
           topFt: r.altitudeHi1 !== undefined && r.altitudeHi1 !== null ? Number(r.altitudeHi1) : null,
-          rawText: String(r.rawAirSigmet ?? r.rawSigmet ?? ''),
+          rawText,
           coords,
           source,
         });
@@ -2725,6 +2882,9 @@ export function createApiRouter(): express.Router {
 
     const iSigData = await safeJson<Array<Record<string, unknown>>>(iSigRes);
     if (Array.isArray(iSigData)) ingestSigmetList(iSigData, 'NOAA INTL SIGMET');
+
+    const gAirData = await safeJson<Array<Record<string, unknown>>>(gAirRes);
+    if (Array.isArray(gAirData)) ingestSigmetList(gAirData.slice(0, 90), 'NOAA G-AIRMET');
 
     let rainviewer: RainViewerMeta | null = null;
     const rvJson = await safeJson<{

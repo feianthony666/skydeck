@@ -1,6 +1,9 @@
 import * as THREE from 'three';
-import type {AirlineLivery} from '../data/aviationCatalog';
-import type {AirportWeather, LiveFlight} from '../types/aviation';
+import type {
+  AircraftGeometrySpec,
+  AirlineLivery,
+} from '../data/aviationCatalog';
+import type {AirportWeather, LiveFlight, SpecialLiverySpec} from '../types/aviation';
 
 export interface AvionicsTextureBundle {
   pfdCanvas: HTMLCanvasElement;
@@ -11,6 +14,108 @@ export interface AvionicsTextureBundle {
   eicasTexture: THREE.CanvasTexture;
   mcpCanvas: HTMLCanvasElement;
   mcpTexture: THREE.CanvasTexture;
+  fmcLeftCanvas: HTMLCanvasElement;
+  fmcLeftTexture: THREE.CanvasTexture;
+  fmcRightCanvas: HTMLCanvasElement;
+  fmcRightTexture: THREE.CanvasTexture;
+  overheadCanvas: HTMLCanvasElement;
+  overheadTexture: THREE.CanvasTexture;
+  dispose: () => void;
+}
+
+const SDG_WHEEL_COLORS = [
+  '#E5243B',
+  '#DDA63A',
+  '#4C9F38',
+  '#C5192D',
+  '#FF3A21',
+  '#26BDE2',
+  '#FCC30B',
+  '#A21942',
+  '#FD6925',
+  '#DD1367',
+  '#FD9D24',
+  '#BF8B2E',
+  '#3F7E44',
+  '#0A97D9',
+  '#56C02B',
+  '#00689D',
+  '#19486A',
+];
+
+function createOverheadCanvas(): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 512;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#182230';
+  ctx.fillRect(0, 0, 512, 512);
+
+  // Panel dividers
+  ctx.strokeStyle = '#475569';
+  ctx.lineWidth = 2;
+  for (const x of [170, 342]) {
+    ctx.beginPath();
+    ctx.moveTo(x, 8);
+    ctx.lineTo(x, 504);
+    ctx.stroke();
+  }
+  for (const y of [125, 250, 375]) {
+    ctx.beginPath();
+    ctx.moveTo(8, y);
+    ctx.lineTo(504, y);
+    ctx.stroke();
+  }
+
+  const sections = [
+    {x: 85, y: 26, title: 'ADIRU'},
+    {x: 256, y: 26, title: 'ELEC / APU'},
+    {x: 427, y: 26, title: 'HYDRAULIC'},
+    {x: 85, y: 150, title: 'FUEL PUMPS'},
+    {x: 256, y: 150, title: 'AIR / PACKS'},
+    {x: 427, y: 150, title: 'ANTI-ICE'},
+    {x: 85, y: 275, title: 'EXT LTS'},
+    {x: 256, y: 275, title: 'CABIN PRESS'},
+    {x: 427, y: 275, title: 'CARGO FIRE'},
+    {x: 85, y: 400, title: 'EMER LTS'},
+    {x: 256, y: 400, title: 'SIGNS / OXY'},
+    {x: 427, y: 400, title: 'WIPERS'},
+  ];
+
+  ctx.font = 'bold 13px "JetBrains Mono", monospace';
+  ctx.textAlign = 'center';
+  for (const sec of sections) {
+    ctx.fillStyle = '#CBD5E1';
+    ctx.fillText(sec.title, sec.x, sec.y);
+
+    // Korry pushbuttons
+    for (let col = -1; col <= 1; col++) {
+      const bx = sec.x + col * 42 - 14;
+      const by = sec.y + 18;
+      ctx.fillStyle = '#090D16';
+      ctx.fillRect(bx, by, 28, 28);
+      ctx.strokeStyle = '#64748B';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx, by, 28, 28);
+      const isLit = (sec.x + col + sec.y) % 4 === 0;
+      ctx.fillStyle = isLit ? '#38BDF8' : '#22C55E';
+      ctx.fillRect(bx + 5, by + 18, 18, 4);
+    }
+
+    // Rotary selector dial
+    ctx.fillStyle = '#0F172A';
+    ctx.beginPath();
+    ctx.arc(sec.x, sec.y + 72, 13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#94A3B8';
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(sec.x, sec.y + 72);
+    ctx.lineTo(sec.x + 8, sec.y + 64);
+    ctx.stroke();
+  }
+
+  return canvas;
 }
 
 export function createAvionicsTextures(maxAnisotropy: number): AvionicsTextureBundle {
@@ -28,6 +133,13 @@ export function createAvionicsTextures(maxAnisotropy: number): AvionicsTextureBu
   const nd = mk(512, 512);
   const eicas = mk(512, 512);
   const mcp = mk(512, 128);
+  const fmcL = mk(256, 320);
+  const fmcR = mk(256, 320);
+
+  const overheadCanvas = createOverheadCanvas();
+  const overheadTexture = new THREE.CanvasTexture(overheadCanvas);
+  overheadTexture.colorSpace = THREE.SRGBColorSpace;
+  overheadTexture.anisotropy = maxAnisotropy;
 
   return {
     pfdCanvas: pfd.canvas,
@@ -38,6 +150,21 @@ export function createAvionicsTextures(maxAnisotropy: number): AvionicsTextureBu
     eicasTexture: eicas.texture,
     mcpCanvas: mcp.canvas,
     mcpTexture: mcp.texture,
+    fmcLeftCanvas: fmcL.canvas,
+    fmcLeftTexture: fmcL.texture,
+    fmcRightCanvas: fmcR.canvas,
+    fmcRightTexture: fmcR.texture,
+    overheadCanvas,
+    overheadTexture,
+    dispose: () => {
+      pfd.texture.dispose();
+      nd.texture.dispose();
+      eicas.texture.dispose();
+      mcp.texture.dispose();
+      fmcL.texture.dispose();
+      fmcR.texture.dispose();
+      overheadTexture.dispose();
+    },
   };
 }
 
@@ -193,16 +320,18 @@ export function drawNd(
   const cy = 310;
   const radius = 210;
 
-  // Top telemetry header
   ctx.fillStyle = '#22C55E';
   ctx.font = 'bold 18px "JetBrains Mono", monospace';
   ctx.textAlign = 'left';
   ctx.fillText(`GS ${flight.groundSpeedKts} KT`, 22, 34);
   ctx.fillStyle = '#D946EF';
   ctx.textAlign = 'right';
-  ctx.fillText(flight.origin && flight.destination ? `${flight.origin} → ${flight.destination}` : flight.callsign, W - 22, 34);
+  ctx.fillText(
+    flight.origin && flight.destination ? `${flight.origin} → ${flight.destination}` : flight.callsign,
+    W - 22,
+    34,
+  );
 
-  // Range rings
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
   ctx.lineWidth = 1.5;
   for (const frac of [0.35, 0.68, 1.0]) {
@@ -211,7 +340,6 @@ export function drawNd(
     ctx.stroke();
   }
 
-  // Compass rose ticks rotated by trueTrackDeg
   ctx.save();
   ctx.translate(cx, cy);
   const trkRad = THREE.MathUtils.degToRad(-flight.trueTrackDeg);
@@ -231,12 +359,15 @@ export function drawNd(
         ctx.fillStyle = '#CBD5E1';
         ctx.font = '14px "JetBrains Mono", monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(String(deg / 10).padStart(2, '0'), Math.cos(a) * (radius - 26), Math.sin(a) * (radius - 26) + 5);
+        ctx.fillText(
+          String(deg / 10).padStart(2, '0'),
+          Math.cos(a) * (radius - 26),
+          Math.sin(a) * (radius - 26) + 5,
+        );
       }
     }
   }
 
-  // Active route leg line (magenta)
   ctx.strokeStyle = '#D946EF';
   ctx.lineWidth = 3;
   ctx.beginPath();
@@ -244,16 +375,13 @@ export function drawNd(
   ctx.lineTo(0, -radius * 0.85);
   ctx.stroke();
 
-  // Plot nearby TCAS traffic relative to ownship
   for (const other of nearbyFlights.slice(0, 20)) {
     if (other.id === flight.id) continue;
     const dLat = (other.lat - flight.lat) * 60;
     const dLon = (other.lon - flight.lon) * 60 * Math.cos(THREE.MathUtils.degToRad(flight.lat));
-    // Map +/- 60 nm into radius
     const scale = radius / 60;
     const wx = dLon * scale;
     const wy = -dLat * scale;
-    // Rotate into heading-up coordinates
     const rx = wx * Math.cos(trkRad) - wy * Math.sin(trkRad);
     const ry = wx * Math.sin(trkRad) + wy * Math.cos(trkRad);
     if (Math.hypot(rx, ry) < radius - 14 && ry < 40) {
@@ -269,7 +397,6 @@ export function drawNd(
   }
   ctx.restore();
 
-  // Ownship triangle
   ctx.strokeStyle = '#FFFFFF';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
@@ -279,11 +406,14 @@ export function drawNd(
   ctx.closePath();
   ctx.stroke();
 
-  // Mode & Source footer
   ctx.fillStyle = flight.isEstimated ? '#F59E0B' : '#38BDF8';
   ctx.font = 'bold 15px "JetBrains Mono", monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(flight.isEstimated ? `DR-EST ±${flight.uncertaintyNm} NM` : `SRC ${flight.source.toUpperCase()}`, 22, H - 22);
+  ctx.fillText(
+    flight.isEstimated ? `DR-EST ±${flight.uncertaintyNm} NM` : `SRC ${flight.source.toUpperCase()}`,
+    22,
+    H - 22,
+  );
 
   bundle.ndTexture.needsUpdate = true;
 }
@@ -304,7 +434,11 @@ export function drawEicas(bundle: AvionicsTextureBundle, flight: LiveFlight) {
   ctx.textAlign = 'right';
   ctx.fillText(flight.registration || flight.icao24, W - 24, 38);
 
-  const n1Pct = flight.onGround ? (flight.groundSpeedKts > 5 ? 34.2 : 21.8) : THREE.MathUtils.clamp(68 + flight.groundSpeedKts / 22, 72, 94.5);
+  const n1Pct = flight.onGround
+    ? flight.groundSpeedKts > 5
+      ? 34.2
+      : 21.8
+    : THREE.MathUtils.clamp(68 + flight.groundSpeedKts / 22, 72, 94.5);
   const egt = flight.onGround ? 415 : Math.round(585 + n1Pct * 1.4);
 
   const drawGauge = (cx: number, cy: number, label: string, val: string, pct: number, color: string) => {
@@ -332,7 +466,6 @@ export function drawEicas(bundle: AvionicsTextureBundle, flight: LiveFlight) {
   drawGauge(138, 155, 'N1 ENG 1', `${n1Pct.toFixed(1)}%`, n1Pct, '#22C55E');
   drawGauge(374, 155, 'N1 ENG 2', `${(n1Pct - 0.3).toFixed(1)}%`, n1Pct - 0.3, '#22C55E');
 
-  // Gear & Flaps Matrix
   const gearDown = flight.onGround || flight.altitudeFt < 2600;
   const flaps = flight.onGround ? 'FLAPS 1+F' : flight.altitudeFt < 5000 ? 'FLAPS 1' : 'FLAPS UP';
 
@@ -393,87 +526,380 @@ export function drawMcp(bundle: AvionicsTextureBundle, flight: LiveFlight) {
   bundle.mcpTexture.needsUpdate = true;
 }
 
+export function drawFmcCdu(
+  canvas: HTMLCanvasElement,
+  texture: THREE.CanvasTexture,
+  flight: LiveFlight,
+  isCaptain: boolean,
+) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const W = 256;
+  const H = 320;
+  ctx.fillStyle = '#0B111C';
+  ctx.fillRect(0, 0, W, H);
+
+  // CRT Bezel
+  ctx.fillStyle = '#030712';
+  ctx.fillRect(14, 14, W - 28, 168);
+  ctx.strokeStyle = '#475569';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(14, 14, W - 28, 168);
+
+  ctx.font = 'bold 13px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#22C55E';
+  ctx.textAlign = 'center';
+  ctx.fillText(isCaptain ? 'ACT RTE 1 LEGS' : 'PERF / INIT REF', W / 2, 34);
+
+  ctx.textAlign = 'left';
+  ctx.font = '12px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#E2E8F0';
+  ctx.fillText(`FLT: ${flight.callsign}`, 24, 58);
+  ctx.fillText(`RTE: ${flight.origin || 'ZZZZ'} -> ${flight.destination || 'ZZZZ'}`, 24, 80);
+  ctx.fillStyle = '#D946EF';
+  ctx.fillText(`CRZ FL${Math.round(flight.altitudeFt / 100)}`, 24, 104);
+  ctx.fillStyle = '#38BDF8';
+  ctx.fillText(`GS ${flight.groundSpeedKts}KT  HDG ${String(Math.round(flight.trueTrackDeg)).padStart(3, '0')}`, 24, 126);
+  ctx.fillStyle = '#FACC15';
+  ctx.fillText(`REG ${flight.registration || flight.icao24}`, 24, 148);
+  ctx.fillStyle = '#22C55E';
+  ctx.fillText(`SQK ${flight.squawk || '2000'} · ADSB LOCK`, 24, 170);
+
+  // Alphanumeric CDU Keypad Grid
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < 6; col++) {
+      ctx.fillStyle = '#1E293B';
+      ctx.fillRect(18 + col * 37, 196 + row * 28, 31, 22);
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(18 + col * 37, 196 + row * 28, 31, 22);
+    }
+  }
+
+  texture.needsUpdate = true;
+}
+
+function drawSdgWheel(ctx: CanvasRenderingContext2D, cx: number, cy: number, outerR: number, innerR: number) {
+  const seg = (Math.PI * 2) / SDG_WHEEL_COLORS.length;
+  for (let i = 0; i < SDG_WHEEL_COLORS.length; i++) {
+    const a0 = i * seg - Math.PI / 2;
+    const a1 = (i + 1) * seg - Math.PI / 2 - 0.02;
+    ctx.fillStyle = SDG_WHEEL_COLORS[i];
+    ctx.beginPath();
+    ctx.arc(cx, cy, outerR, a0, a1);
+    ctx.arc(cx, cy, innerR, a1, a0, true);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+/**
+ * Generates high-resolution 1024x1024 fuselage UV texture aligned to Three.js rotated cylinder:
+ * u=0.25 -> Starboard (+X), u=0.50 -> Crown (+Y), u=0.75 -> Port (-X), u=0/1 -> Belly (-Y).
+ * canvasY = H -> Nose (-Z), canvasY = 0 -> Tail (+Z).
+ */
 export function createAirlineLiveryTexture(
   livery: AirlineLivery,
   registration: string,
+  spec: AircraftGeometrySpec,
+  specialLivery: SpecialLiverySpec | null,
   maxAnisotropy: number,
-  photoUrl?: string,
+): THREE.CanvasTexture {
+  const W = 1024;
+  const H = 1024;
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d')!;
+
+  const baseColor = specialLivery?.theme === 'turtle' ? specialLivery.primaryHex : livery.fuselageHex;
+  const bellyColor = specialLivery?.bellyHex || livery.bellyHex;
+  const accentColor = specialLivery?.accentHex || livery.accentHex;
+  const titleText = (specialLivery?.titleText || livery.name).toUpperCase();
+  const subtitleText = specialLivery?.subtitleText || '';
+
+  // Base Fuselage Crown + Side fill
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(0, 0, W, H);
+
+  // Belly strips (centered on u=0 -> x=0..115 and u=1 -> x=909..1024)
+  ctx.fillStyle = bellyColor;
+  ctx.fillRect(0, 0, 128, H);
+  ctx.fillRect(W - 128, 0, 128, H);
+
+  // Cheatlines along u=0.14 (Starboard lower) and u=0.86 (Port lower)
+  ctx.fillStyle = accentColor;
+  ctx.fillRect(128, 0, 26, H);
+  ctx.fillRect(W - 154, 0, 26, H);
+
+  const drawSideProfile = (isStarboard: boolean) => {
+    ctx.save();
+    if (isStarboard) {
+      // Starboard: center at u=0.25 (x=256), +lx goes Tail (-480) -> Nose (+480), +ly goes Crown -> Belly
+      ctx.translate(256, 512);
+      ctx.rotate(Math.PI / 2);
+    } else {
+      // Port: center at u=0.75 (x=768), +lx goes Nose (-480) -> Tail (+480), +ly goes Crown -> Belly
+      ctx.translate(768, 512);
+      ctx.rotate(-Math.PI / 2);
+    }
+
+    const dir = isStarboard ? -1 : 1; // forward (-dir*x) vs aft (+dir*x)
+
+    // Bespoke Special Livery Artwork
+    if (specialLivery) {
+      if (specialLivery.theme === 'un-sdg') {
+        // B-1356 United Dream UN SDGs flowing cerulean ribbon waves
+        const grad = ctx.createLinearGradient(-480, -30, 480, 95);
+        grad.addColorStop(0, '#0284C7');
+        grad.addColorStop(0.55, '#0EA5E9');
+        grad.addColorStop(1, '#0369A1');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(-480, 24);
+        ctx.bezierCurveTo(-180, -18, 120, 48, 480, 10);
+        ctx.lineTo(480, 118);
+        ctx.lineTo(-480, 118);
+        ctx.closePath();
+        ctx.fill();
+
+        // Crisp white ribbon pinstripe
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(-480, 32);
+        ctx.bezierCurveTo(-180, -10, 120, 54, 480, 18);
+        ctx.stroke();
+
+        // 17-segment SDG color ring aft of wing
+        drawSdgWheel(ctx, dir * 135, 36, 46, 20);
+      } else if (specialLivery.theme === 'turtle') {
+        // ANA JA381A Flying Honu turquoise Hawaiian sea waves & turtle motif
+        ctx.fillStyle = '#38BDF8';
+        ctx.beginPath();
+        ctx.moveTo(-480, -40);
+        ctx.bezierCurveTo(-140, 25, 160, -35, 480, 15);
+        ctx.lineTo(480, 120);
+        ctx.lineTo(-480, 120);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#E0F2FE';
+        ctx.beginPath();
+        ctx.ellipse(dir * 120, 8, 52, 34, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#0369A1';
+        ctx.beginPath();
+        ctx.ellipse(dir * 120, 8, 38, 24, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (specialLivery.theme === 'retro') {
+        // Classic Speedbird / China Eastern C919 / Lufthansa heritage cheatline
+        ctx.fillStyle = specialLivery.primaryHex;
+        ctx.fillRect(-480, -4, 960, 26);
+        ctx.fillStyle = specialLivery.secondaryHex;
+        ctx.fillRect(-480, 22, 960, 9);
+      } else if (specialLivery.theme === 'cartoon') {
+        // R2-D2 Blue Droid Panels / Disney Theme Stripes
+        ctx.fillStyle = specialLivery.primaryHex;
+        ctx.fillRect(-380, -68, 90, 145);
+        ctx.fillRect(220, -68, 120, 145);
+        ctx.fillStyle = specialLivery.accentHex;
+        ctx.fillRect(-240, 18, 420, 20);
+      } else if (specialLivery.theme === 'dreaming' || specialLivery.theme === 'floral') {
+        // Qantas Yam Dreaming / EVA Starlight Ribbon dots & arcs
+        const dotPalette = [specialLivery.primaryHex, specialLivery.secondaryHex, specialLivery.accentHex, '#38BDF8'];
+        for (let i = 0; i < 42; i++) {
+          ctx.fillStyle = dotPalette[i % dotPalette.length];
+          ctx.beginPath();
+          ctx.arc(-360 + i * 18, Math.sin(i * 0.65) * 42 + 12, 8 + (i % 3) * 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // Passenger Cabin Window Rows (Lower deck + Upper deck for A380/B747)
+    const isDarkSide = specialLivery?.theme === 'turtle';
+    ctx.fillStyle = isDarkSide ? '#E0F2FE' : '#0F172A';
+    const winStep = spec.category === 'widebody' ? 18 : 22;
+    for (let wx = -390; wx <= 390; wx += winStep) {
+      // Skip door frames
+      if (Math.abs(wx - -360) < 20 || Math.abs(wx - 350) < 20 || Math.abs(wx) < 16) continue;
+      ctx.beginPath();
+      ctx.roundRect(wx - 4, -22, 8, 13, 3);
+      ctx.fill();
+    }
+
+    // Double-deck upper windows on A380 & forward hump windows on B747
+    if (spec.subtype === 'a380') {
+      for (let wx = -340; wx <= 320; wx += 20) {
+        ctx.beginPath();
+        ctx.roundRect(wx - 4, -72, 7, 11, 3);
+        ctx.fill();
+      }
+    } else if (spec.subtype === 'b747') {
+      const startHump = isStarboard ? 80 : -360;
+      const endHump = isStarboard ? 360 : -80;
+      for (let wx = startHump; wx <= endHump; wx += 22) {
+        ctx.beginPath();
+        ctx.roundRect(wx - 4, -70, 7, 11, 3);
+        ctx.fill();
+      }
+    }
+
+    // Passenger Boarding Doors (Forward & Aft L1/L4/R1/R4)
+    ctx.strokeStyle = isDarkSide ? '#FFFFFF' : '#475569';
+    ctx.lineWidth = 2.5;
+    for (const dx of [-360, 350]) {
+      ctx.strokeRect(dx - 11, -28, 22, 54);
+      ctx.fillStyle = '#1E293B';
+      ctx.fillRect(dx - 4, -20, 8, 12);
+    }
+
+    // Main Airline / Special Livery Titles (Centered cleanly above forward window belt)
+    ctx.fillStyle = specialLivery?.theme === 'turtle' ? '#FFFFFF' : livery.titleColor;
+    ctx.font = 'bold 34px "Outfit", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(titleText, -dir * 165, -54);
+
+    if (subtitleText) {
+      ctx.font = 'bold 14px "JetBrains Mono", monospace';
+      ctx.fillStyle = specialLivery?.theme === 'un-sdg' ? '#FFFFFF' : '#475569';
+      ctx.fillText(subtitleText, -dir * 165, 58);
+    }
+
+    // Aft Aircraft Tail Registration Stencil
+    if (registration) {
+      ctx.fillStyle = specialLivery?.theme === 'un-sdg' || specialLivery?.theme === 'turtle' ? '#FFFFFF' : '#334155';
+      ctx.font = 'bold 20px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(registration.toUpperCase(), dir * 285, 22);
+    }
+
+    ctx.restore();
+  };
+
+  drawSideProfile(true);
+  drawSideProfile(false);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = maxAnisotropy;
+  return tex;
+}
+
+/**
+ * High-detail 512x512 Vertical Stabilizer Texture for carrier tail emblems & Special Livery crests
+ */
+export function createTailFinTexture(
+  livery: AirlineLivery,
+  specialLivery: SpecialLiverySpec | null,
+  maxAnisotropy: number,
 ): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
-  canvas.height = 256;
+  canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  // Upper fuselage + belly split
-  ctx.fillStyle = livery.fuselageHex;
-  ctx.fillRect(0, 0, 512, 164);
-  ctx.fillStyle = livery.bellyHex;
-  ctx.fillRect(0, 164, 512, 92);
+  const finBg = specialLivery?.primaryHex || livery.tailHex;
+  const finAccent = specialLivery?.accentHex || livery.accentHex;
 
-  // Accent cheatline
-  ctx.fillStyle = livery.accentHex;
-  ctx.fillRect(0, 154, 512, 10);
+  ctx.fillStyle = finBg;
+  ctx.fillRect(0, 0, 512, 512);
 
-  if (livery.icao === 'UAE') {
-    ctx.fillStyle = '#16A34A';
-    ctx.fillRect(0, 146, 512, 5);
-    ctx.fillStyle = '#DC2626';
-    ctx.fillRect(0, 151, 512, 3);
-  } else if (livery.icao === 'KLM') {
-    ctx.fillStyle = '#0284C7';
-    ctx.fillRect(0, 150, 512, 14);
-  } else if (livery.icao === 'QFA') {
-    ctx.fillStyle = '#DC2626';
-    ctx.fillRect(0, 150, 512, 6);
-  } else if (livery.icao === 'THA') {
-    ctx.fillStyle = '#7E22CE';
-    ctx.fillRect(0, 148, 512, 8);
-  } else if (livery.icao === 'TGW') {
-    ctx.fillStyle = '#1E293B';
-    ctx.fillRect(0, 150, 512, 7);
-  }
+  // Diagonal swept stripe motif
+  ctx.fillStyle = finAccent;
+  ctx.beginPath();
+  ctx.moveTo(0, 380);
+  ctx.lineTo(512, 110);
+  ctx.lineTo(512, 185);
+  ctx.lineTo(0, 455);
+  ctx.closePath();
+  ctx.fill();
 
-  // Cabin passenger windows
-  ctx.fillStyle = '#0F172A';
-  for (let x = 58; x < 458; x += 15) {
+  if (specialLivery?.theme === 'un-sdg') {
+    // UN Laurel Emblem + 17-segment SDG circle on XiamenAir United Dream fin
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 10;
     ctx.beginPath();
-    ctx.roundRect(x, 96, 8, 12, 3);
+    ctx.arc(256, 236, 98, Math.PI * 0.2, Math.PI * 0.8);
+    ctx.stroke();
+    drawSdgWheel(ctx, 256, 236, 76, 36);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 34px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('UN SDGs', 256, 392);
+  } else {
+    // Crisp IATA Carrier / Livery Fin Monogram
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(256, 240, 92, 0, Math.PI * 2);
     ctx.fill();
-  }
-
-  // Airline title & registration
-  ctx.fillStyle = livery.titleColor;
-  ctx.font = 'bold 26px "Outfit", sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText(livery.name.toUpperCase(), 62, 74);
-
-  if (registration) {
-    ctx.fillStyle = '#334155';
-    ctx.font = 'bold 16px "JetBrains Mono", monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(registration, 456, 140);
+    ctx.fillStyle = finBg;
+    ctx.font = 'bold 82px "Outfit", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText((livery.iata || livery.icao.slice(0, 2)).toUpperCase(), 256, 246);
   }
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = maxAnisotropy;
-
-  if (photoUrl) {
-    const photo = new Image();
-    photo.crossOrigin = 'anonymous';
-    photo.referrerPolicy = 'no-referrer';
-    photo.onload = () => {
-      try {
-        ctx.save();
-        ctx.globalAlpha = 0.92;
-        ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-        tex.needsUpdate = true;
-      } catch {
-        // Keep the accurate airline-color fallback if the image host blocks canvas access.
-      }
-    };
-    photo.src = photoUrl;
-  }
   return tex;
+}
+
+export function createApronRunwayTextures(maxAnisotropy: number): {
+  apronMap: THREE.CanvasTexture;
+  runwayMap: THREE.CanvasTexture;
+} {
+  // 1. Concrete / Tarmac Apron Aggregate Grid
+  const apCanvas = document.createElement('canvas');
+  apCanvas.width = 512;
+  apCanvas.height = 512;
+  const apCtx = apCanvas.getContext('2d')!;
+  apCtx.fillStyle = '#1E2530';
+  apCtx.fillRect(0, 0, 512, 512);
+  apCtx.strokeStyle = 'rgba(15, 23, 42, 0.45)';
+  apCtx.lineWidth = 2;
+  for (let i = 0; i <= 512; i += 64) {
+    apCtx.beginPath();
+    apCtx.moveTo(i, 0);
+    apCtx.lineTo(i, 512);
+    apCtx.stroke();
+    apCtx.beginPath();
+    apCtx.moveTo(0, i);
+    apCtx.lineTo(512, i);
+    apCtx.stroke();
+  }
+  const apronMap = new THREE.CanvasTexture(apCanvas);
+  apronMap.colorSpace = THREE.SRGBColorSpace;
+  apronMap.wrapS = THREE.RepeatWrapping;
+  apronMap.wrapT = THREE.RepeatWrapping;
+  apronMap.repeat.set(18, 18);
+  apronMap.anisotropy = maxAnisotropy;
+
+  // 2. Grooved Runway Asphalt + Tire Skid Marks
+  const rwCanvas = document.createElement('canvas');
+  rwCanvas.width = 512;
+  rwCanvas.height = 512;
+  const rwCtx = rwCanvas.getContext('2d')!;
+  rwCtx.fillStyle = '#0F172A';
+  rwCtx.fillRect(0, 0, 512, 512);
+  // Subtle rubber touchdown streaks
+  for (let s = 0; s < 26; s++) {
+    const sx = 120 + (s * 11) % 272;
+    rwCtx.fillStyle = s % 2 === 0 ? 'rgba(2, 6, 23, 0.55)' : 'rgba(51, 65, 85, 0.25)';
+    rwCtx.fillRect(sx, 0, 5, 512);
+  }
+  // Runway edge lines
+  rwCtx.fillStyle = '#E2E8F0';
+  rwCtx.fillRect(18, 0, 12, 512);
+  rwCtx.fillRect(482, 0, 12, 512);
+
+  const runwayMap = new THREE.CanvasTexture(rwCanvas);
+  runwayMap.colorSpace = THREE.SRGBColorSpace;
+  runwayMap.wrapS = THREE.ClampToEdgeWrapping;
+  runwayMap.wrapT = THREE.RepeatWrapping;
+  runwayMap.repeat.set(1, 10);
+  runwayMap.anisotropy = maxAnisotropy;
+
+  return {apronMap, runwayMap};
 }

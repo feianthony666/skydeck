@@ -47,12 +47,6 @@ export function getEmergencySquawkMeta(squawk?: string): EmergencySquawkMeta | n
   return null;
 }
 
-export function getFr24OperatorLogoUrl(airlineIcao?: string): string | null {
-  const code = (airlineIcao ?? '').trim().toUpperCase();
-  if (!code) return null;
-  return `https://www.flightradar24.com/static/images/data/operators/${encodeURIComponent(code)}_logo0.png`;
-}
-
 export interface DbFlagMeta {
   kind: 'LADD' | 'MIL' | 'PIA';
   shortLabel: string;
@@ -174,6 +168,12 @@ export function resolveFr24ModelClass(aircraftType?: string, callsign?: string):
   return 'narrowbody';
 }
 
+export function getFr24OperatorLogoUrl(airlineIcao?: string): string {
+  const clean = (airlineIcao ?? '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!clean || clean.length < 2) return '';
+  return `https://images.flightradar24.com/assets/airlines/logotypes/${clean}.png`;
+}
+
 /**
  * Flightradar24-inspired top-down vector aircraft silhouettes.
  * Returns raw SVG markup without touching or adding any external asset files.
@@ -184,7 +184,7 @@ export function buildFr24AircraftSvg(
   fill: string,
   stroke: string,
 ): string {
-  const sw = size >= 24 ? '1.1' : '1.25';
+  const sw = size >= 24 ? '1.35' : '1.5';
 
   switch (model) {
     case 'a380':

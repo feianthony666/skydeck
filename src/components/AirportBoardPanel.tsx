@@ -3,15 +3,22 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Ban,
+  BookOpen,
   Clock,
   Compass,
+  ExternalLink,
   Filter,
+  Map as MapIcon,
   Plane,
+  Radio,
+  RotateCcw,
   Search,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import React, {useMemo, useState} from 'react';
-import {AIRPORT_CATALOG} from '../data/aviationCatalog';
+import {AIRPORT_CATALOG, getAirportDataSheet} from '../data/aviationCatalog';
 import type {
   AirfieldSurfaceData,
   AirportBoardFlight,
@@ -150,7 +157,10 @@ interface SchematicRunway {
 
 interface SchematicTaxiway {
   id: string;
+  ref?: string;
   points: string;
+  midX: number;
+  midY: number;
 }
 
 interface SchematicPolygon {
@@ -168,11 +178,11 @@ interface AirfieldSchematic {
 function buildAirfieldSchematic(
   icao: string,
   surface?: AirfieldSurfaceData | null,
+  W = 320,
+  H = 104,
 ): AirfieldSchematic {
-  const W = 320;
-  const H = 104;
-  const padX = 36;
-  const padY = 16;
+  const padX = Math.round(W * 0.11);
+  const padY = Math.round(H * 0.15);
 
   if (surface && surface.runways.length > 0) {
     const rwyPts = surface.runways.flatMap((r) => r.coords);
@@ -256,10 +266,16 @@ function buildAirfieldSchematic(
       const taxiways = surface.taxiways
         .slice(0, 180)
         .filter((t) => t.coords.length >= 2)
-        .map((t) => ({
-          id: t.id,
-          points: toPointsStr(t.coords),
-        }));
+        .map((t) => {
+          const midPt = proj(t.coords[Math.floor(t.coords.length * 0.5)]);
+          return {
+            id: t.id,
+            ref: t.ref,
+            points: toPointsStr(t.coords),
+            midX: midPt.x,
+            midY: midPt.y,
+          };
+        });
 
       return {runways, taxiways, aprons, terminals};
     }
@@ -275,8 +291,8 @@ function buildAirfieldSchematic(
     terminals: [],
     runways: rwys.slice(0, 4).map((r, idx) => {
       const rad = ((r.headingDeg - 90) * Math.PI) / 180;
-      const halfLen = 42;
-      const spreadY = (idx - (rwys.length - 1) * 0.5) * 20;
+      const halfLen = W * 0.14;
+      const spreadY = (idx - (rwys.length - 1) * 0.5) * (H * 0.19);
       const cx = W * 0.5;
       const cy = H * 0.5 + spreadY;
       const parts = r.ident.split('/');
@@ -307,9 +323,12 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
   onFocusAirfield,
   onClose,
 }) => {
+  const [activeSubTab, setActiveSubTab] = useState<'board' | 'chart' | 'datasheet' | 'approach'>('board');
   const [boardTab, setBoardTab] = useState<'departures' | 'arrivals'>('departures');
   const [listStatusFilter, setListStatusFilter] = useState<'all' | 'delayed' | 'cancelled'>('all');
   const [boardSearch, setBoardSearch] = useState('');
+  const [chartZoom, setChartZoom] = useState(1);
+  const [selectedApproachIdx, setSelectedApproachIdx] = useState(0);
 
   const isRowCancelled = (item: AirportBoardFlight) =>
     Boolean(item.isCancelled || /cancel/i.test(item.statusText) || item.statusColor === 'red');
@@ -353,9 +372,37 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
   }, [board]);
 
   const airfieldSchematic = useMemo(
-    () => buildAirfieldSchematic(airport.icao, surface),
+    () => buildAirfieldSchematic(airport.icao, surface, 320, 104),
     [airport.icao, surface],
   );
+
+  const detailedChartSchematic = useMemo(
+    () => buildAirfieldSchematic(airport.icao, surface, 360, 260),
+    [airport.icao, surface],
+  );
+
+  const dataSheet = useMemo(
+    () =>
+      getAirportDataSheet({
+        icao: airport.icao,
+        iata: airport.iata,
+        name: board?.name || airport.name,
+        city: board?.city,
+        country: board?.country,
+        lat: surface?.lat || board?.lat || 0,
+        lon: surface?.lon || board?.lon || 0,
+        runways: weather?.runways.map((r) => ({
+          ident: r.ident,
+          headingDeg: r.headingDeg,
+          lengthFt: r.lengthFt,
+        })),
+      }),
+    [airport.icao, airport.iata, airport.name, board, surface, weather?.runways],
+  );
+
+  const selectedApproach =
+    dataSheet.approaches[Math.min(selectedApproachIdx, Math.max(0, dataSheet.approaches.length - 1))] ??
+    dataSheet.approaches[0];
 
   const delayIdx = board?.delayIndex;
   const onTimePct = useMemo(() => {
@@ -399,123 +446,217 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
   return (
     <aside
       role="complementary"
-      aria-label={`Airport arrivals, departures, and delay index for ${airport.iata || airport.icao}`}
+      aria-label={`Airport arrivals, departures, and charts for ${airport.iata || airport.icao}`}
       className="flex-1 h-full min-h-0 flex flex-col"
     >
       <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl">
         {/* Compact Sticky Airport Top Bar */}
-        <CardHeader className="py-2.5 px-4 shrink-0 border-b border-border/70 flex flex-row items-center justify-between gap-2">
-          <div className="min-w-0 space-y-0.5">
-            <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-              <span className="font-bold text-foreground">
-                {airport.iata ? `${airport.iata}` : airport.icao}
-              </span>
-              {board?.city && <span className="truncate">{board.city}</span>}
-              <span className="tabular-nums text-foreground/80">{airportLocalClock}</span>
-              <span className="text-[10px]">({airport.icao})</span>
-              {weather && (
-                <Badge
-                  variant={
-                    weather.flightCategory === 'VFR'
-                      ? 'success'
-                      : weather.flightCategory === 'MVFR'
-                        ? 'secondary'
-                        : 'destructive'
-                  }
-                >
-                  {weather.flightCategory}
-                </Badge>
-              )}
+        <CardHeader className="py-2.5 px-4 shrink-0 border-b border-border/70 space-y-2">
+          <div className="flex flex-row items-center justify-between gap-2">
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+                <span className="font-bold text-foreground">
+                  {airport.iata ? `${airport.iata}` : airport.icao}
+                </span>
+                {board?.city && <span className="truncate">{board.city}</span>}
+                <span className="tabular-nums text-foreground/80">{airportLocalClock}</span>
+                <span className="text-[10px]">({airport.icao})</span>
+                {weather && (
+                  <Badge
+                    variant={
+                      weather.flightCategory === 'VFR'
+                        ? 'success'
+                        : weather.flightCategory === 'MVFR'
+                          ? 'secondary'
+                          : 'destructive'
+                    }
+                  >
+                    {weather.flightCategory}
+                  </Badge>
+                )}
+              </div>
+              <CardTitle className="font-display text-sm sm:text-base font-bold leading-tight text-foreground truncate">
+                {board?.name || airport.name}
+              </CardTitle>
             </div>
-            <CardTitle className="font-display text-sm sm:text-base font-bold leading-tight text-foreground truncate">
-              {board?.name || airport.name}
-            </CardTitle>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onFocusAirfield && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onFocusAirfield}
+                  title="Zoom radar onto airport taxiways and runways"
+                >
+                  <Compass className="w-3.5 h-3.5 text-amber-500" />
+                  <span className="hidden sm:inline">Airfield</span>
+                </Button>
+              )}
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={onClose}
+                aria-label="Close airport board"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            {onFocusAirfield && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onFocusAirfield}
-                title="Zoom radar onto airport taxiways and runways"
-              >
-                <Compass className="w-3.5 h-3.5 text-amber-500" />
-                <span className="hidden sm:inline">Airfield</span>
-              </Button>
-            )}
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={onClose}
-              aria-label="Close airport board"
+          {/* Sub-Navigation Tabs: Board | Chart | Data Sheet | Approach */}
+          <TabsList className="w-full grid grid-cols-4">
+            <TabsTrigger active={activeSubTab === 'board'} onClick={() => setActiveSubTab('board')}>
+              Board
+            </TabsTrigger>
+            <TabsTrigger active={activeSubTab === 'chart'} onClick={() => setActiveSubTab('chart')}>
+              Chart
+            </TabsTrigger>
+            <TabsTrigger
+              active={activeSubTab === 'datasheet'}
+              onClick={() => setActiveSubTab('datasheet')}
             >
-              <X className="w-4 h-4" />
-            </Button>
-          </div>
+              Data Sheet
+            </TabsTrigger>
+            <TabsTrigger
+              active={activeSubTab === 'approach'}
+              onClick={() => setActiveSubTab('approach')}
+            >
+              Approach
+            </TabsTrigger>
+          </TabsList>
         </CardHeader>
 
         <CardContent className="flex-1 min-h-0 overflow-y-auto overscroll-contain pt-3 pb-6 [scrollbar-width:thin]">
-          <div className="space-y-3">
-            {/* FlightDeck-style Dark Airfield Schematic (Runways + Gold Taxiways for ALL Airports) */}
-            <div className="relative rounded-xl bg-[#0B0E14] text-white overflow-hidden border border-border">
-              <div className="h-[104px] w-full relative">
+          {activeSubTab === 'chart' ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-foreground inline-flex items-center gap-1.5">
+                  <MapIcon className="w-3.5 h-3.5 text-primary" />
+                  Aerodrome Ground Chart · {dataSheet.icao}
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={() => setChartZoom((z) => Math.max(1, Number((z - 0.5).toFixed(1))))}
+                    aria-label="Zoom out chart"
+                  >
+                    <ZoomOut className="w-3.5 h-3.5" />
+                  </Button>
+                  <span className="font-mono text-[11px] tabular-nums px-1.5 text-muted-foreground">
+                    {chartZoom.toFixed(1)}x
+                  </span>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={() => setChartZoom((z) => Math.min(3.5, Number((z + 0.5).toFixed(1))))}
+                    aria-label="Zoom in chart"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                  </Button>
+                  {chartZoom > 1 && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7"
+                      onClick={() => setChartZoom(1)}
+                      aria-label="Reset chart zoom"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Interactive Zoomable Vector Aerodrome Chart */}
+              <div className="rounded-xl border border-border bg-[#070B12] overflow-auto max-h-[300px]">
                 <svg
-                  viewBox="0 0 320 104"
-                  className="w-full h-full block"
+                  viewBox="0 0 360 260"
+                  style={{width: `${chartZoom * 100}%`, height: `${chartZoom * 240}px`}}
+                  className="block min-w-full"
                   role="img"
-                  aria-label={`Runway schematic for ${airport.iata || airport.icao}`}
+                  aria-label={`Detailed aerodrome chart for ${dataSheet.icao}`}
                 >
-                  <rect width="320" height="104" fill="#0B0E14" />
-                  <g stroke="rgba(255,255,255,0.045)" strokeWidth="1">
-                    <line x1="0" y1="26" x2="320" y2="26" />
-                    <line x1="0" y1="52" x2="320" y2="52" />
-                    <line x1="0" y1="78" x2="320" y2="78" />
-                    <line x1="80" y1="0" x2="80" y2="104" />
-                    <line x1="160" y1="0" x2="160" y2="104" />
-                    <line x1="240" y1="0" x2="240" y2="104" />
-                  </g>
-                  {airfieldSchematic.aprons.map((ap) => (
+                  <rect width="360" height="260" fill="#070B12" />
+                  {/* Compass / Elevation corner stamp */}
+                  <text
+                    x="12"
+                    y="18"
+                    fill="#94A3B8"
+                    fontSize="9"
+                    fontFamily="JetBrains Mono, monospace"
+                    fontWeight="700"
+                  >
+                    {dataSheet.icao} / {dataSheet.iata} · ELEV {dataSheet.elevationFt} FT · VAR{' '}
+                    {dataSheet.magneticVarDeg >= 0 ? `${dataSheet.magneticVarDeg}°E` : `${Math.abs(dataSheet.magneticVarDeg)}°W`}
+                  </text>
+                  <text
+                    x="348"
+                    y="18"
+                    fill="#38BDF8"
+                    fontSize="8.5"
+                    fontFamily="JetBrains Mono, monospace"
+                    textAnchor="end"
+                  >
+                    TWR {dataSheet.towerFreq} · GND {dataSheet.groundFreq}
+                  </text>
+
+                  {detailedChartSchematic.aprons.map((ap) => (
                     <polygon
                       key={ap.id}
                       points={ap.points}
-                      fill="#131b2b"
-                      fillOpacity="0.85"
-                      stroke="rgba(250, 204, 21, 0.25)"
+                      fill="#141C2B"
+                      fillOpacity="0.92"
+                      stroke="rgba(250, 204, 21, 0.28)"
                       strokeWidth="0.6"
                     />
                   ))}
-                  {airfieldSchematic.terminals.map((term) => (
+                  {detailedChartSchematic.terminals.map((term) => (
                     <polygon
                       key={term.id}
                       points={term.points}
-                      fill="#1e2d44"
+                      fill="#1E3A5F"
                       fillOpacity="0.95"
-                      stroke="rgba(56, 189, 248, 0.6)"
+                      stroke="#38BDF8"
                       strokeWidth="0.8"
                     />
                   ))}
-                  {airfieldSchematic.taxiways.map((twy) => (
-                    <polyline
-                      key={twy.id}
-                      points={twy.points}
-                      fill="none"
-                      stroke="rgba(250, 204, 21, 0.42)"
-                      strokeWidth="0.9"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
+                  {detailedChartSchematic.taxiways.map((twy) => (
+                    <g key={twy.id}>
+                      <polyline
+                        points={twy.points}
+                        fill="none"
+                        stroke="rgba(250, 204, 21, 0.55)"
+                        strokeWidth="1.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      {twy.ref && (
+                        <text
+                          x={twy.midX}
+                          y={twy.midY}
+                          fill="#FDE047"
+                          fontSize="5.5"
+                          fontFamily="JetBrains Mono, monospace"
+                          textAnchor="middle"
+                        >
+                          {twy.ref}
+                        </text>
+                      )}
+                    </g>
                   ))}
-                  {airfieldSchematic.runways.map((r) => (
+                  {detailedChartSchematic.runways.map((r) => (
                     <g key={r.id}>
                       <line
                         x1={r.x1}
                         y1={r.y1}
                         x2={r.x2}
                         y2={r.y2}
-                        stroke="rgba(255,255,255,0.22)"
-                        strokeWidth="5"
-                        strokeLinecap="round"
+                        stroke="rgba(255,255,255,0.28)"
+                        strokeWidth="7"
+                        strokeLinecap="butt"
                       />
                       <line
                         x1={r.x1}
@@ -523,15 +664,15 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                         x2={r.x2}
                         y2={r.y2}
                         stroke="#F8FAFC"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
+                        strokeWidth="2.2"
+                        strokeDasharray="6 4"
                       />
                       {r.labelA && (
                         <text
                           x={r.x1}
-                          y={Math.max(11, r.y1 - 4)}
-                          fill="rgba(248,250,252,0.88)"
-                          fontSize="8.5"
+                          y={Math.max(28, r.y1 - 5)}
+                          fill="#FFFFFF"
+                          fontSize="9"
                           fontFamily="JetBrains Mono, monospace"
                           fontWeight="700"
                           textAnchor="middle"
@@ -542,9 +683,9 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                       {r.labelB && (
                         <text
                           x={r.x2}
-                          y={Math.min(100, r.y2 + 10)}
-                          fill="rgba(248,250,252,0.88)"
-                          fontSize="8.5"
+                          y={Math.min(252, r.y2 + 11)}
+                          fill="#FFFFFF"
+                          fontSize="9"
                           fontFamily="JetBrains Mono, monospace"
                           fontWeight="700"
                           textAnchor="middle"
@@ -554,35 +695,456 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                       )}
                     </g>
                   ))}
-                  {airfieldSchematic.runways.length === 0 && (
-                    <text
-                      x="160"
-                      y="55"
-                      fill="rgba(248,250,252,0.55)"
-                      fontSize="10"
-                      fontFamily="JetBrains Mono, monospace"
-                      textAnchor="middle"
-                    >
-                      Loading {airport.icao} runway & taxiway geometry…
-                    </text>
-                  )}
                 </svg>
-                {onFocusAirfield && (
-                  <button
-                    type="button"
-                    onClick={onFocusAirfield}
-                    className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full bg-white/12 hover:bg-white/22 backdrop-blur-md px-2.5 py-0.5 text-[10.5px] font-medium text-white border border-white/15 cursor-pointer"
+              </div>
+
+              {/* Official Country eAIP & Aerodrome Chart Portals */}
+              <div className="rounded-xl border border-border bg-secondary/40 p-3 space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Official Country Aerodrome Charts &amp; AIP
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  <a
+                    href={dataSheet.eaipUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between rounded-lg border border-border bg-background/80 hover:bg-accent px-3 py-2 text-xs font-medium text-foreground"
                   >
-                    <Compass className="w-3 h-3 text-amber-300" />
-                    Zoom Airfield
-                  </button>
+                    <span>Official State eAIP / d-TPP ({dataSheet.icao})</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-primary" />
+                  </a>
+                  <a
+                    href={dataSheet.chartFoxUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between rounded-lg border border-border bg-background/80 hover:bg-accent px-3 py-2 text-xs font-medium text-foreground"
+                  >
+                    <span>ChartFox Vector &amp; PDF Chart Index</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-primary" />
+                  </a>
+                  <a
+                    href={dataSheet.skyVectorUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between rounded-lg border border-border bg-background/80 hover:bg-accent px-3 py-2 text-xs font-medium text-foreground"
+                  >
+                    <span>SkyVector Airport Diagram &amp; Sectionals</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-primary" />
+                  </a>
+                </div>
+              </div>
+            </div>
+          ) : activeSubTab === 'datasheet' ? (
+            <div className="space-y-3">
+              {/* Field Reference Grid */}
+              <div className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-secondary/40 p-3 text-xs">
+                <div>
+                  <div className="text-[10.5px] text-muted-foreground">Field Elevation</div>
+                  <div className="font-mono font-bold text-foreground tabular-nums">
+                    {dataSheet.elevationFt} ft MSL
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10.5px] text-muted-foreground">Transition Altitude</div>
+                  <div className="font-mono font-bold text-foreground tabular-nums">
+                    {dataSheet.transitionAltFt.toLocaleString()} ft
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10.5px] text-muted-foreground">Magnetic Variation</div>
+                  <div className="font-mono font-bold text-foreground tabular-nums">
+                    {dataSheet.magneticVarDeg >= 0
+                      ? `${dataSheet.magneticVarDeg.toFixed(1)}° E`
+                      : `${Math.abs(dataSheet.magneticVarDeg).toFixed(1)}° W`}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10.5px] text-muted-foreground">ARP Coordinates</div>
+                  <div className="font-mono font-semibold text-foreground tabular-nums">
+                    {dataSheet.lat.toFixed(3)}, {dataSheet.lon.toFixed(3)}
+                  </div>
+                </div>
+              </div>
+
+              {/* VHF COM Frequencies */}
+              <div className="rounded-xl border border-border bg-background/70 p-3 space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground inline-flex items-center gap-1.5">
+                  <Radio className="w-3.5 h-3.5 text-primary" />
+                  VHF Communications ({dataSheet.icao})
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono tabular-nums">
+                  <div className="rounded-lg bg-secondary/50 px-2.5 py-1.5 flex justify-between">
+                    <span className="text-muted-foreground">ATIS</span>
+                    <span className="font-bold text-foreground">{dataSheet.atisFreq}</span>
+                  </div>
+                  <div className="rounded-lg bg-secondary/50 px-2.5 py-1.5 flex justify-between">
+                    <span className="text-muted-foreground">CLR</span>
+                    <span className="font-bold text-foreground">{dataSheet.clearanceFreq}</span>
+                  </div>
+                  <div className="rounded-lg bg-secondary/50 px-2.5 py-1.5 flex justify-between">
+                    <span className="text-muted-foreground">GND</span>
+                    <span className="font-bold text-foreground">{dataSheet.groundFreq}</span>
+                  </div>
+                  <div className="rounded-lg bg-secondary/50 px-2.5 py-1.5 flex justify-between">
+                    <span className="text-muted-foreground">TWR</span>
+                    <span className="font-bold text-foreground">{dataSheet.towerFreq}</span>
+                  </div>
+                  <div className="col-span-2 rounded-lg bg-secondary/50 px-2.5 py-1.5 flex justify-between">
+                    <span className="text-muted-foreground">APP / DEP</span>
+                    <span className="font-bold text-foreground">{dataSheet.approachFreq}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Runway Wind & Surface Table */}
+              <div className="rounded-xl border border-border bg-background/70 p-3 space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground inline-flex items-center gap-1.5">
+                  <BookOpen className="w-3.5 h-3.5 text-primary" />
+                  Runway Performance &amp; Surface Status
+                </div>
+                {weather?.runways && weather.runways.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {weather.runways.map((r) => (
+                      <div
+                        key={r.ident}
+                        className="rounded-lg border border-border/70 bg-secondary/35 px-2.5 py-2 text-xs flex items-center justify-between gap-2"
+                      >
+                        <div>
+                          <div className="font-mono font-bold text-foreground">
+                            RWY {r.ident}{' '}
+                            {r.favored && <Badge variant="success">ACTIVE FAV</Badge>}
+                          </div>
+                          <div className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
+                            {r.lengthFt.toLocaleString()} ft · HDG {String(r.headingDeg).padStart(3, '0')}° ·{' '}
+                            {r.surface} ({r.brakingAction})
+                          </div>
+                        </div>
+                        <div className="text-right font-mono text-[11px] tabular-nums">
+                          <div className="font-semibold text-foreground">
+                            HW {r.headwindKts >= 0 ? `+${r.headwindKts}` : r.headwindKts} kt
+                          </div>
+                          <div className="text-muted-foreground">
+                            XW {r.crosswindKts} kt {r.crosswindDir}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    Live METAR runway component sync pending for {dataSheet.icao}.
+                  </div>
                 )}
               </div>
             </div>
+          ) : activeSubTab === 'approach' ? (
+            <div className="space-y-3">
+              {/* Procedure Selector */}
+              <div className="flex flex-wrap gap-1.5">
+                {dataSheet.approaches.map((proc, idx) => (
+                  <Button
+                    key={proc.runwayIdent}
+                    size="sm"
+                    variant={idx === selectedApproachIdx ? 'default' : 'outline'}
+                    onClick={() => setSelectedApproachIdx(idx)}
+                  >
+                    {proc.runwayIdent}
+                  </Button>
+                ))}
+              </div>
 
-            <p className="text-xs font-medium text-muted-foreground">{opsTone}</p>
-          {/* FlightDeck-style On-Time Today & Weather Summary Card */}
-          <div className="grid grid-cols-2 gap-2.5 rounded-xl border border-border bg-secondary/45 p-3">
+              {selectedApproach && (
+                <>
+                  {/* Brief Strip */}
+                  <div className="grid grid-cols-3 gap-2 rounded-xl border border-border bg-secondary/40 p-2.5 text-xs font-mono tabular-nums">
+                    <div>
+                      <div className="text-[10px] text-muted-foreground">ILS / LOC</div>
+                      <div className="font-bold text-primary">{selectedApproach.ilsFreqMhz} MHz</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-muted-foreground">FINAL CRS</div>
+                      <div className="font-bold text-foreground">
+                        {String(selectedApproach.courseDeg).padStart(3, '0')}°
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-muted-foreground">DA (HAT)</div>
+                      <div className="font-bold text-amber-500">{selectedApproach.daFt} ft</div>
+                    </div>
+                  </div>
+
+                  {/* Approach Plan View SVG */}
+                  <div className="rounded-xl border border-border bg-[#070B12] p-2.5 space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                      <span>PLAN VIEW · {selectedApproach.runwayIdent}</span>
+                      <span>MISSED HDG {String(selectedApproach.missedHeadingDeg).padStart(3, '0')}° → {selectedApproach.missedAltFt} FT</span>
+                    </div>
+                    <svg viewBox="0 0 320 90" className="w-full h-[86px] block">
+                      <rect width="320" height="90" fill="#070B12" />
+                      {/* Final Approach Course */}
+                      <line
+                        x1="28"
+                        y1="46"
+                        x2="255"
+                        y2="46"
+                        stroke="#38BDF8"
+                        strokeWidth="1.6"
+                        strokeDasharray="5 3"
+                      />
+                      {/* Missed Approach Track */}
+                      <line
+                        x1="255"
+                        y1="46"
+                        x2="306"
+                        y2="24"
+                        stroke="#F59E0B"
+                        strokeWidth="1.4"
+                        strokeDasharray="3 3"
+                      />
+                      {/* Runway strip */}
+                      <rect x="255" y="42" width="32" height="8" rx="1" fill="#F8FAFC" />
+                      {/* IAF -> IF -> FAF waypoints */}
+                      {[
+                        {x: 34, label: selectedApproach.iafFix, sub: 'IAF'},
+                        {x: 112, label: selectedApproach.ifFix, sub: `${selectedApproach.ifDistNm}NM`},
+                        {x: 186, label: selectedApproach.fafFix, sub: `${selectedApproach.fafDistNm}NM`},
+                      ].map((wp) => (
+                        <g key={wp.label}>
+                          <polygon
+                            points={`${wp.x},39 ${wp.x + 6},46 ${wp.x},53 ${wp.x - 6},46`}
+                            fill="#0284C7"
+                            stroke="#E0F2FE"
+                            strokeWidth="1"
+                          />
+                          <text
+                            x={wp.x}
+                            y="30"
+                            fill="#F8FAFC"
+                            fontSize="8.5"
+                            fontFamily="JetBrains Mono, monospace"
+                            textAnchor="middle"
+                            fontWeight="700"
+                          >
+                            {wp.label}
+                          </text>
+                          <text
+                            x={wp.x}
+                            y="66"
+                            fill="#94A3B8"
+                            fontSize="7.5"
+                            fontFamily="JetBrains Mono, monospace"
+                            textAnchor="middle"
+                          >
+                            {wp.sub}
+                          </text>
+                        </g>
+                      ))}
+                      <text
+                        x="270"
+                        y="66"
+                        fill="#22C55E"
+                        fontSize="8"
+                        fontFamily="JetBrains Mono, monospace"
+                        textAnchor="middle"
+                      >
+                        THR
+                      </text>
+                    </svg>
+                  </div>
+
+                  {/* 3.0° Glideslope Vertical Profile SVG */}
+                  <div className="rounded-xl border border-border bg-[#070B12] p-2.5 space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                      <span>PROFILE VIEW · GS {selectedApproach.glideslopeDeg.toFixed(1)}°</span>
+                      <span>{selectedApproach.lightingSystem}</span>
+                    </div>
+                    <svg viewBox="0 0 320 110" className="w-full h-[106px] block">
+                      <rect width="320" height="110" fill="#070B12" />
+                      {/* Terrain ground datum */}
+                      <line x1="10" y1="92" x2="310" y2="92" stroke="#475569" strokeWidth="1.5" />
+                      {/* Stepdown / Glideslope beam */}
+                      <polyline
+                        points="26,22 108,42 184,60 264,92"
+                        fill="none"
+                        stroke="#22C55E"
+                        strokeWidth="2"
+                      />
+                      {/* PAPI red/white indicator beside threshold */}
+                      <circle cx="272" cy="88" r="2.2" fill="#FFFFFF" />
+                      <circle cx="278" cy="88" r="2.2" fill="#FFFFFF" />
+                      <circle cx="284" cy="88" r="2.2" fill="#EF4444" />
+                      <circle cx="290" cy="88" r="2.2" fill="#EF4444" />
+
+                      {[
+                        {x: 26, y: 22, alt: `${selectedApproach.iafAltFt}'`, fix: selectedApproach.iafFix},
+                        {x: 108, y: 42, alt: `${selectedApproach.ifAltFt}'`, fix: selectedApproach.ifFix},
+                        {x: 184, y: 60, alt: `${selectedApproach.fafAltFt}'`, fix: selectedApproach.fafFix},
+                      ].map((pt) => (
+                        <g key={pt.fix}>
+                          <line
+                            x1={pt.x}
+                            y1={pt.y}
+                            x2={pt.x}
+                            y2="92"
+                            stroke="rgba(148,163,184,0.28)"
+                            strokeDasharray="2 2"
+                          />
+                          <circle cx={pt.x} cy={pt.y} r="3" fill="#38BDF8" />
+                          <text
+                            x={pt.x}
+                            y={pt.y - 6}
+                            fill="#F8FAFC"
+                            fontSize="8"
+                            fontFamily="JetBrains Mono, monospace"
+                            textAnchor="middle"
+                          >
+                            {pt.alt}
+                          </text>
+                        </g>
+                      ))}
+                      <text
+                        x="264"
+                        y="104"
+                        fill="#F8FAFC"
+                        fontSize="7.5"
+                        fontFamily="JetBrains Mono, monospace"
+                        textAnchor="middle"
+                      >
+                        TDZE {dataSheet.elevationFt}' · DA {selectedApproach.daFt}'
+                      </text>
+                    </svg>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {/* FlightDeck-style Dark Airfield Schematic (Runways + Gold Taxiways for ALL Airports) */}
+              <div className="relative rounded-xl bg-[#0B0E14] text-white overflow-hidden border border-border">
+                <div className="h-[104px] w-full relative">
+                  <svg
+                    viewBox="0 0 320 104"
+                    className="w-full h-full block"
+                    role="img"
+                    aria-label={`Runway schematic for ${airport.iata || airport.icao}`}
+                  >
+                    <rect width="320" height="104" fill="#0B0E14" />
+                    <g stroke="rgba(255,255,255,0.045)" strokeWidth="1">
+                      <line x1="0" y1="26" x2="320" y2="26" />
+                      <line x1="0" y1="52" x2="320" y2="52" />
+                      <line x1="0" y1="78" x2="320" y2="78" />
+                      <line x1="80" y1="0" x2="80" y2="104" />
+                      <line x1="160" y1="0" x2="160" y2="104" />
+                      <line x1="240" y1="0" x2="240" y2="104" />
+                    </g>
+                    {airfieldSchematic.aprons.map((ap) => (
+                      <polygon
+                        key={ap.id}
+                        points={ap.points}
+                        fill="#131b2b"
+                        fillOpacity="0.85"
+                        stroke="rgba(250, 204, 21, 0.25)"
+                        strokeWidth="0.6"
+                      />
+                    ))}
+                    {airfieldSchematic.terminals.map((term) => (
+                      <polygon
+                        key={term.id}
+                        points={term.points}
+                        fill="#1e2d44"
+                        fillOpacity="0.95"
+                        stroke="rgba(56, 189, 248, 0.6)"
+                        strokeWidth="0.8"
+                      />
+                    ))}
+                    {airfieldSchematic.taxiways.map((twy) => (
+                      <polyline
+                        key={twy.id}
+                        points={twy.points}
+                        fill="none"
+                        stroke="rgba(250, 204, 21, 0.42)"
+                        strokeWidth="0.9"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    ))}
+                    {airfieldSchematic.runways.map((r) => (
+                      <g key={r.id}>
+                        <line
+                          x1={r.x1}
+                          y1={r.y1}
+                          x2={r.x2}
+                          y2={r.y2}
+                          stroke="rgba(255,255,255,0.22)"
+                          strokeWidth="5"
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1={r.x1}
+                          y1={r.y1}
+                          x2={r.x2}
+                          y2={r.y2}
+                          stroke="#F8FAFC"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                        />
+                        {r.labelA && (
+                          <text
+                            x={r.x1}
+                            y={Math.max(11, r.y1 - 4)}
+                            fill="rgba(248,250,252,0.88)"
+                            fontSize="8.5"
+                            fontFamily="JetBrains Mono, monospace"
+                            fontWeight="700"
+                            textAnchor="middle"
+                          >
+                            {r.labelA}
+                          </text>
+                        )}
+                        {r.labelB && (
+                          <text
+                            x={r.x2}
+                            y={Math.min(100, r.y2 + 10)}
+                            fill="rgba(248,250,252,0.88)"
+                            fontSize="8.5"
+                            fontFamily="JetBrains Mono, monospace"
+                            fontWeight="700"
+                            textAnchor="middle"
+                          >
+                            {r.labelB}
+                          </text>
+                        )}
+                      </g>
+                    ))}
+                    {airfieldSchematic.runways.length === 0 && (
+                      <text
+                        x="160"
+                        y="55"
+                        fill="rgba(248,250,252,0.55)"
+                        fontSize="10"
+                        fontFamily="JetBrains Mono, monospace"
+                        textAnchor="middle"
+                      >
+                        Loading {airport.icao} runway &amp; taxiway geometry…
+                      </text>
+                    )}
+                  </svg>
+                  {onFocusAirfield && (
+                    <button
+                      type="button"
+                      onClick={onFocusAirfield}
+                      className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full bg-white/12 hover:bg-white/22 backdrop-blur-md px-2.5 py-0.5 text-[10.5px] font-medium text-white border border-white/15 cursor-pointer"
+                    >
+                      <Compass className="w-3 h-3 text-amber-300" />
+                      Zoom Airfield
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-xs font-medium text-muted-foreground">{opsTone}</p>
+              {/* FlightDeck-style On-Time Today & Weather Summary Card */}
+              <div className="grid grid-cols-2 gap-2.5 rounded-xl border border-border bg-secondary/45 p-3">
             <div className="space-y-1">
               <div className="text-[11px] text-muted-foreground font-medium">On time today</div>
               <div className="flex items-center gap-2">
@@ -943,6 +1505,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
             )}
           </div>
           </div>
+          )}
         </CardContent>
       </Card>
     </aside>

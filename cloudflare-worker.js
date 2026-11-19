@@ -29,6 +29,8 @@ const ALLOWED_HOSTS = new Set([
   'ipwho.is',
   'davidmegginson.github.io',
   'commons.wikimedia.org',
+  'aviation-safety.net',
+  'asn.flightsafety.org',
 ]);
 
 const FR24_MOBILE_UA = 'FlightradarFree/2024090501 CFNetwork/1496.0.7 Darwin/23.5.0';

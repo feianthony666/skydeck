@@ -17,17 +17,26 @@ import {
   X,
 } from 'lucide-react';
 import React, {useEffect, useMemo, useState} from 'react';
-import {AIRPORT_CATALOG, resolveAirlineLivery} from '../data/aviationCatalog';
-import {haversineNm} from '../services/offlineStore';
+import {
+  AIRPORT_CATALOG,
+  resolveAirlineLivery,
+  resolveSpecialLivery,
+} from '../data/aviationCatalog';
 import {apiFetchJson} from '../services/directAviationClient';
+import {haversineNm} from '../services/offlineStore';
 import type {
   AcarsMessage,
   AirportMarker,
   FlightDetail,
   LiveFlight,
+  SafetyRecordResponse,
   ThreeViewMode,
 } from '../types/aviation';
-import {getDbFlagMeta, getEmergencySquawkMeta, getFr24OperatorLogoUrl} from './aircraftIcons';
+import {
+  getDbFlagMeta,
+  getEmergencySquawkMeta,
+  getFr24OperatorLogoUrl,
+} from './aircraftIcons';
 import {Badge} from './ui/badge';
 import {Button} from './ui/button';
 import {Card, CardContent, CardHeader, CardTitle} from './ui/card';
@@ -55,16 +64,6 @@ interface TelemetrySample {
   altFt: number;
   spdKts: number;
   terrainFt: number;
-}
-
-interface SafetyRecordItem {
-  date: string;
-  type: string;
-  registration: string;
-  operator: string;
-  location: string;
-  damage: string;
-  url: string;
 }
 
 function formatEpochTime(ts?: number, mode: 'airport' | 'local' | 'utc' = 'local'): string {
@@ -149,9 +148,10 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
   onSelectAirport,
 }) => {
   const [photoError, setPhotoError] = useState(false);
+  const [logoError, setLogoError] = useState(false);
   const [liveSamples, setLiveSamples] = useState<TelemetrySample[]>([]);
-  const [safetyItems, setSafetyItems] = useState<SafetyRecordItem[]>([]);
-  const [safetySearchUrl, setSafetySearchUrl] = useState('');
+  const [asnSafety, setAsnSafety] = useState<SafetyRecordResponse | null>(null);
+  const [asnLoading, setAsnLoading] = useState(false);
 
   const squawkCode = detail?.squawk || flight.squawk || '';
   const emerg = getEmergencySquawkMeta(squawkCode);
@@ -163,7 +163,6 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     dynamics: boolean;
     airframe: boolean;
     acars: boolean;
-    charts: boolean;
   }>({
     route: true,
     profile: true,
@@ -171,7 +170,6 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     dynamics: false,
     airframe: false,
     acars: false,
-    charts: false,
   });
 
   const toggleSection = (key: keyof typeof openSections) => {
@@ -180,12 +178,18 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
 
   useEffect(() => {
     setPhotoError(false);
+    setLogoError(false);
     setLiveSamples([]);
+    setAsnSafety(null);
   }, [flight.id]);
 
   useEffect(() => {
     setPhotoError(false);
   }, [detail?.photo?.url]);
+
+  useEffect(() => {
+    setLogoError(false);
+  }, [detail?.airlineIcao, flight.airlineIcao]);
 
   useEffect(() => {
     if (emerg) {
@@ -224,39 +228,38 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     detail?.airlineIcao || flight.airlineIcao,
     flight.callsign,
   );
-  const fr24OperatorLogoUrl = getFr24OperatorLogoUrl(detail?.airlineIcao || flight.airlineIcao);
+  const operatorLogoUrl = getFr24OperatorLogoUrl(detail?.airlineIcao || flight.airlineIcao);
 
   const dbMeta = getDbFlagMeta(flight);
   const registration = detail?.registration || flight.registration || '—';
+  const specialLivery = useMemo(
+    () => resolveSpecialLivery(registration, flight.callsign),
+    [registration, flight.callsign],
+  );
+
+  useEffect(() => {
+    if (!openSections.safety || !registration || registration === '—') return;
+    let cancelled = false;
+    setAsnLoading(true);
+    apiFetchJson<SafetyRecordResponse>(
+      `/api/safety-record?registration=${encodeURIComponent(registration)}`,
+    )
+      .then((res) => {
+        if (!cancelled) setAsnSafety(res);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setAsnLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [openSections.safety, registration]);
   const aircraftModel = detail?.aircraftModel || flight.aircraftType || '—';
   const aircraftCode = detail?.aircraftCode || flight.aircraftType || '';
   const operatorName = detail?.registeredOwner || flight.ownerOperator || detail?.airlineName || livery.name;
   const originCode = detail?.originIata || flight.origin || '—';
   const destCode = detail?.destinationIata || flight.destination || '—';
-  useEffect(() => {
-    if (registration === '—') {
-      setSafetyItems([]);
-      setSafetySearchUrl('');
-      return;
-    }
-    let cancelled = false;
-    apiFetchJson<{items?: SafetyRecordItem[]; searchUrl?: string}>(
-      `/api/safety-record?registration=${encodeURIComponent(registration)}`,
-    )
-      .then((record) => {
-        if (cancelled) return;
-        setSafetyItems(record.items ?? []);
-        setSafetySearchUrl(record.searchUrl ?? '');
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSafetyItems([]);
-        setSafetySearchUrl('');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [registration]);
   const originIcao = detail?.originIcao || '';
   const destIcao = detail?.destinationIcao || '';
 
@@ -504,6 +507,15 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
         <CardHeader className="flex flex-row items-start justify-between gap-2 pb-2.5 pt-3.5 shrink-0 border-b border-border/60">
           <div className="space-y-1 min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
+              {operatorLogoUrl && !logoError && (
+                <img
+                  src={operatorLogoUrl}
+                  alt={livery.name}
+                  referrerPolicy="no-referrer"
+                  onError={() => setLogoError(true)}
+                  className="h-4 max-w-[78px] object-contain shrink-0"
+                />
+              )}
               <CardTitle className="font-mono text-base font-semibold text-primary">
                 {flight.callsign}
               </CardTitle>
@@ -511,6 +523,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                 <span className="font-mono text-xs text-foreground">{flight.flightNumber}</span>
               )}
               {emerg && <Badge variant="destructive">▲ {emerg.shortLabel}</Badge>}
+              {specialLivery && <Badge variant="secondary">{specialLivery.badgeText}</Badge>}
               {dbMeta && <Badge variant="outline">{dbMeta.shortLabel}</Badge>}
               <Badge variant={flight.isEstimated ? 'warning' : 'secondary'}>
                 {flight.isEstimated ? `DR ±${flight.uncertaintyNm} NM` : flight.source.toUpperCase()}
@@ -519,6 +532,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             <p className="text-xs text-muted-foreground truncate">
               {operatorName} · {aircraftModel}
               {registration !== '—' ? ` · ${registration}` : ''}
+              {specialLivery ? ` · ${specialLivery.liveryName}` : ''}
             </p>
           </div>
 
@@ -787,46 +801,6 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
 
               <div className="rounded-lg border border-border bg-card/80 p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] font-semibold text-foreground">
-                  <span>Aviation Safety Network</span>
-                  {safetySearchUrl && (
-                    <a
-                      href={safetySearchUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-primary hover:underline"
-                    >
-                      Open ASN <ExternalLink className="w-3 h-3" />
-                    </a>
-                  )}
-                </div>
-                {safetyItems.length > 0 ? (
-                  <div className="space-y-1.5">
-                    {safetyItems.slice(0, 6).map((item, index) => (
-                      <a
-                        key={`${item.date}-${item.location}-${index}`}
-                        href={item.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="block border-t border-border/60 pt-1.5 first:border-t-0 first:pt-0 hover:text-primary"
-                      >
-                        <div className="font-mono text-[10.5px]">
-                          {item.date || 'Date unknown'} · {item.type || 'Aircraft occurrence'}
-                        </div>
-                        <div className="text-[10.5px] text-muted-foreground truncate">
-                          {item.location || 'Location unknown'} · {item.damage || 'Damage not listed'}
-                        </div>
-                      </a>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-[10.5px] text-muted-foreground">
-                    No indexed occurrences found or Aviation Safety Network is unavailable.
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-lg border border-border bg-card/80 p-2.5 space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-foreground">
                   <span className="inline-flex items-center gap-1.5">
                     <Wrench className="w-3.5 h-3.5 text-muted-foreground" />
                     Airframe &amp; Maintenance Status
@@ -849,6 +823,68 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                 ) : (
                   <div className="text-[10.5px] font-mono text-muted-foreground">
                     No active ACARS [MAINT] fault messages logged for {flight.callsign}.
+                  </div>
+                )}
+              </div>
+
+              {/* Aviation Safety Network (aviation-safety.net) Registration Dossier */}
+              <div className="rounded-lg border border-border bg-card/80 p-2.5 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-foreground">
+                  <span>ASN Incident History ({registration})</span>
+                  <a
+                    href={
+                      asnSafety?.searchUrl ||
+                      `https://aviation-safety.net/wikibase/dblist.php?Reg=${encodeURIComponent(
+                        registration === '—' ? '' : registration,
+                      )}`
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[10.5px] text-primary hover:underline font-medium"
+                  >
+                    aviation-safety.net
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                {registration === '—' ? (
+                  <div className="text-[10.5px] text-muted-foreground">
+                    Waiting for airframe registration to query Aviation Safety Network.
+                  </div>
+                ) : asnLoading && !asnSafety ? (
+                  <div className="text-[10.5px] text-muted-foreground">
+                    Querying aviation-safety.net for {registration}…
+                  </div>
+                ) : asnSafety && asnSafety.items.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {asnSafety.items.slice(0, 4).map((rec, idx) => (
+                      <div
+                        key={`${rec.date}-${idx}`}
+                        className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 space-y-0.5"
+                      >
+                        <div className="flex items-center justify-between gap-1 font-mono font-semibold text-foreground">
+                          <span>{rec.date} · {rec.type}</span>
+                          <span className="text-amber-600 dark:text-amber-400">{rec.damage}</span>
+                        </div>
+                        <div className="text-[10.5px] text-muted-foreground">
+                          {rec.location} · Fatalities: {rec.fatalities || '0'}
+                        </div>
+                        {rec.href && (
+                          <a
+                            href={rec.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[10.5px] text-primary hover:underline"
+                          >
+                            View ASN Report
+                            <ExternalLink className="w-2.5 h-2.5" />
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[10.5px] text-muted-foreground">
+                    No ASN hull-loss or incident entries matched for {registration}.
                   </div>
                 )}
               </div>
@@ -952,17 +988,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             open={openSections.airframe}
             onToggle={() => toggleSection('airframe')}
           >
-            <div className="rounded-xl border border-border overflow-hidden bg-muted/30">
-              {fr24OperatorLogoUrl && (
-                <div className="h-10 px-2.5 py-1.5 border-b border-border bg-white flex items-center">
-                  <img
-                    src={fr24OperatorLogoUrl}
-                    alt={`${livery.name} official Flightradar24 operator logo`}
-                    referrerPolicy="no-referrer"
-                    className="max-h-7 max-w-28 object-contain"
-                  />
-                </div>
-              )}
+            <div className="rounded-xl overflow-hidden bg-muted/20">
               {photo?.url ? (
                 <img
                   src={photo.url}
@@ -1028,42 +1054,6 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
           </CollapsibleSection>
 
           {/* 6. Matched ACARS & Ground Mode */}
-          <CollapsibleSection
-            title="Official Aerodrome & Approach Charts"
-            subtitle={`${originCode} departure · ${destCode} arrival`}
-            icon={<MapPin className="w-3.5 h-3.5" />}
-            open={openSections.charts}
-            onToggle={() => toggleSection('charts')}
-          >
-            <div className="grid grid-cols-1 gap-2">
-              {[originCode, destCode]
-                .filter((code, index, codes) => code !== '—' && codes.indexOf(code) === index)
-                .map((code) => (
-                  <div key={code} className="rounded-lg border border-border p-2">
-                    <div className="text-[10px] font-mono text-muted-foreground mb-1.5">{code}</div>
-                    <div className="flex flex-wrap gap-2">
-                      <a
-                        href={`https://skyvector.com/airport/${encodeURIComponent(code)}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
-                      >
-                        Airport charts <ExternalLink className="w-3 h-3" />
-                      </a>
-                      <a
-                        href={`https://www.google.com/search?q=${encodeURIComponent(`${code} official aerodrome and approach charts`)}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
-                      >
-                        Official AIP / approach charts <ExternalLink className="w-3 h-3" />
-                      </a>
-                    </div>
-                  </div>
-                ))}
-            </div>
-          </CollapsibleSection>
-
           {matchingAcars.length > 0 && (
             <CollapsibleSection
               title={`Matched ACARS (${matchingAcars.length})`}
