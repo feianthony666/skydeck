@@ -1584,8 +1584,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const surfaceQueryBucket = useMemo(() => (mapZoom >= 8.2 ? 1 : 0), [mapZoom]);
   const surfaceRenderZoom = useMemo(() => {
     if (mapZoom < 8.2) return 0;
-    // Surface geometry is expensive to rebuild; integer zoom buckets avoid redraws on every 0.25/0.5 zoom step.
-    return Math.round(mapZoom);
+    return Math.round(mapZoom * 2) / 2;
   }, [mapZoom]);
 
   useEffect(() => {
@@ -1803,6 +1802,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
     for (const surfaceData of surfaceList) {
       const mPerPx = metersPerPixelAtLatZoom(surfaceData.lat, z);
+
+      // Easter egg: Sapporo-area airports (New Chitose / Okadama).
+      const isSapporoAirport =
+        (Math.abs(surfaceData.lat - 42.775) < 0.12 && Math.abs(surfaceData.lon - 141.692) < 0.16) ||
+        (Math.abs(surfaceData.lat - 43.117) < 0.10 && Math.abs(surfaceData.lon - 141.381) < 0.12);
+      const runwayMarkerColor = isSapporoAirport ? '#f97316' : '#f8fafc';
 
       // 1. Subtle Dark Aprons with Clean Gold Perimeter + Apron Designators
       const apronItems =
@@ -2359,18 +2364,18 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
           // ICAO piano keys + aiming point blocks + TDZ barrettes (zoom >= 13.5)
           if (z >= 13.5) {
-            // Draw ten evenly spaced, symmetric piano-key bars. The previous +/-5
-            // loop skipped the center but placed bars unevenly and made them appear
-            // crowded/overlapping at high zoom. Keep them inside the runway width.
-            const keyCount = 10;
-            const keyW = pxFromMeters(1.6, mPerPx, 1.0, 2.6);
-            for (let k = 0; k < keyCount; k++) {
-              const latOffset = ((k + 0.5) / keyCount - 0.5) * (halfEndW * 1.68);
-              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 12, latOffset);
-              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 42, latOffset);
+            const numKeys = 5;
+            const keyW = pxFromMeters(1.8, mPerPx, 1.1, 3.2);
+            for (let k = -numKeys; k <= numKeys; k++) {
+              if (k === 0) continue;
+              // Keep piano keys modest and close to the threshold while preserving
+              // the original geographic rendering/scaling method.
+              const latOffset = (k / numKeys) * (halfEndW * 0.90);
+              const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
+              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 24, latOffset);
               L.polyline([p1, p2], {
                 renderer,
-                color: '#f8fafc',
+                color: runwayMarkerColor,
                 weight: keyW,
                 opacity: 0.88,
                 lineCap: 'butt',
@@ -2392,7 +2397,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
                   );
                   L.polyline([b1, b2], {
                     renderer,
-                    color: '#f8fafc',
+                    color: runwayMarkerColor,
                     weight: pxFromMeters(isAiming ? 4.5 : 2.2, mPerPx, 1.2, 4.2),
                     opacity: 0.85,
                     lineCap: 'butt',
@@ -2415,7 +2420,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
                 iconAnchor: [19, 9],
                 html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
                   z >= 14.5 ? 11 : 9
-                }px;font-weight:800;letter-spacing:0.05em;color:#ffffff;text-shadow:0 0 4px #000,0 1px 3px #000;transform:rotate(${Math.round(
+                }px;font-weight:800;letter-spacing:0.05em;color:${isSapporoAirport ? '#f97316' : '#ffffff'};text-shadow:0 0 4px #000,0 1px 3px #000;transform:rotate(${Math.round(
                   uprightDeg,
                 )}deg);">${rwyNum}</span>`,
               }),
