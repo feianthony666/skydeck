@@ -169,10 +169,13 @@ export interface AirportWeather {
   runways: RunwayCondition[];
 }
 
+export type HazardCategory = 'turbulence' | 'icing' | 'advisory';
+
 export interface SigmetHazard {
   id: string;
   hazard: string;
   qualifier: string;
+  category?: HazardCategory;
   validFrom: string;
   validTo: string;
   baseFt: number | null;
@@ -343,6 +346,117 @@ export interface AirportBoardResponse {
   source: string;
 }
 
+export interface SafetyRecordItem {
+  date: string;
+  type: string;
+  operator: string;
+  fatalities: string;
+  location: string;
+  damage: string;
+  href: string;
+}
+
+export interface SafetyRecordResponse {
+  registration: string;
+  items: SafetyRecordItem[];
+  searchUrl: string;
+  source: string;
+  fetchedAt: number;
+  note?: string;
+}
+
+export interface PastFlightRecord {
+  id: string;
+  flightNumber: string;
+  callsign: string;
+  registration: string;
+  originIata: string;
+  originIcao: string;
+  originName: string;
+  destinationIata: string;
+  destinationIcao: string;
+  destinationName: string;
+  scheduledDep?: number;
+  actualDep?: number;
+  scheduledArr?: number;
+  actualArr?: number;
+  statusText: string;
+  aircraftCode: string;
+  source: string;
+}
+
+export interface LiveFlightUpdateItem {
+  id: string;
+  kind: 'emergency' | 'delay' | 'gate-change' | 'diversion';
+  title: string;
+  subtitle: string;
+  detail: string;
+  badge: string;
+  severity: 'high' | 'medium' | 'info';
+  ts: number;
+  icao24?: string;
+  airportIata?: string;
+}
+
+export interface SpecialLiverySpec {
+  registration: string;
+  airlineIcao: string;
+  airlineName: string;
+  aircraftType: string;
+  liveryName: string;
+  theme: 'un-sdg' | 'retro' | 'floral' | 'cartoon' | 'turtle' | 'dreaming' | 'expo';
+  primaryHex: string;
+  secondaryHex: string;
+  accentHex: string;
+  bellyHex: string;
+  titleText: string;
+  subtitleText: string;
+  badgeText: string;
+  notes: string;
+}
+
+export interface ApproachProcedureSpec {
+  runwayIdent: string;
+  ilsFreqMhz: string;
+  courseDeg: number;
+  glideslopeDeg: number;
+  fafFix: string;
+  fafDistNm: number;
+  fafAltFt: number;
+  ifFix: string;
+  ifDistNm: number;
+  ifAltFt: number;
+  iafFix: string;
+  iafAltFt: number;
+  daFt: number;
+  missedAltFt: number;
+  missedHeadingDeg: number;
+  papiAngleDeg: number;
+  lightingSystem: string;
+}
+
+export interface AirportDataSheet {
+  icao: string;
+  iata: string;
+  name: string;
+  city: string;
+  country: string;
+  elevationFt: number;
+  lat: number;
+  lon: number;
+  transitionAltFt: number;
+  magneticVarDeg: number;
+  atisFreq: string;
+  clearanceFreq: string;
+  groundFreq: string;
+  towerFreq: string;
+  approachFreq: string;
+  eaipUrl: string;
+  chartFoxUrl: string;
+  skyVectorUrl: string;
+  approaches: ApproachProcedureSpec[];
+}
+
 export interface RadarSettings {
   planeSize: number;
   basemapStyle: 'auto' | 'light' | 'dark' | 'osm' | 'satellite';
@@ -352,10 +466,14 @@ export interface RadarSettings {
   showPlaneLabels: boolean;
   showMetarDots: boolean;
   showSigmets: boolean;
+  showTurbHazards: boolean;
+  showIceHazards: boolean;
+  showAdvisoryHazards: boolean;
   showRadar: boolean;
   radarOpacity: number;
   showGroundTraffic: boolean;
   showDrRings: boolean;
+  preferNoWorkerMode?: boolean;
   cfWorkerUrl?: string;
   apiBaseUrl?: string;
 }

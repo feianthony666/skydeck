@@ -3,8 +3,11 @@ import React, {useEffect, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
-import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
-import {resolveAircraftSpec, resolveAirlineLivery} from '../data/aviationCatalog';
+import {
+  resolveAircraftSpec,
+  resolveAirlineLivery,
+  resolveSpecialLivery,
+} from '../data/aviationCatalog';
 import type {
   AirportWeather,
   CockpitCameraPreset,
@@ -16,12 +19,18 @@ import {buildProceduralAircraft, type AircraftModelRefs} from '../three/aircraft
 import {
   createAvionicsTextures,
   drawEicas,
+  drawFmcCdu,
   drawMcp,
   drawNd,
   drawPfd,
   type AvionicsTextureBundle,
 } from '../three/avionicsTextures';
-import {buildAirportApronGroup, buildFlightDeckCockpit} from '../three/cockpitBuilder';
+import {
+  buildAirportApronGroup,
+  buildFlightDeckCockpit,
+  type ApronRefs,
+  type CockpitRefs,
+} from '../three/cockpitBuilder';
 
 interface FlightDeck3DProps {
   flight: LiveFlight | null;
@@ -46,7 +55,7 @@ const CAMERA_PRESETS: Record<
 
 export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   flight,
-  detail,
+  detail = null,
   allFlights,
   groundTraffic,
   nearestWeather,
@@ -86,24 +95,17 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     camera?: THREE.PerspectiveCamera;
     controls?: OrbitControls;
     avionics?: AvionicsTextureBundle;
-    cockpitGroup?: THREE.Group;
+    cockpitRefs?: CockpitRefs;
+    apronRefs?: ApronRefs;
     exteriorRoot?: THREE.Group;
+    extShadow?: THREE.Mesh;
     taxiRoot?: THREE.Group;
     aircraftRefs?: AircraftModelRefs | null;
     taxiModels?: AircraftModelRefs[];
-    realAircraftRoot?: THREE.Group;
-    realAircraftKey: string;
-    realAircraftLoading: boolean;
     maxAnisotropy: number;
     lastAircraftKey: string;
     lastTaxiHash: string;
-  }>({
-    maxAnisotropy: 1,
-    lastAircraftKey: '',
-    lastTaxiHash: '',
-    realAircraftKey: '',
-    realAircraftLoading: false,
-  });
+  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: ''});
 
   // Trigger camera glide when viewMode or cockpitPreset changes
   useEffect(() => {
@@ -114,10 +116,10 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       s.desiredTarget.set(...p.target);
     } else if (viewMode === 'exterior') {
       s.desiredCamPos.set(6.8, 3.1, 7.6);
-      s.desiredTarget.set(0, 0.2, 0);
+      s.desiredTarget.set(0, 0.7, 0);
     } else {
       s.desiredCamPos.set(16, 7.5, 20);
-      s.desiredTarget.set(0, 0.5, -6);
+      s.desiredTarget.set(0, 0.9, -6);
     }
     s.transitionActive = true;
   }, [viewMode, cockpitPreset]);
@@ -202,29 +204,32 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     const avionics = createAvionicsTextures(maxAniso);
 
-    // 1. Cockpit Root
-    const cockpitRefs = buildFlightDeckCockpit(avionics);
+    // 1. Cockpit Root (dynamically rebuilt only when Airbus vs Boeing layout flips)
+    const initialSpec = stateRef.current.flight
+      ? resolveAircraftSpec(stateRef.current.flight.aircraftType)
+      : resolveAircraftSpec('A320');
+    let cockpitRefs = buildFlightDeckCockpit(avionics, Boolean(initialSpec.isAirbus));
     scene.add(cockpitRefs.group);
 
     // 2. Exterior Livery Root
     const exteriorRoot = new THREE.Group();
-    const extShadowGeo = new THREE.CircleGeometry(3.8, 32);
+    const extShadowGeo = new THREE.CircleGeometry(4.2, 32);
     extShadowGeo.rotateX(-Math.PI / 2);
     const extShadowMat = new THREE.MeshBasicMaterial({
       color: '#000000',
       transparent: true,
-      opacity: 0.32,
+      opacity: 0.34,
       depthWrite: false,
     });
     const extShadow = new THREE.Mesh(extShadowGeo, extShadowMat);
-    extShadow.position.y = -1.6;
+    extShadow.position.y = 0.01;
     exteriorRoot.add(extShadow);
     scene.add(exteriorRoot);
 
     // 3. Ground Taxi Root
     const taxiRoot = new THREE.Group();
-    const apron = buildAirportApronGroup();
-    taxiRoot.add(apron.group);
+    const apronRefs = buildAirportApronGroup(maxAniso);
+    taxiRoot.add(apronRefs.group);
     scene.add(taxiRoot);
 
     sceneRefs.current = {
@@ -233,14 +238,13 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       camera,
       controls,
       avionics,
-      cockpitGroup: cockpitRefs.group,
+      cockpitRefs,
+      apronRefs,
       exteriorRoot,
+      extShadow,
       taxiRoot,
       aircraftRefs: null,
       taxiModels: [],
-      realAircraftRoot: exteriorRoot,
-      realAircraftKey: '',
-      realAircraftLoading: false,
       maxAnisotropy: maxAniso,
       lastAircraftKey: '',
       lastTaxiHash: '',
@@ -263,9 +267,13 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
 
     let frameId = 0;
     let lastTime = performance.now();
-    let lastRenderTime = 0;
     let avionicsTimer = 0;
     let disposed = false;
+
+    const skyAirLow = new THREE.Color('#1E3A5F');
+    const skyAirHigh = new THREE.Color('#071022');
+    const skyGround = new THREE.Color('#0B1526');
+    const workSky = new THREE.Color();
 
     const afterDraw = (cb: () => void) => {
       const gl = renderer.getContext() as WebGL2RenderingContext;
@@ -287,40 +295,24 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     const tick = () => {
       if (disposed) return;
       const now = performance.now();
-      if (document.hidden) {
-        lastTime = now;
-        frameId = window.setTimeout(tick, 500);
-        return;
-      }
-      if (!isSoftwareGl && now - lastRenderTime < 1000 / 30) {
-        frameId = requestAnimationFrame(tick);
-        return;
-      }
-      lastRenderTime = now;
       const dt = Math.min(0.1, (now - lastTime) / 1000);
       lastTime = now;
 
       const s = stateRef.current;
       const refs = sceneRefs.current;
 
-      // Toggle scene sub-roots cleanly
-      cockpitRefs.group.visible = s.viewMode === 'cockpit';
-      exteriorRoot.visible = s.viewMode === 'exterior';
-      taxiRoot.visible = s.viewMode === 'taxi';
-
       // Adapt sky & fog to real METAR visibility & flight category
       const wx = s.nearestWeather;
       if (s.viewMode === 'cockpit' && s.flight && !s.flight.onGround) {
         const altRatio = Math.min(1, s.flight.altitudeFt / 36000);
-        const skyColor = new THREE.Color('#1E3A5F').lerp(new THREE.Color('#071022'), altRatio);
-        scene.background = skyColor;
+        workSky.copy(skyAirLow).lerp(skyAirHigh, altRatio);
+        scene.background = workSky;
         const visDensity = wx?.visibilitySm && wx.visibilitySm < 3 ? 0.032 : 0.006;
-        (scene.fog as THREE.FogExp2).color.copy(skyColor);
+        (scene.fog as THREE.FogExp2).color.copy(workSky);
         (scene.fog as THREE.FogExp2).density = visDensity;
       } else {
-        const bg = new THREE.Color('#0B1526');
-        scene.background = bg;
-        (scene.fog as THREE.FogExp2).color.copy(bg);
+        scene.background = skyGround;
+        (scene.fog as THREE.FogExp2).color.copy(skyGround);
         (scene.fog as THREE.FogExp2).density = wx?.visibilitySm && wx.visibilitySm < 3 ? 0.022 : 0.006;
       }
 
@@ -341,28 +333,49 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       }
       controls.update();
 
-      // Rebuild exterior aircraft when selected flight / livery / gear changes
       const activeFlight = s.flight;
       if (activeFlight) {
+        const regStr = s.detail?.registration || activeFlight.registration || '';
+        const typeStr = s.detail?.aircraftCode || activeFlight.aircraftType || 'A320';
+        const airlineStr = s.detail?.airlineIcao || activeFlight.airlineIcao || '';
+        const spec = resolveAircraftSpec(typeStr);
+        const targetAirbus = Boolean(spec.isAirbus);
+
+        // Rebuild flight deck architecture if switching Airbus <-> Boeing airframe
+        if (cockpitRefs.isAirbus !== targetAirbus) {
+          scene.remove(cockpitRefs.group);
+          cockpitRefs.dispose();
+          cockpitRefs = buildFlightDeckCockpit(avionics, targetAirbus);
+          scene.add(cockpitRefs.group);
+          refs.cockpitRefs = cockpitRefs;
+        }
+
+        // Toggle scene sub-roots cleanly
+        cockpitRefs.group.visible = s.viewMode === 'cockpit';
+        exteriorRoot.visible = s.viewMode === 'exterior';
+        taxiRoot.visible = s.viewMode === 'taxi';
+
+        // Rebuild exterior aircraft when selected flight / livery / gear / reg changes
         const gearDown = activeFlight.onGround || activeFlight.altitudeFt < 2600;
-        const aircraftCode = s.detail?.aircraftCode || activeFlight.aircraftType;
-        const airlineCode = s.detail?.airlineIcao || activeFlight.airlineIcao;
-        const acKey = `${activeFlight.icao24}-${airlineCode}-${aircraftCode}-${gearDown}-${s.detail?.registration || activeFlight.registration}`;
+        const acKey = `${activeFlight.icao24}-${airlineStr}-${typeStr}-${regStr}-${gearDown}`;
         if (acKey !== refs.lastAircraftKey) {
           if (refs.aircraftRefs) {
             exteriorRoot.remove(refs.aircraftRefs.group);
             refs.aircraftRefs.dispose();
           }
-          const spec = resolveAircraftSpec(aircraftCode);
-          const livery = resolveAirlineLivery(airlineCode, activeFlight.callsign);
+          const livery = resolveAirlineLivery(airlineStr, activeFlight.callsign);
+          const specialLivery = resolveSpecialLivery(regStr, activeFlight.callsign);
           const model = buildProceduralAircraft(
             spec,
             livery,
-            s.detail?.registration || activeFlight.registration,
+            regStr,
             refs.maxAnisotropy,
             gearDown,
-            s.detail?.photo?.url,
+            specialLivery,
           );
+          model.group.position.y = gearDown ? -model.groundContactOffsetY : 0.85;
+          extShadow.position.y = 0.01;
+          extShadow.visible = gearDown;
           exteriorRoot.add(model.group);
           refs.aircraftRefs = model;
           refs.lastAircraftKey = acKey;
@@ -370,7 +383,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
 
         // Animate exterior aircraft attitude, spinning turbofans & strobes
         if (refs.aircraftRefs) {
-          const pitchTarget = THREE.MathUtils.clamp(activeFlight.verticalRateFpm / 4500, -0.22, 0.25);
+          const pitchTarget = activeFlight.onGround
+            ? 0
+            : THREE.MathUtils.clamp(activeFlight.verticalRateFpm / 4500, -0.22, 0.25);
           refs.aircraftRefs.group.rotation.x = THREE.MathUtils.damp(
             refs.aircraftRefs.group.rotation.x,
             pitchTarget,
@@ -388,16 +403,43 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
 
         // Animate cockpit flight controls, outside horizon/cloud altitude & refresh EFIS textures at ~5Hz
         const throttlePitch = activeFlight.onGround ? 0.2 : -0.35;
-        cockpitRefs.throttleLeft.rotation.x = THREE.MathUtils.damp(cockpitRefs.throttleLeft.rotation.x, throttlePitch, 5, dt);
-        cockpitRefs.throttleRight.rotation.x = THREE.MathUtils.damp(cockpitRefs.throttleRight.rotation.x, throttlePitch, 5, dt);
+        cockpitRefs.throttleLeft.rotation.x = THREE.MathUtils.damp(
+          cockpitRefs.throttleLeft.rotation.x,
+          throttlePitch,
+          5,
+          dt,
+        );
+        cockpitRefs.throttleRight.rotation.x = THREE.MathUtils.damp(
+          cockpitRefs.throttleRight.rotation.x,
+          throttlePitch,
+          5,
+          dt,
+        );
         const yokePitch = THREE.MathUtils.clamp(-activeFlight.verticalRateFpm / 8000, -0.14, 0.14);
-        cockpitRefs.yokeLeft.rotation.x = THREE.MathUtils.damp(cockpitRefs.yokeLeft.rotation.x, yokePitch, 5, dt);
-        cockpitRefs.yokeRight.rotation.x = THREE.MathUtils.damp(cockpitRefs.yokeRight.rotation.x, yokePitch, 5, dt);
+        cockpitRefs.yokeLeft.rotation.x = THREE.MathUtils.damp(
+          cockpitRefs.yokeLeft.rotation.x,
+          yokePitch,
+          5,
+          dt,
+        );
+        cockpitRefs.yokeRight.rotation.x = THREE.MathUtils.damp(
+          cockpitRefs.yokeRight.rotation.x,
+          yokePitch,
+          5,
+          dt,
+        );
 
-        // Move exterior horizon terrain below cockpit proportionally to live altitude
-        const terrainDrop = activeFlight.onGround ? 1.2 : THREE.MathUtils.clamp(2 + activeFlight.altitudeFt / 900, 2, 34);
-        cockpitRefs.outsideWorld.position.y = THREE.MathUtils.damp(cockpitRefs.outsideWorld.position.y, -terrainDrop + 14, 3, dt);
-        cockpitRefs.cloudLayer.visible = !activeFlight.onGround || Boolean(wx?.ceilingFt && wx.ceilingFt < 6000);
+        const terrainDrop = activeFlight.onGround
+          ? 1.2
+          : THREE.MathUtils.clamp(2 + activeFlight.altitudeFt / 900, 2, 34);
+        cockpitRefs.outsideWorld.position.y = THREE.MathUtils.damp(
+          cockpitRefs.outsideWorld.position.y,
+          -terrainDrop + 14,
+          3,
+          dt,
+        );
+        cockpitRefs.cloudLayer.visible =
+          !activeFlight.onGround || Boolean(wx?.ceilingFt && wx.ceilingFt < 6000);
         const cloudDriftSpeed = Math.max(0.5, activeFlight.groundSpeedKts * 0.025);
         for (const puff of cockpitRefs.cloudLayer.children) {
           puff.position.z += dt * cloudDriftSpeed;
@@ -412,13 +454,23 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           drawNd(avionics, activeFlight, s.allFlights);
           drawEicas(avionics, activeFlight);
           drawMcp(avionics, activeFlight);
+          drawFmcCdu(avionics.fmcLeftCanvas, avionics.fmcLeftTexture, activeFlight, true);
+          drawFmcCdu(avionics.fmcRightCanvas, avionics.fmcRightTexture, activeFlight, false);
         }
+      } else {
+        cockpitRefs.group.visible = s.viewMode === 'cockpit';
+        exteriorRoot.visible = s.viewMode === 'exterior';
+        taxiRoot.visible = s.viewMode === 'taxi';
       }
 
-      // Sync 3D Ground Taxi Traffic on airport apron
+      // Sync 3D Ground Taxi Traffic & Radar Scanner Rotation on airport apron
       if (s.viewMode === 'taxi') {
+        apronRefs.radarDish.rotation.y += dt * 1.1;
+
         const taxiSlice = (s.groundTraffic.length > 0 ? s.groundTraffic : s.flight ? [s.flight] : []).slice(0, 8);
-        const taxiHash = taxiSlice.map((t) => `${t.icao24}-${t.aircraftType}-${t.airlineIcao}`).join('|');
+        const taxiHash = taxiSlice
+          .map((t) => `${t.icao24}-${t.aircraftType}-${t.airlineIcao}-${t.registration}`)
+          .join('|');
         if (taxiHash !== refs.lastTaxiHash) {
           for (const old of refs.taxiModels ?? []) {
             taxiRoot.remove(old.group);
@@ -431,13 +483,20 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           taxiSlice.forEach((tf, idx) => {
             const spec = resolveAircraftSpec(tf.aircraftType);
             const liv = resolveAirlineLivery(tf.airlineIcao, tf.callsign);
-            const m = buildProceduralAircraft(spec, liv, tf.registration, refs.maxAnisotropy, true);
+            const spLiv = resolveSpecialLivery(tf.registration, tf.callsign);
+            const m = buildProceduralAircraft(
+              spec,
+              liv,
+              tf.registration,
+              refs.maxAnisotropy,
+              true,
+              spLiv,
+            );
             const dz = -(tf.lat - anchorLat) * 9000;
             const dx = (tf.lon - anchorLon) * 9000 * Math.cos(THREE.MathUtils.degToRad(anchorLat));
-            // Clamp inside visible apron radius while preserving real relative geometry
             const clampedX = idx === 0 ? 0 : THREE.MathUtils.clamp(dx, -65, 65);
             const clampedZ = idx === 0 ? 0 : THREE.MathUtils.clamp(dz, -85, 65);
-            m.group.position.set(clampedX, 0.9, clampedZ);
+            m.group.position.set(clampedX, -m.groundContactOffsetY, clampedZ);
             m.group.rotation.y = THREE.MathUtils.degToRad(-tf.trueTrackDeg);
             taxiRoot.add(m.group);
             created.push(m);
@@ -467,13 +526,10 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored);
       controls.dispose();
       cockpitRefs.dispose();
-      apron.dispose();
+      apronRefs.dispose();
       sceneRefs.current.aircraftRefs?.dispose();
       for (const tm of sceneRefs.current.taxiModels ?? []) tm.dispose();
-      avionics.pfdTexture.dispose();
-      avionics.ndTexture.dispose();
-      avionics.eicasTexture.dispose();
-      avionics.mcpTexture.dispose();
+      avionics.dispose();
       extShadowGeo.dispose();
       extShadowMat.dispose();
       renderer.dispose();
@@ -483,7 +539,12 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     };
   }, []);
 
-  const livery = flight ? resolveAirlineLivery(flight.airlineIcao, flight.callsign) : null;
+  const reg = detail?.registration || flight?.registration || '';
+  const typeDisplay = detail?.aircraftCode || flight?.aircraftType || '';
+  const airlineIcao = detail?.airlineIcao || flight?.airlineIcao || '';
+  const livery = flight ? resolveAirlineLivery(airlineIcao, flight.callsign) : null;
+  const specialLivery = flight ? resolveSpecialLivery(reg, flight.callsign) : null;
+  const spec = flight ? resolveAircraftSpec(typeDisplay) : null;
 
   return (
     <div className="relative w-full h-full min-h-[420px] rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-[#0B1526]">
@@ -494,15 +555,26 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       <div className="pointer-events-none absolute top-4 left-4 z-10 flex flex-col gap-1 rounded-lg bg-[#080D16]/90 border border-slate-800 px-3.5 py-2.5 text-xs">
         {flight ? (
           <>
-            <div className="flex items-center gap-2 font-mono font-semibold text-slate-100">
+            <div className="flex flex-wrap items-center gap-2 font-mono font-semibold text-slate-100">
               <span className="text-sky-400">{flight.callsign}</span>
               <span aria-hidden="true" className="text-slate-500">·</span>
-              <span>{flight.aircraftType}</span>
+              <span>{typeDisplay}</span>
+              {reg && (
+                <>
+                  <span aria-hidden="true" className="text-slate-500">·</span>
+                  <span className="text-amber-300">{reg}</span>
+                </>
+              )}
               {livery && (
                 <>
                   <span aria-hidden="true" className="text-slate-500">·</span>
                   <span className="text-slate-300 font-sans font-medium">{livery.name}</span>
                 </>
+              )}
+              {specialLivery && (
+                <span className="rounded bg-sky-500/20 border border-sky-400/50 px-1.5 py-0.5 text-[10px] font-mono text-sky-300">
+                  {specialLivery.badgeText}
+                </span>
               )}
             </div>
             <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400 tabular-nums">
@@ -511,6 +583,12 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
               <span>{flight.groundSpeedKts} KT</span>
               <span aria-hidden="true">/</span>
               <span>HDG {String(Math.round(flight.trueTrackDeg)).padStart(3, '0')}°</span>
+              {spec && (
+                <>
+                  <span aria-hidden="true">/</span>
+                  <span>{spec.isAirbus ? 'AIRBUS SIDESTICK' : 'BOEING YOKE'}</span>
+                </>
+              )}
               {flight.origin && flight.destination && (
                 <>
                   <span aria-hidden="true">/</span>
@@ -518,9 +596,16 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
                 </>
               )}
             </div>
+            {specialLivery && (
+              <div className="text-[10.5px] font-sans text-sky-300/90 mt-0.5">
+                {specialLivery.liveryName}
+              </div>
+            )}
           </>
         ) : (
-          <div className="text-slate-300 font-medium">Select an aircraft on the radar to drive 3D EFIS & livery view</div>
+          <div className="text-slate-300 font-medium">
+            Select an aircraft on the radar to drive 3D EFIS &amp; livery view
+          </div>
         )}
       </div>
 

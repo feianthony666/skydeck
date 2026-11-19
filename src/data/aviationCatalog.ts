@@ -1,3 +1,5 @@
+import type {AirportDataSheet, ApproachProcedureSpec, SpecialLiverySpec} from '../types/aviation';
+
 export interface AirportSpec {
   icao: string;
   iata: string;
@@ -39,10 +41,28 @@ export interface AirlineLivery {
   titleColor: string;
 }
 
+export type AircraftAirframeSubtype =
+  | 'a380'
+  | 'b747'
+  | 'b787'
+  | 'a350'
+  | 'b777'
+  | 'a330'
+  | 'a320'
+  | 'b737'
+  | 'c919'
+  | 'tTail'
+  | 'bizjet'
+  | 'turboprop'
+  | 'fighter'
+  | 'milcargo';
+
 export interface AircraftGeometrySpec {
   code: string;
   name: string;
-  category: 'widebody' | 'narrowbody' | 'regional' | 'turboprop' | 'military' | 'business';
+  category: 'widebody' | 'narrowbody' | 'regional';
+  subtype?: AircraftAirframeSubtype;
+  isAirbus?: boolean;
   lengthScale: number;
   wingspanScale: number;
   fuselageRadius: number;
@@ -54,11 +74,11 @@ export interface AircraftGeometrySpec {
 export const REGION_PRESETS: RegionPreset[] = [
   {
     id: 'global',
-    label: 'Global',
-    subtitle: 'All live ADS-B sectors worldwide',
-    center: [20, 0],
-    zoom: 3,
-    bounds: {lamin: -85, lomin: -180, lamax: 85, lomax: 180},
+    label: 'Global Live Radar',
+    subtitle: 'Worldwide · North America · Europe · Asia-Pacific',
+    center: [24.0, 15.0],
+    zoom: 2,
+    bounds: {lamin: -60.0, lomin: -179.9, lamax: 75.0, lomax: 179.9},
   },
   {
     id: 'china-east',
@@ -582,18 +602,189 @@ export const AIRLINE_LIVERIES: Record<string, AirlineLivery> = {
   AFR: {icao: 'AFR', iata: 'AF', name: 'Air France', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#DC2626', bellyHex: '#E2E8F0', titleColor: '#1E3A8A'},
   UAE: {icao: 'UAE', iata: 'EK', name: 'Emirates', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#16A34A', bellyHex: '#E2E8F0', titleColor: '#B45309'},
   SIA: {icao: 'SIA', iata: 'SQ', name: 'Singapore Airlines', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#F59E0B', bellyHex: '#E2E8F0', titleColor: '#1E3A8A'},
-  QFA: {icao: 'QFA', iata: 'QF', name: 'Qantas', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#F8FAFC', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
-  VIR: {icao: 'VIR', iata: 'VS', name: 'Virgin Atlantic', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
-  ACA: {icao: 'ACA', iata: 'AC', name: 'Air Canada', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
-  SAS: {icao: 'SAS', iata: 'SK', name: 'SAS', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#38BDF8', bellyHex: '#CBD5E1', titleColor: '#1E3A8A'},
-  SWR: {icao: 'SWR', iata: 'LX', name: 'Swiss', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#991B1B'},
-  TAP: {icao: 'TAP', iata: 'TP', name: 'TAP Air Portugal', fuselageHex: '#F8FAFC', tailHex: '#16A34A', accentHex: '#DC2626', bellyHex: '#CBD5E1', titleColor: '#166534'},
-  THA: {icao: 'THA', iata: 'TG', name: 'Thai Airways', fuselageHex: '#A855F7', tailHex: '#7E22CE', accentHex: '#FACC15', bellyHex: '#D8B4FE', titleColor: '#581C87'},
-  TGW: {icao: 'TGW', iata: 'TR', name: 'Scoot', fuselageHex: '#FDE047', tailHex: '#FACC15', accentHex: '#1E293B', bellyHex: '#FEF3C7', titleColor: '#713F12'},
-  QTR: {icao: 'QTR', iata: 'QR', name: 'Qatar Airways', fuselageHex: '#F8FAFC', tailHex: '#7F1D1D', accentHex: '#991B1B', bellyHex: '#CBD5E1', titleColor: '#7F1D1D'},
-  ETD: {icao: 'ETD', iata: 'EY', name: 'Etihad Airways', fuselageHex: '#F8FAFC', tailHex: '#9A3412', accentHex: '#C2410C', bellyHex: '#CBD5E1', titleColor: '#7C2D12'},
-  KLM: {icao: 'KLM', iata: 'KL', name: 'KLM', fuselageHex: '#F8FAFC', tailHex: '#38BDF8', accentHex: '#0284C7', bellyHex: '#CBD5E1', titleColor: '#0369A1'},
+  KLM: {icao: 'KLM', iata: 'KL', name: 'KLM Royal Dutch', fuselageHex: '#F8FAFC', tailHex: '#0EA5E9', accentHex: '#0284C7', bellyHex: '#CBD5E1', titleColor: '#0369A1'},
+  QFA: {icao: 'QFA', iata: 'QF', name: 'Qantas', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#E2E8F0', bellyHex: '#CBD5E1', titleColor: '#1E293B'},
+  EVA: {icao: 'EVA', iata: 'BR', name: 'EVA Air', fuselageHex: '#F8FAFC', tailHex: '#15803D', accentHex: '#EA580C', bellyHex: '#E2E8F0', titleColor: '#14532D'},
+  CAL: {icao: 'CAL', iata: 'CI', name: 'China Airlines', fuselageHex: '#F8FAFC', tailHex: '#DB2777', accentHex: '#2563EB', bellyHex: '#E2E8F0', titleColor: '#1E3A8A'},
+  THY: {icao: 'THY', iata: 'TK', name: 'Turkish Airlines', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#1E293B', bellyHex: '#CBD5E1', titleColor: '#0F172A'},
+  SWR: {icao: 'SWR', iata: 'LX', name: 'SWISS', fuselageHex: '#F8FAFC', tailHex: '#DC2626', accentHex: '#FFFFFF', bellyHex: '#CBD5E1', titleColor: '#0F172A'},
+  RYR: {icao: 'RYR', iata: 'FR', name: 'Ryanair', fuselageHex: '#F8FAFC', tailHex: '#1E3A8A', accentHex: '#FACC15', bellyHex: '#1E3A8A', titleColor: '#1E3A8A'},
 };
+
+export const SPECIAL_LIVERIES: Record<string, SpecialLiverySpec> = {
+  'B-1356': {
+    registration: 'B-1356',
+    airlineIcao: 'CXA',
+    airlineName: 'XiamenAir',
+    aircraftType: 'B789',
+    liveryName: 'United Dream · UN SDGs Special',
+    theme: 'un-sdg',
+    primaryHex: '#0284C7',
+    secondaryHex: '#0369A1',
+    accentHex: '#38BDF8',
+    bellyHex: '#E0F2FE',
+    titleText: 'UNITED DREAM',
+    subtitleText: 'XIAMENAIR · SUSTAINABLE DEVELOPMENT GOALS',
+    badgeText: 'UN SDGs',
+    notes: 'Boeing 787-9 Dreamliner in United Nations Sustainable Development Goals blue wave & 17-color emblem scheme.',
+  },
+  'B-1566': {
+    registration: 'B-1566',
+    airlineIcao: 'CXA',
+    airlineName: 'XiamenAir',
+    aircraftType: 'B788',
+    liveryName: 'United We Dream · UN',
+    theme: 'un-sdg',
+    primaryHex: '#0EA5E9',
+    secondaryHex: '#0369A1',
+    accentHex: '#FACC15',
+    bellyHex: '#E2E8F0',
+    titleText: 'UNITED WE DREAM',
+    subtitleText: 'XIAMENAIR · UN PARTNERSHIP',
+    badgeText: 'UN',
+    notes: 'XiamenAir Boeing 787-8 commemorative UN cooperation scheme.',
+  },
+  'B-919A': {
+    registration: 'B-919A',
+    airlineIcao: 'CES',
+    airlineName: 'China Eastern',
+    aircraftType: 'C919',
+    liveryName: 'World First C919 Launch',
+    theme: 'retro',
+    primaryHex: '#1D4ED8',
+    secondaryHex: '#DC2626',
+    accentHex: '#F59E0B',
+    bellyHex: '#F1F5F9',
+    titleText: 'CHINA EASTERN',
+    subtitleText: 'WORLD FIRST C919 · B-919A',
+    badgeText: 'FIRST C919',
+    notes: 'Inaugural COMAC C919 delivery airframe with commemorative C919 emblem forward of wings.',
+  },
+  'B-650E': {
+    registration: 'B-650E',
+    airlineIcao: 'CES',
+    airlineName: 'China Eastern',
+    aircraftType: 'A333',
+    liveryName: 'Disney Toy Story Express',
+    theme: 'cartoon',
+    primaryHex: '#0284C7',
+    secondaryHex: '#F59E0B',
+    accentHex: '#EF4444',
+    bellyHex: '#BAE6FD',
+    titleText: 'CHINA EASTERN',
+    subtitleText: 'SHANGHAI DISNEY RESORT',
+    badgeText: 'TOY STORY',
+    notes: 'China Eastern Airbus A330 special resort theme airframe.',
+  },
+  JA381A: {
+    registration: 'JA381A',
+    airlineIcao: 'ANA',
+    airlineName: 'All Nippon Airways',
+    aircraftType: 'A388',
+    liveryName: 'FLYING HONU · Lani Sky',
+    theme: 'turtle',
+    primaryHex: '#0284C7',
+    secondaryHex: '#0EA5E9',
+    accentHex: '#E0F2FE',
+    bellyHex: '#F8FAFC',
+    titleText: 'FLYING HONU',
+    subtitleText: 'ANA · HONOLULU SKY TURTLE',
+    badgeText: 'LANI A380',
+    notes: 'ANA Airbus A380 Hawaiian green sea turtle Lani ANA Blue scheme.',
+  },
+  JA873A: {
+    registration: 'JA873A',
+    airlineIcao: 'ANA',
+    airlineName: 'All Nippon Airways',
+    aircraftType: 'B789',
+    liveryName: 'STAR WARS · R2-D2 Jet',
+    theme: 'cartoon',
+    primaryHex: '#1D4ED8',
+    secondaryHex: '#1E293B',
+    accentHex: '#38BDF8',
+    bellyHex: '#E2E8F0',
+    titleText: 'STAR WARS',
+    subtitleText: 'ANA · R2-D2 SPECIAL',
+    badgeText: 'R2-D2',
+    notes: 'ANA Boeing 787-9 R2-D2 Star Wars blue-and-silver fuselage panels.',
+  },
+  'B-16722': {
+    registration: 'B-16722',
+    airlineIcao: 'EVA',
+    airlineName: 'EVA Air',
+    aircraftType: 'B77W',
+    liveryName: 'Shining Star Special',
+    theme: 'floral',
+    primaryHex: '#15803D',
+    secondaryHex: '#EC4899',
+    accentHex: '#FDE047',
+    bellyHex: '#F8FAFC',
+    titleText: 'EVA AIR',
+    subtitleText: 'SHINING STAR B777-300ER',
+    badgeText: 'SHINING STAR',
+    notes: 'EVA Air Boeing 777-300ER special starlight ribbon livery.',
+  },
+  'G-BYGC': {
+    registration: 'G-BYGC',
+    airlineIcao: 'BAW',
+    airlineName: 'British Airways',
+    aircraftType: 'B744',
+    liveryName: 'BOAC Centenary Retro',
+    theme: 'retro',
+    primaryHex: '#1E3A8A',
+    secondaryHex: '#F59E0B',
+    accentHex: '#C2410C',
+    bellyHex: '#CBD5E1',
+    titleText: 'B·O·A·C',
+    subtitleText: 'BRITISH OVERSEAS AIRWAYS',
+    badgeText: 'BOAC RETRO',
+    notes: 'British Airways Boeing 747-400 in classic BOAC gold Speedbird & navy cheatline.',
+  },
+  'D-ABYT': {
+    registration: 'D-ABYT',
+    airlineIcao: 'DLH',
+    airlineName: 'Lufthansa',
+    aircraftType: 'B748',
+    liveryName: '1970s Crane Retrojet',
+    theme: 'retro',
+    primaryHex: '#0F172A',
+    secondaryHex: '#FACC15',
+    accentHex: '#1D4ED8',
+    bellyHex: '#CBD5E1',
+    titleText: 'Lufthansa',
+    subtitleText: 'HERITAGE B747-8i',
+    badgeText: 'RETRO 747-8',
+    notes: 'Lufthansa Boeing 747-8i featuring bare-metal belly, blue cheatline, and vintage yellow parabola.',
+  },
+  'VH-ZNJ': {
+    registration: 'VH-ZNJ',
+    airlineIcao: 'QFA',
+    airlineName: 'Qantas',
+    aircraftType: 'B789',
+    liveryName: 'Emily Kame Kngwarreye · Yam Dreaming',
+    theme: 'dreaming',
+    primaryHex: '#16A34A',
+    secondaryHex: '#F59E0B',
+    accentHex: '#FFFFFF',
+    bellyHex: '#0F172A',
+    titleText: 'QANTAS',
+    subtitleText: 'FLYING ART SERIES',
+    badgeText: 'YAM DREAMING',
+    notes: 'Qantas Boeing 787-9 Indigenous Flying Art Dreamliner.',
+  },
+};
+
+export function resolveSpecialLivery(registration?: string, callsign?: string): SpecialLiverySpec | null {
+  const norm = (registration || '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  if (norm && SPECIAL_LIVERIES[norm]) return SPECIAL_LIVERIES[norm];
+  const noDash = norm.replace(/-/g, '');
+  for (const [k, spec] of Object.entries(SPECIAL_LIVERIES)) {
+    if (k.replace(/-/g, '') === noDash && noDash.length >= 4) return spec;
+  }
+  const cs = (callsign || '').trim().toUpperCase();
+  if (cs && SPECIAL_LIVERIES[cs]) return SPECIAL_LIVERIES[cs];
+  return null;
+}
 
 export function resolveAirlineLivery(airlineIcao: string, callsign?: string): AirlineLivery {
   const code = (airlineIcao || callsign?.slice(0, 3) || '').toUpperCase();
@@ -614,35 +805,165 @@ export function resolveAirlineLivery(airlineIcao: string, callsign?: string): Ai
 
 export function resolveAircraftSpec(typeCode: string): AircraftGeometrySpec {
   const t = (typeCode || 'A320').toUpperCase();
-  if (/^(A388|A389|A38)/.test(t)) {
-    return {code: t, name: 'Airbus A380', category: 'widebody', lengthScale: 1.48, wingspanScale: 1.48, fuselageRadius: 0.60, engines: 4, winglets: true};
+  if (/^A38/.test(t)) {
+    return {code: t, name: 'Airbus A380-800', category: 'widebody', subtype: 'a380', isAirbus: true, lengthScale: 1.42, wingspanScale: 1.46, fuselageRadius: 0.62, engines: 4, winglets: true};
   }
-  if (/^(B748|B747|B744|B743|B742)/.test(t)) {
-    return {code: t, name: 'Boeing 747', category: 'widebody', lengthScale: 1.44, wingspanScale: 1.42, fuselageRadius: 0.56, engines: 4, winglets: true};
+  if (/^B74/.test(t)) {
+    return {code: t, name: 'Boeing 747', category: 'widebody', subtype: 'b747', isAirbus: false, lengthScale: 1.38, wingspanScale: 1.34, fuselageRadius: 0.54, engines: 4, winglets: true};
   }
-  if (/^(A359|A350|A351|A35)/.test(t)) {
-    return {code: t, name: t, category: 'widebody', lengthScale: 1.30, wingspanScale: 1.34, fuselageRadius: 0.46, engines: 2, winglets: true};
+  if (/^B78/.test(t)) {
+    return {code: t, name: `Boeing ${t}`, category: 'widebody', subtype: 'b787', isAirbus: false, lengthScale: 1.24, wingspanScale: 1.3, fuselageRadius: 0.45, engines: 2, winglets: true};
   }
-  if (/^(B789|B788|B787|B78)/.test(t)) {
-    return {code: t, name: t, category: 'widebody', lengthScale: 1.28, wingspanScale: 1.32, fuselageRadius: 0.46, engines: 2, winglets: true};
+  if (/^A35/.test(t)) {
+    return {code: t, name: `Airbus ${t}`, category: 'widebody', subtype: 'a350', isAirbus: true, lengthScale: 1.28, wingspanScale: 1.32, fuselageRadius: 0.47, engines: 2, winglets: true};
   }
-  if (/^(B773|B772|B77|A333|A332|A330|A343|A346|B764|B763|B762)/.test(t)) {
-    return {code: t, name: t, category: 'widebody', lengthScale: 1.24, wingspanScale: 1.28, fuselageRadius: 0.46, engines: /^(A34|A346)/.test(t) ? 4 : 2, winglets: true};
+  if (/^B77/.test(t)) {
+    return {code: t, name: `Boeing ${t}`, category: 'widebody', subtype: 'b777', isAirbus: false, lengthScale: 1.3, wingspanScale: 1.32, fuselageRadius: 0.48, engines: 2, winglets: true};
   }
-  if (/^(C919|A32|A20|A21|A31|B73|B38|B39)/.test(t)) {
-    return {code: t, name: t === 'C919' ? 'COMAC C919' : t, category: 'narrowbody', lengthScale: 1.0, wingspanScale: 1.0, fuselageRadius: 0.34, engines: 2, winglets: true};
+  if (/^(A33|A34|B76)/.test(t)) {
+    const isAb = t.startsWith('A');
+    return {code: t, name: t, category: 'widebody', subtype: 'a330', isAirbus: isAb, lengthScale: 1.2, wingspanScale: 1.24, fuselageRadius: 0.44, engines: t.startsWith('A34') ? 4 : 2, winglets: true};
   }
-  if (/^(ARJ|C909|CRJ|E17|E19|ERJ)/.test(t)) {
-    return {code: t, name: t.startsWith('ARJ') || t.startsWith('C909') ? 'COMAC ARJ21' : t, category: 'regional', lengthScale: 0.82, wingspanScale: 0.84, fuselageRadius: 0.27, engines: 2, winglets: true, tTail: /ARJ|C909|CRJ/.test(t)};
+  if (/^C919/.test(t)) {
+    return {code: t, name: 'COMAC C919', category: 'narrowbody', subtype: 'c919', isAirbus: true, lengthScale: 1.02, wingspanScale: 1.02, fuselageRadius: 0.35, engines: 2, winglets: true};
   }
-  if (/^(AT4|AT7|DH|DHC|SB2|SF34|JS32|JS41)/.test(t)) {
-    return {code: t, name: t, category: 'turboprop', lengthScale: 0.78, wingspanScale: 0.82, fuselageRadius: 0.25, engines: 2, winglets: false};
+  if (/^(A31|A32|A20|A21)/.test(t)) {
+    return {code: t, name: `Airbus ${t}`, category: 'narrowbody', subtype: 'a320', isAirbus: true, lengthScale: 1.0, wingspanScale: 1.0, fuselageRadius: 0.34, engines: 2, winglets: true};
   }
-  if (/^(C1|C17|C5|C130|H|P3|T|F)/.test(t)) {
-    return {code: t, name: t, category: 'military', lengthScale: 1.12, wingspanScale: 1.18, fuselageRadius: 0.42, engines: 4, winglets: false};
+  if (/^(B73|B38|B39|B75)/.test(t)) {
+    return {code: t, name: `Boeing ${t}`, category: 'narrowbody', subtype: 'b737', isAirbus: false, lengthScale: 1.0, wingspanScale: 0.99, fuselageRadius: 0.33, engines: 2, winglets: true};
   }
-  if (/^(G|LJ|C5|C5|C7|BE|PA|TBM|PC12|SR)/.test(t)) {
-    return {code: t, name: t, category: 'business', lengthScale: 0.68, wingspanScale: 0.68, fuselageRadius: 0.22, engines: 2, winglets: true};
+  if (/^(AT4|AT7|DH8|DHC|MA60|SF34|PC12)/.test(t)) {
+    return {code: t, name: t, category: 'regional', subtype: 'turboprop', isAirbus: false, lengthScale: 0.78, wingspanScale: 0.92, fuselageRadius: 0.25, engines: 2, winglets: false, tTail: /AT[47]|DH8/.test(t)};
   }
-  return {code: t, name: t, category: 'narrowbody', lengthScale: 1.0, wingspanScale: 1.0, fuselageRadius: 0.34, engines: 2, winglets: true};
+  if (/^(C17|C130|C30J|Y20|A400|IL76)/.test(t)) {
+    return {code: t, name: t, category: 'widebody', subtype: 'milcargo', isAirbus: false, lengthScale: 1.18, wingspanScale: 1.26, fuselageRadius: 0.48, engines: 4, winglets: false, tTail: true};
+  }
+  if (/^(F16|F18|F22|F35|J20|EUFI)/.test(t)) {
+    return {code: t, name: t, category: 'regional', subtype: 'fighter', isAirbus: false, lengthScale: 0.62, wingspanScale: 0.48, fuselageRadius: 0.19, engines: 2, winglets: false};
+  }
+  if (/^(GLF|G65|GLEX|CL6|FA7|C68|PC24)/.test(t)) {
+    return {code: t, name: t, category: 'regional', subtype: 'bizjet', isAirbus: false, lengthScale: 0.76, wingspanScale: 0.78, fuselageRadius: 0.23, engines: 2, winglets: true, tTail: true};
+  }
+  if (/^(ARJ|C909|CRJ|E17|E19|ERJ|MD8|MD9)/.test(t)) {
+    const tTail = /ARJ|C909|CRJ|MD/.test(t);
+    return {code: t, name: t.startsWith('ARJ') || t.startsWith('C909') ? 'COMAC ARJ21' : t, category: 'regional', subtype: tTail ? 'tTail' : 'a320', isAirbus: false, lengthScale: 0.84, wingspanScale: 0.85, fuselageRadius: 0.27, engines: 2, winglets: true, tTail};
+  }
+  return {code: t, name: t, category: 'narrowbody', subtype: 'a320', isAirbus: true, lengthScale: 1.0, wingspanScale: 1.0, fuselageRadius: 0.34, engines: 2, winglets: true};
+}
+
+const KNOWN_COM_FREQS: Record<
+  string,
+  {atis: string; cld: string; gnd: string; twr: string; app: string; transAlt: number; magVar: number}
+> = {
+  ZBAA: {atis: '127.600', cld: '121.650', gnd: '121.750', twr: '118.100', app: '119.700', transAlt: 9840, magVar: -7.2},
+  ZBAD: {atis: '128.850', cld: '121.850', gnd: '121.625', twr: '118.450', app: '124.550', transAlt: 9840, magVar: -7.1},
+  ZSPD: {atis: '127.850', cld: '121.950', gnd: '121.650', twr: '118.800', app: '119.200', transAlt: 9840, magVar: -6.1},
+  ZSSS: {atis: '126.250', cld: '121.750', gnd: '121.600', twr: '118.100', app: '120.300', transAlt: 9840, magVar: -6.0},
+  ZGGG: {atis: '128.600', cld: '121.850', gnd: '121.700', twr: '118.150', app: '119.750', transAlt: 9840, magVar: -3.2},
+  VHHH: {atis: '128.200', cld: '129.900', gnd: '121.600', twr: '118.200', app: '119.100', transAlt: 9000, magVar: -3.4},
+  RJTT: {atis: '128.800', cld: '121.825', gnd: '121.700', twr: '118.100', app: '119.100', transAlt: 14000, magVar: -7.8},
+  RKSI: {atis: '128.200', cld: '121.000', gnd: '121.400', twr: '118.200', app: '119.750', transAlt: 14000, magVar: -8.6},
+  KJFK: {atis: '128.725', cld: '135.050', gnd: '121.900', twr: '119.100', app: '125.700', transAlt: 18000, magVar: -12.8},
+  KLAX: {atis: '133.800', cld: '121.400', gnd: '121.650', twr: '133.900', app: '124.500', transAlt: 18000, magVar: 11.4},
+  KORD: {atis: '135.400', cld: '121.600', gnd: '121.750', twr: '120.750', app: '125.000', transAlt: 18000, magVar: -4.2},
+  EGLL: {atis: '128.080', cld: '121.980', gnd: '121.905', twr: '118.505', app: '119.730', transAlt: 6000, magVar: 0.4},
+  EDDF: {atis: '118.030', cld: '121.855', gnd: '121.805', twr: '119.905', app: '120.805', transAlt: 5000, magVar: 3.1},
+  LFPG: {atis: '127.125', cld: '121.725', gnd: '121.805', twr: '119.250', app: '118.150', transAlt: 5000, magVar: 1.8},
+  WSSS: {atis: '128.600', cld: '121.650', gnd: '121.725', twr: '118.600', app: '120.300', transAlt: 11000, magVar: 0.4},
+};
+
+export function getAirportDataSheet(params: {
+  icao: string;
+  iata?: string;
+  name?: string;
+  city?: string;
+  country?: string;
+  lat: number;
+  lon: number;
+  runways?: Array<{ident: string; headingDeg: number; lengthFt: number}>;
+}): AirportDataSheet {
+  const icao = (params.icao || '').toUpperCase();
+  const cat = AIRPORT_CATALOG.find((a) => a.icao === icao || (params.iata && a.iata === params.iata.toUpperCase()));
+  const code = cat?.icao ?? icao;
+  const iata = (params.iata || cat?.iata || code).toUpperCase();
+  const elev = cat?.elevationFt ?? 45;
+  const com = KNOWN_COM_FREQS[code];
+
+  const transAlt =
+    com?.transAlt ??
+    (/^K|C|MM|RC/.test(code)
+      ? 18000
+      : /^RJ|RK/.test(code)
+        ? 14000
+        : /^Z/.test(code)
+          ? 9840
+          : /^EG/.test(code)
+            ? 6000
+            : 5000);
+
+  const magVar = com?.magVar ?? Number((Math.sin((params.lon * Math.PI) / 180) * -9.5).toFixed(1));
+  const seedHash = code.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const f = (base: number, step: number) => `${(base + ((seedHash * step) % 36) * 0.025).toFixed(3)}`;
+
+  const rwys = params.runways && params.runways.length > 0 ? params.runways : cat?.runways ?? [
+    {ident: '36/18', headingDeg: 360, lengthFt: 10500},
+  ];
+
+  const approaches: ApproachProcedureSpec[] = rwys.map((rw, idx) => {
+    const ends = rw.ident.split('/');
+    const primaryEnd = ends[0] || rw.ident;
+    const hdg = Math.round(((rw.headingDeg % 360) + 360) % 360);
+    const ilsFreq = (108.1 + ((seedHash + idx * 3) % 19) * 0.2).toFixed(2);
+    const fixPrefix = (iata || code.slice(-3)).replace(/[^A-Z]/g, 'X').slice(0, 2);
+    return {
+      runwayIdent: `ILS Z RWY ${primaryEnd}`,
+      ilsFreqMhz: ilsFreq,
+      courseDeg: hdg,
+      glideslopeDeg: 3.0,
+      fafFix: `${fixPrefix}${primaryEnd.slice(0, 2)}F`,
+      fafDistNm: 5.8,
+      fafAltFt: Math.round((elev + 1850) / 100) * 100,
+      ifFix: `${fixPrefix}${primaryEnd.slice(0, 2)}I`,
+      ifDistNm: 10.4,
+      ifAltFt: Math.round((elev + 3200) / 100) * 100,
+      iafFix: `${fixPrefix}OM`,
+      iafAltFt: Math.round((elev + 4600) / 100) * 100,
+      daFt: elev + 200,
+      missedAltFt: Math.round((elev + 3000) / 500) * 500,
+      missedHeadingDeg: hdg,
+      papiAngleDeg: 3.0,
+      lightingSystem: 'ALSF-II / PAPI-L 3.0°',
+    };
+  });
+
+  const eaipUrl = /^Z/.test(code)
+    ? `https://www.eaipchina.cn/`
+    : /^K/.test(code)
+      ? `https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/dtpp/`
+      : /^E[GH]/.test(code)
+        ? `https://nats-uk.ead-it.com/cms-nats/opencms/en/Publications/AIP/`
+        : `https://chartfox.org/${encodeURIComponent(code)}`;
+
+  return {
+    icao: code,
+    iata,
+    name: params.name || cat?.name || `${code} International`,
+    city: params.city || cat?.city || '',
+    country: params.country || cat?.country || '',
+    elevationFt: elev,
+    lat: params.lat || cat?.lat || 0,
+    lon: params.lon || cat?.lon || 0,
+    transitionAltFt: transAlt,
+    magneticVarDeg: magVar,
+    atisFreq: com?.atis ?? f(126.2, 3),
+    clearanceFreq: com?.cld ?? f(121.6, 5),
+    groundFreq: com?.gnd ?? f(121.7, 7),
+    towerFreq: com?.twr ?? f(118.1, 11),
+    approachFreq: com?.app ?? f(119.1, 13),
+    eaipUrl,
+    chartFoxUrl: `https://chartfox.org/${encodeURIComponent(code)}`,
+    skyVectorUrl: `https://skyvector.com/airport/${encodeURIComponent(code)}`,
+    approaches,
+  };
 }

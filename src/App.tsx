@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Box,
   ChevronDown,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AirportBoardPanel} from './components/AirportBoardPanel';
+import {BottomOpsDrawer, type BottomOpsTab} from './components/BottomOpsDrawer';
 import {FlightDeck3D} from './components/FlightDeck3D';
 import {FlightInspectorPanel} from './components/FlightInspectorPanel';
 import {FlightPlannerView} from './components/FlightPlannerView';
@@ -60,6 +62,7 @@ import type {
   FlightDetail,
   FlightsResponse,
   LiveFlight,
+  LiveFlightUpdateItem,
   ProviderStatus,
   RadarSettings,
   RainViewerMeta,
@@ -174,6 +177,10 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [dockHidden, setDockHidden] = useState(false);
   const [showTrafficSheet, setShowTrafficSheet] = useState(false);
+  const [opsDrawerOpen, setOpsDrawerOpen] = useState(false);
+  const [opsTab, setOpsTab] = useState<BottomOpsTab>('updates');
+  const [gateChangeUpdates, setGateChangeUpdates] = useState<LiveFlightUpdateItem[]>([]);
+  const prevGateMapRef = useRef<Map<string, string>>(new Map());
   const [plannedRoute, setPlannedRoute] = useState<{
     originLat: number;
     originLon: number;
@@ -241,7 +248,7 @@ export default function App() {
   useEffect(() => {
     const id = window.setInterval(() => {
       setNowEpochSec(Math.floor(Date.now() / 1000));
-    }, 5000);
+    }, 2000);
     return () => clearInterval(id);
   }, []);
 
@@ -360,13 +367,13 @@ export default function App() {
               if (pa !== pb) return pb - pa;
               return b.seenAtMs - a.seenAtMs;
             })
-            .slice(0, 50000)
+            .slice(0, 2600)
             .map((e) => e.flight);
 
           setRawFlights(mergedList);
           setLastFetchedAt(data.fetchedAt);
           setFlightsError(null);
-          await saveFlightSnapshot(regionKey, mergedList.slice(0, 5000), data.fetchedAt);
+          await saveFlightSnapshot(regionKey, mergedList.slice(0, 900), data.fetchedAt);
         } else {
           const cached = await loadFlightSnapshot(regionKey);
           if (cached && rawFlightsCountRef.current === 0) {
@@ -433,7 +440,11 @@ export default function App() {
 
   const applyUserLocation = useCallback(
     (lat: number, lon: number, label: string | undefined, source: 'gps' | 'ip') => {
+      const preset = buildLocalRegion(lat, lon, label);
       setUserLocation({lat, lon, label, source});
+      setLocalRegion(preset);
+      setActiveRegion(preset);
+      setBounds(preset.bounds);
       setFlyToLocation((prev) => ({lat, lon, zoom: 8, seq: (prev?.seq ?? 0) + 1}));
     },
     [],
@@ -482,23 +493,24 @@ export default function App() {
   useEffect(() => {
     if (initialLocateAttemptedRef.current) return;
     initialLocateAttemptedRef.current = true;
-    // No region auto-switching: SkyDeck always stays in global coverage.
+    if (radarSettings.locateMeEnabled) {
+      void syncToUserLocation();
+    }
   }, [radarSettings.locateMeEnabled, syncToUserLocation]);
 
   const fetchingFlightsRef = useRef(false);
 
   useEffect(() => {
-    const shouldPoll = () => !document.hidden && navigator.onLine;
     setFlightsLoading(true);
     fetchLiveFlights(activeRegion.bounds, activeRegion.id);
     fetchAirportsInView(activeRegion.bounds, activeRegion.zoom);
     const id = window.setInterval(() => {
-      if (!shouldPoll() || fetchingFlightsRef.current) return;
+      if (fetchingFlightsRef.current) return;
       fetchingFlightsRef.current = true;
       void fetchLiveFlights(boundsRef.current, activeRegion.id).finally(() => {
         fetchingFlightsRef.current = false;
       });
-    }, 15000);
+    }, 6000);
     return () => clearInterval(id);
   }, [activeRegion, fetchLiveFlights, fetchAirportsInView]);
 
@@ -668,6 +680,60 @@ export default function App() {
     );
   }, [acarsMessages, selectedFlight]);
 
+  const liveUpdates = useMemo<LiveFlightUpdateItem[]>(() => {
+    const items: LiveFlightUpdateItem[] = [...gateChangeUpdates];
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    for (const ef of emergencyFlights) {
+      const em = getEmergencySquawkMeta(ef.squawk);
+      if (!em) continue;
+      items.push({
+        id: `em-${ef.icao24}-${ef.squawk}`,
+        kind: 'emergency',
+        title: ef.callsign || ef.icao24,
+        subtitle: `${ef.aircraftType} · ${ef.registration || ef.icao24}`,
+        detail: `${em.title} at ${ef.onGround ? 'GND' : `${ef.altitudeFt.toLocaleString()} ft`}`,
+        badge: em.shortLabel,
+        severity: 'high',
+        ts: ef.lastContactEpoch || nowSec,
+        icao24: ef.icao24,
+      });
+    }
+
+    if (airportBoard) {
+      const apCode = airportBoard.iata || airportBoard.icao;
+      const allBoard = [...airportBoard.departures, ...airportBoard.arrivals];
+      for (const b of allBoard) {
+        if (!b.isDelayed && !b.isCancelled) continue;
+        const delayMin =
+          b.scheduledTime && (b.estimatedTime || b.actualTime)
+            ? Math.round(((b.estimatedTime || b.actualTime)! - b.scheduledTime) / 60)
+            : 0;
+        if (b.isCancelled || delayMin >= 20 || b.statusColor === 'red') {
+          items.push({
+            id: `bd-${apCode}-${b.id}`,
+            kind: 'delay',
+            title: b.flightNumber || b.callsign,
+            subtitle: `${apCode} · ${b.originIata || '—'} → ${b.destinationIata || '—'}`,
+            detail: b.isCancelled
+              ? 'Flight cancelled on live airport board'
+              : delayMin >= 20
+                ? `Delayed +${delayMin}m (${b.statusText})`
+                : b.statusText,
+            badge: b.isCancelled ? 'CANCELLED' : `DLY +${Math.max(delayMin, 20)}m`,
+            severity: b.isCancelled ? 'high' : 'medium',
+            ts: b.estimatedTime || b.scheduledTime || nowSec,
+            icao24: b.icao24 || undefined,
+            airportIata: apCode,
+          });
+        }
+        if (items.length >= 24) break;
+      }
+    }
+
+    return items.slice(0, 24);
+  }, [gateChangeUpdates, emergencyFlights, airportBoard]);
+
   const handleSelectRegion = (regionId: string) => {
     setFollowSelected(false);
     if (regionId === 'local' && localRegion) {
@@ -732,6 +798,33 @@ export default function App() {
       const data = await apiFetchJson<AirportBoardResponse>(`/api/airport-board?${qs.toString()}`);
       if (airportSelectionRequestRef.current !== requestId) return;
       setAirportBoard(data);
+      // Track gate/terminal changes across airport board polls
+      const apKey = (data.iata || data.icao || ap.icao).toUpperCase();
+      const detectedChanges: LiveFlightUpdateItem[] = [];
+      for (const row of [...data.departures, ...data.arrivals]) {
+        const flightKey = `${apKey}:${(row.flightNumber || row.callsign || row.id).toUpperCase()}`;
+        const curLoc = `${row.terminal ? `T${row.terminal}` : ''}${row.gate ? ` G${row.gate}` : ''}`.trim();
+        if (!curLoc) continue;
+        const prevLoc = prevGateMapRef.current.get(flightKey);
+        if (prevLoc && prevLoc !== curLoc) {
+          detectedChanges.push({
+            id: `gate-${flightKey}-${Date.now()}`,
+            kind: 'gate-change',
+            title: row.flightNumber || row.callsign,
+            subtitle: `${apKey} · ${row.originIata || '—'} → ${row.destinationIata || '—'}`,
+            detail: `Gate assignment changed from ${prevLoc} to ${curLoc}`,
+            badge: 'GATE CHG',
+            severity: 'info',
+            ts: Math.floor(Date.now() / 1000),
+            icao24: row.icao24 || undefined,
+            airportIata: apKey,
+          });
+        }
+        prevGateMapRef.current.set(flightKey, curLoc);
+      }
+      if (detectedChanges.length > 0) {
+        setGateChangeUpdates((prev) => [...detectedChanges, ...prev].slice(0, 12));
+      }
       if (!matchMarker && Number.isFinite(data.lat) && Number.isFinite(data.lon) && (data.lat !== 0 || data.lon !== 0)) {
         apiFetchJson<AirfieldSurfaceData>(
           `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${data.lat}&lon=${data.lon}`,
@@ -810,6 +903,7 @@ export default function App() {
           mapAirports={mapAirports}
           airports={airportsWeather}
           sigmets={sigmets}
+          disruptions={disruptions}
           rainviewer={rainviewer}
           activeRegion={activeRegion}
           theme={theme}
@@ -849,6 +943,19 @@ export default function App() {
             </span>
           </button>
 
+          <select
+            value={activeRegion.id}
+            onChange={(e) => handleSelectRegion(e.target.value)}
+            aria-label="Select radar coverage region"
+            className="h-9 min-w-0 flex-1 max-w-[165px] rounded-xl bg-background border border-input px-2 text-xs font-medium text-foreground truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {localRegion && <option value={localRegion.id}>{localRegion.label}</option>}
+            {REGION_PRESETS.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.label}
+              </option>
+            ))}
+          </select>
 
           <div className="flex items-center gap-1 shrink-0">
             <Popover>
@@ -1334,7 +1441,7 @@ export default function App() {
                           </TableCell>
                         </TableRow>
                       ) : (
-                        filteredFlights.map((f) => {
+                        filteredFlights.slice(0, 120).map((f) => {
                           const db = getDbFlagMeta(f);
                           return (
                             <TableRow
@@ -1388,11 +1495,69 @@ export default function App() {
         </section>
       )}
 
-      {/* Navigation Dock: Dedicated Portrait Mobile/Tablet 5-Tab Thumb Bar OR Desktop Floating Island */}
+      {/* Upgraded Bottom Operations Drawer (Past Flights · Live Updates · WX/Restrictions · ASN Safety) */}
+      <BottomOpsDrawer
+        open={opsDrawerOpen && activeView === 'radar'}
+        activeTab={opsTab}
+        onTabChange={setOpsTab}
+        onClose={() => setOpsDrawerOpen(false)}
+        isPortraitMobile={isPortraitMobile}
+        selectedFlight={selectedFlight}
+        liveUpdates={liveUpdates}
+        sigmets={sigmets}
+        disruptions={disruptions}
+        acarsMessages={acarsMessages}
+        radarSettings={radarSettings}
+        onUpdateRadarSettings={updateRadarSettings}
+        onSelectFlightByHexOrCallsign={(icao24, callsign) => {
+          const match = flights.find(
+            (f) =>
+              (icao24 && f.icao24.toUpperCase() === icao24.toUpperCase()) ||
+              (callsign && f.callsign.toUpperCase() === callsign.toUpperCase()),
+          );
+          if (match) {
+            handleSelectFlight(match);
+            setFlyToLocation((prev) => ({
+              lat: match.lat,
+              lon: match.lon,
+              zoom: 9,
+              seq: (prev?.seq ?? 0) + 1,
+            }));
+            setOpsDrawerOpen(false);
+          }
+        }}
+        onFlyToAirport={(code) => {
+          const upper = code.trim().toUpperCase();
+          const cat =
+            AIRPORT_CATALOG.find((a) => a.icao === upper || a.iata === upper) ??
+            mapAirports.find((a) => a.icao.toUpperCase() === upper || a.iata.toUpperCase() === upper);
+          if (cat) {
+            setFlyToLocation((prev) => ({
+              lat: cat.lat,
+              lon: cat.lon,
+              zoom: 12.2,
+              seq: (prev?.seq ?? 0) + 1,
+            }));
+            void handleSelectAirport({icao: cat.icao, iata: cat.iata, name: cat.name});
+            setOpsDrawerOpen(false);
+          }
+        }}
+        onFlyToPoint={(lat, lon, zoom = 6) => {
+          setFlyToLocation((prev) => ({
+            lat,
+            lon,
+            zoom,
+            seq: (prev?.seq ?? 0) + 1,
+          }));
+          setOpsDrawerOpen(false);
+        }}
+      />
+
+      {/* Navigation Dock: Dedicated Portrait Mobile/Tablet 6-Tab Thumb Bar OR Desktop Floating Island */}
       {isPortraitMobile ? (
         <nav
           aria-label="SkyDeck mobile navigation"
-          className="fixed bottom-0 left-0 right-0 z-[600] h-16 pb-safe bg-card/95 backdrop-blur-md border-t border-border grid grid-cols-5 items-center shadow-2xl"
+          className="fixed bottom-0 left-0 right-0 z-[600] h-16 pb-safe bg-card/95 backdrop-blur-md border-t border-border grid grid-cols-6 items-center shadow-2xl"
         >
           {(
             [
@@ -1400,10 +1565,22 @@ export default function App() {
                 id: 'radar',
                 label: 'Radar',
                 icon: <Radar className="w-5 h-5" />,
-                active: activeView === 'radar' && !showTrafficSheet,
+                active: activeView === 'radar' && !showTrafficSheet && !opsDrawerOpen,
+                onClick: () => {
+                  setShowTrafficSheet(false);
+                  setOpsDrawerOpen(false);
+                  setActiveView('radar');
+                },
+              },
+              {
+                id: 'ops',
+                label: liveUpdates.length > 0 ? `Ops ${liveUpdates.length}` : 'Ops',
+                icon: <Activity className="w-5 h-5" />,
+                active: activeView === 'radar' && opsDrawerOpen,
                 onClick: () => {
                   setShowTrafficSheet(false);
                   setActiveView('radar');
+                  setOpsDrawerOpen((v) => !v);
                 },
               },
               {
@@ -1412,6 +1589,7 @@ export default function App() {
                 icon: <ListFilter className="w-5 h-5" />,
                 active: activeView === 'radar' && showTrafficSheet,
                 onClick: () => {
+                  setOpsDrawerOpen(false);
                   setActiveView('radar');
                   setShowTrafficSheet((v) => !v);
                 },
@@ -1423,6 +1601,7 @@ export default function App() {
                 active: activeView === 'taxi',
                 onClick: () => {
                   setShowTrafficSheet(false);
+                  setOpsDrawerOpen(false);
                   setActiveView('taxi');
                 },
               },
@@ -1433,6 +1612,7 @@ export default function App() {
                 active: activeView === 'planner',
                 onClick: () => {
                   setShowTrafficSheet(false);
+                  setOpsDrawerOpen(false);
                   setActiveView('planner');
                 },
               },
@@ -1443,6 +1623,7 @@ export default function App() {
                 active: activeView === 'deck',
                 onClick: () => {
                   setShowTrafficSheet(false);
+                  setOpsDrawerOpen(false);
                   setActiveView('deck');
                 },
               },
@@ -1520,6 +1701,20 @@ export default function App() {
                 ))}
               </div>
 
+              {/* Region Selector */}
+              <select
+                value={activeRegion.id}
+                onChange={(e) => handleSelectRegion(e.target.value)}
+                aria-label="Select radar coverage region"
+                className="h-8 max-w-[140px] sm:max-w-[175px] rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
+              >
+                {localRegion && <option value={localRegion.id}>{localRegion.label}</option>}
+                {REGION_PRESETS.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
 
               {/* Optional Near Me Button (Controlled by Locate Me setting) */}
               {radarSettings.locateMeEnabled && (
@@ -1665,6 +1860,22 @@ export default function App() {
                   </div>
                 </PopoverContent>
               </Popover>
+
+              {/* Ops Drawer Trigger (Past Flights, Live Updates, WX & Safety) */}
+              <Button
+                size="sm"
+                variant={opsDrawerOpen && activeView === 'radar' ? 'default' : 'outline'}
+                onClick={() => {
+                  setShowTrafficSheet(false);
+                  setActiveView('radar');
+                  setOpsDrawerOpen((v) => !v);
+                }}
+                aria-label="Open flight operations drawer"
+                className="shrink-0 whitespace-nowrap"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Ops{liveUpdates.length > 0 ? ` (${liveUpdates.length})` : ''}</span>
+              </Button>
 
               {/* Settings Inside Bottom Dynamic Island */}
               <RadarSettingsPopover

@@ -7,14 +7,20 @@ import type {
   AirfieldSurfaceGate,
   AirportBoardFlight,
   AirportBoardResponse,
+  AirportDisruption,
   AirportMarker,
   AirportWeather,
   FlightDetail,
   FlightsResponse,
+  HazardCategory,
   LiveFlight,
+  PastFlightRecord,
   ProviderStatus,
   RainViewerMeta,
   RunwayCondition,
+  SafetyRecordItem,
+  SafetyRecordResponse,
+  SigmetHazard,
   TaxiwaySegment,
   TrailPoint,
 } from '../types/aviation';
@@ -34,19 +40,38 @@ const browserFlightIndex = new Map<string, LiveFlight>();
 const browserSurfaceCache = new Map<string, {ts: number; data: AirfieldSurfaceData}>();
 const browserWeatherCache = new Map<string, {ts: number; airports: AirportWeather[]}>();
 const browserBoardCache = new Map<string, {ts: number; board: AirportBoardResponse}>();
+const browserSafetyCache = new Map<string, {ts: number; data: SafetyRecordResponse}>();
+const browserPastCache = new Map<string, {ts: number; items: PastFlightRecord[]}>();
+let browserGlobalLolCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
+let browserGlobalFiCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 
 let inFlightFlightsPromise: Promise<FlightsResponse> | null = null;
 let lastGoodFlightsSnapshot: {ts: number; data: FlightsResponse} | null = null;
 let browserMilCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let browserLaddCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
+let staticSnapshotPromise: Promise<LiveFlight[] | null> | null = null;
+let cachedStaticSnapshot: {ts: number; flights: LiveFlight[]} | null = null;
+let workerCooldownUntil = 0;
 let relayQueue: Promise<void> = Promise.resolve();
 let flightPollCycle = 0;
 
-export const DEFAULT_CF_WORKER_URL = '';
+export const DEFAULT_CF_WORKER_URL = 'https://royal-cherry-f2c2.feianthony666.workers.dev';
 
-const RETIRED_CF_WORKER_URLS = new Set([
-  'https://royal-cherry-f2c2.feianthony666.workers.dev',
-]);
+export function isNoWorkerModePreferred(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const qs = new URLSearchParams(window.location.search);
+    if (qs.get('noworker') === '1') return true;
+    const raw = window.localStorage.getItem('skydeck-radar-settings-v1');
+    if (raw) {
+      const parsed = JSON.parse(raw) as {preferNoWorkerMode?: boolean};
+      if (parsed.preferNoWorkerMode) return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
 
 interface CorsRelayState {
   id: string;
@@ -62,7 +87,7 @@ const CORS_RELAYS: CorsRelayState[] = [
     id: 'cors.lol',
     cooldownUntil: 0,
     lastUsedAt: 0,
-    minSpacingMs: 2800,
+    minSpacingMs: 2600,
     buildUrl: (u) => `https://api.cors.lol/?url=${encodeURIComponent(u)}`,
     unwrap: (t) => t,
   },
@@ -111,33 +136,30 @@ function normalizeBaseUrl(raw: string): string {
 
 export function getCloudflareWorkerUrl(): string {
   if (typeof window === 'undefined') return '';
+  if (isNoWorkerModePreferred()) return '';
   const cleanWorker = (u: string) => normalizeBaseUrl(u).replace(/\?url=.*$/i, '');
-  const isUsableWorker = (u: string) =>
-    /^https?:\/\//i.test(u) && !RETIRED_CF_WORKER_URLS.has(u.toLowerCase());
   try {
     const qs = new URLSearchParams(window.location.search);
     const paramW = qs.get('worker') ? cleanWorker(qs.get('worker')!) : '';
-    if (paramW && isUsableWorker(paramW)) {
+    if (paramW && /^https?:\/\//i.test(paramW)) {
       window.localStorage.setItem('skydeck-cf-worker', paramW);
       return paramW;
     }
     const stored = cleanWorker(window.localStorage.getItem('skydeck-cf-worker') ?? '');
-    if (stored && isUsableWorker(stored)) return stored;
+    if (stored && /^https?:\/\//i.test(stored)) return stored;
 
     const settingsRaw = window.localStorage.getItem('skydeck-radar-settings-v1');
     if (settingsRaw) {
       const parsed = JSON.parse(settingsRaw) as {cfWorkerUrl?: string; apiBaseUrl?: string};
       const w = parsed.cfWorkerUrl ? cleanWorker(parsed.cfWorkerUrl) : '';
-      if (w && isUsableWorker(w)) return w;
-      if (parsed.apiBaseUrl) {
-        const apiWorker = cleanWorker(parsed.apiBaseUrl);
-        if (isUsableWorker(apiWorker) && /\.workers\.dev/i.test(apiWorker)) return apiWorker;
+      if (w && /^https?:\/\//i.test(w)) return w;
+      if (parsed.apiBaseUrl && /\.workers\.dev/i.test(parsed.apiBaseUrl)) {
+        return cleanWorker(parsed.apiBaseUrl);
       }
     }
     const legacyApi = window.localStorage.getItem('skydeck-api-base') ?? '';
     if (/\.workers\.dev/i.test(legacyApi)) {
-      const legacyWorker = cleanWorker(legacyApi);
-      if (isUsableWorker(legacyWorker)) return legacyWorker;
+      return cleanWorker(legacyApi);
     }
   } catch {
     // ignore
@@ -145,8 +167,7 @@ export function getCloudflareWorkerUrl(): string {
   const envWorker =
     typeof import.meta !== 'undefined' &&
     (import.meta as unknown as {env?: Record<string, string | undefined>}).env?.VITE_CF_WORKER_URL;
-  const fallback = cleanWorker(envWorker || DEFAULT_CF_WORKER_URL);
-  return isUsableWorker(fallback) ? fallback : '';
+  return cleanWorker(envWorker || DEFAULT_CF_WORKER_URL);
 }
 
 function getCustomApiBase(): string {
@@ -182,9 +203,63 @@ function withRelayQueue<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+async function fetchTextViaCorsRelay(targetUrl: string, timeoutMs = 8000): Promise<string | null> {
+  const cfWorker = Date.now() >= workerCooldownUntil ? getCloudflareWorkerUrl() : '';
+  if (cfWorker) {
+    try {
+      const workerReqUrl = `${cfWorker}/?url=${encodeURIComponent(targetUrl)}`;
+      const res = await fetch(workerReqUrl, {signal: AbortSignal.timeout(timeoutMs)});
+      if (res.ok) {
+        const raw = await res.text();
+        if (raw && !/^rate limit exceeded|corsfix_error|domain_not_registered/i.test(raw.trim().slice(0, 200))) {
+          return raw;
+        }
+      }
+    } catch {
+      workerCooldownUntil = Date.now() + 45000;
+    }
+  }
+
+  return withRelayQueue(async () => {
+    const now = Date.now();
+    for (const relay of CORS_RELAYS) {
+      if (now < relay.cooldownUntil) continue;
+      const waitMs = relay.lastUsedAt + relay.minSpacingMs - Date.now();
+      if (waitMs > 0) {
+        if (waitMs > 1800) continue;
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+      relay.lastUsedAt = Date.now();
+      try {
+        const res = await fetch(relay.buildUrl(targetUrl), {
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (res.status === 401 || res.status === 403 || res.status === 429) {
+          relay.cooldownUntil = Date.now() + (res.status === 429 ? 35000 : 60000);
+          continue;
+        }
+        if (!res.ok) {
+          relay.cooldownUntil = Date.now() + 20000;
+          continue;
+        }
+        const raw = await res.text();
+        const unwrapped = relay.unwrap(raw);
+        if (!unwrapped || unwrapped.trim().length === 0) {
+          relay.cooldownUntil = Date.now() + 20000;
+          continue;
+        }
+        return unwrapped;
+      } catch {
+        relay.cooldownUntil = Date.now() + 20000;
+      }
+    }
+    return null;
+  });
+}
+
 async function fetchJsonViaCorsRelay<T>(targetUrl: string, timeoutMs = 8000): Promise<T | null> {
-  // 1. User's Cloudflare Worker CORS Proxy (fast, parallel, zero rate-limit queue)
-  const cfWorker = getCloudflareWorkerUrl();
+  // 1. User's Cloudflare Worker CORS Proxy (skipped if No-Worker mode or cooldown active)
+  const cfWorker = Date.now() >= workerCooldownUntil ? getCloudflareWorkerUrl() : '';
   if (cfWorker) {
     try {
       const workerReqUrl = `${cfWorker}/?url=${encodeURIComponent(targetUrl)}`;
@@ -196,11 +271,11 @@ async function fetchJsonViaCorsRelay<T>(targetUrl: string, timeoutMs = 8000): Pr
         }
       }
     } catch {
-      // fall through to public relays if worker transiently fails
+      workerCooldownUntil = Date.now() + 45000;
     }
   }
 
-  // 2. Fallback Paced Public CORS Relays
+  // 2. Fallback Paced Public CORS Relays (non-worker hosts)
   return withRelayQueue(async () => {
     const now = Date.now();
     for (const relay of CORS_RELAYS) {
@@ -236,6 +311,29 @@ async function fetchJsonViaCorsRelay<T>(targetUrl: string, timeoutMs = 8000): Pr
     }
     return null;
   });
+}
+
+async function fetchStaticSnapshotFlights(): Promise<LiveFlight[]> {
+  if (cachedStaticSnapshot && Date.now() - cachedStaticSnapshot.ts < 300000) {
+    return cachedStaticSnapshot.flights;
+  }
+  if (!staticSnapshotPromise) {
+    staticSnapshotPromise = fetch('./flights/latest.json', {signal: AbortSignal.timeout(6000)})
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const json = (await res.json()) as {flights?: LiveFlight[]};
+        if (Array.isArray(json.flights) && json.flights.length > 0) {
+          cachedStaticSnapshot = {ts: Date.now(), flights: json.flights};
+          return json.flights;
+        }
+        return null;
+      })
+      .catch(() => null)
+      .finally(() => {
+        staticSnapshotPromise = null;
+      });
+  }
+  return (await staticSnapshotPromise) ?? [];
 }
 
 function splitCsvRow(line: string): string[] {
@@ -596,6 +694,16 @@ async function getBrowserGlobalRunways(): Promise<Map<string, DirectAipRunwayEnt
   return directRunwaysPromise;
 }
 
+async function fetchNativeCorsJson<T>(url: string, timeoutMs = 6500): Promise<T | null> {
+  try {
+    const res = await fetch(url, {signal: AbortSignal.timeout(timeoutMs)});
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsResponse> {
   if (inFlightFlightsPromise) return inFlightFlightsPromise;
 
@@ -605,21 +713,22 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
     const lamax = Math.min(85, Number(params.get('lamax') ?? 43));
     const lomax = Math.min(180, Number(params.get('lomax') ?? 126));
 
+    const isGlobal = lamax - lamin >= 150 && lomax - lomin >= 320;
+    const noWorker = isNoWorkerModePreferred();
+
     const centerLat = (lamin + lamax) / 2;
     const centerLon = (lomin + lomax) / 2;
     const latSpanNm = Math.abs(lamax - lamin) * 60;
     const lonSpanNm = Math.abs(lomax - lomin) * 60 * Math.max(0.2, Math.cos((centerLat * Math.PI) / 180));
     const radiusNm = Math.min(250, Math.max(50, Math.round(Math.hypot(latSpanNm, lonSpanNm) / 2)));
 
-    // Expand OpenSky sector on zoomed-out spans while avoiding global full-world timeout
-    const osMinLat = Math.max(-85, Math.max(lamin, centerLat - 22));
-    const osMaxLat = Math.min(85, Math.min(lamax, centerLat + 22));
-    const osMinLon = Math.max(-180, Math.max(lomin, centerLon - 32));
-    const osMaxLon = Math.min(180, Math.min(lomax, centerLon + 32));
+    const osMinLat = Math.max(-85, Math.max(lamin, centerLat - 24));
+    const osMaxLat = Math.min(85, Math.min(lamax, centerLat + 24));
+    const osMinLon = Math.max(-180, Math.max(lomin, centerLon - 34));
+    const osMaxLon = Math.min(180, Math.min(lomax, centerLon + 34));
 
     const latSpan = lamax - lamin;
     const lonSpan = lomax - lomin;
-    const isGlobal = latSpan >= 160 && lonSpan >= 340;
     const frMinLat = Math.max(-85, lamin);
     const frMaxLat = Math.min(85, lamax);
     const frMinLon = Math.max(-180, lomin);
@@ -628,116 +737,188 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
     flightPollCycle++;
     const providers: ProviderStatus[] = [];
 
-    // OpenSky is not browser-CORS compatible and was rate-limited on GitHub Pages.
-    // It is intentionally skipped in static hosting mode.
-    const openSkyPromise = Promise.resolve([] as LiveFlight[]);
+    // 1. Direct native-CORS OpenSky fetch (zero worker / zero CORS issues)
+    const openSkyPromise = (async (): Promise<LiveFlight[]> => {
+      const t0 = Date.now();
+      try {
+        const url = isGlobal
+          ? 'https://opensky-network.org/api/states/all'
+          : `https://opensky-network.org/api/states/all?lamin=${osMinLat.toFixed(2)}&lomin=${osMinLon.toFixed(2)}&lamax=${osMaxLat.toFixed(2)}&lomax=${osMaxLon.toFixed(2)}`;
+        const res = await fetch(url, {signal: AbortSignal.timeout(12000)});
+        if (!res.ok) {
+          providers.push({
+            provider: 'opensky',
+            ok: false,
+            count: 0,
+            latencyMs: Date.now() - t0,
+            note: `HTTP ${res.status}`,
+          });
+          return [];
+        }
+        const json = (await res.json()) as {states?: Array<unknown[]>; time?: number};
+        const nowSec = json.time ?? Math.floor(Date.now() / 1000);
+        const list: LiveFlight[] = [];
+        const sliceLimit = isGlobal ? 4500 : 1800;
+        for (const s of (json.states ?? []).slice(0, sliceLimit)) {
+          const lat = Number(s[6]);
+          const lon = Number(s[5]);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+          const icao24 = String(s[0] ?? '').toUpperCase();
+          const callsign = String(s[1] ?? icao24).trim().toUpperCase();
+          const altM = Number(s[7] ?? s[13] ?? 0);
+          const velMs = Number(s[9] ?? 0);
+          const vrateMs = Number(s[11] ?? 0);
+          list.push({
+            id: icao24,
+            icao24,
+            callsign: callsign || icao24,
+            flightNumber: callsign || icao24,
+            registration: '',
+            airlineIcao: airlineIcaoFromCallsign(callsign),
+            airlineName: airlineIcaoFromCallsign(callsign),
+            aircraftType: 'A320',
+            lat,
+            lon,
+            altitudeFt: Math.max(0, Math.round(altM * 3.28084)),
+            groundSpeedKts: Math.max(0, Math.round(velMs * 1.94384)),
+            trueTrackDeg: Math.round(Number(s[10] ?? 0)),
+            verticalRateFpm: Math.round(vrateMs * 196.85),
+            onGround: Boolean(s[8]),
+            squawk: s[14] ? String(s[14]) : '',
+            origin: '',
+            destination: '',
+            lastContactEpoch: Number(s[4] ?? s[3] ?? nowSec),
+            source: 'opensky',
+            isEstimated: false,
+            uncertaintyNm: 0,
+          });
+        }
+        providers.push({
+          provider: 'opensky',
+          ok: true,
+          count: list.length,
+          latencyMs: Date.now() - t0,
+        });
+        return list;
+      } catch (err) {
+        providers.push({
+          provider: 'opensky',
+          ok: false,
+          count: 0,
+          latencyMs: Date.now() - t0,
+          note: err instanceof Error ? err.message : 'Timeout',
+        });
+        return [];
+      }
+    })();
 
-    // 2. CORS-Relayed Waterfall / Parallel via Cloudflare Worker (FR24 gliders=1 + Military + adsb.lol + adsb.fi)
-    const relayPromise = (async (): Promise<LiveFlight[]> => {
-      const makeFr24Url = (bMinLat: number, bMaxLat: number, bMinLon: number, bMaxLon: number) =>
-        `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${bMaxLat.toFixed(3)},${bMinLat.toFixed(3)},${bMinLon.toFixed(3)},${bMaxLon.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
-      const fr24Url = makeFr24Url(frMinLat, frMaxLat, frMinLon, frMaxLon);
+    // 2. Native-CORS adsb.lol & adsb.fi direct browser calls (No worker required!)
+    const directAdsbPromise = (async (): Promise<LiveFlight[]> => {
+      const t0 = Date.now();
+      const nowMs = Date.now();
+      const needMil = !browserMilCache || nowMs - browserMilCache.ts >= 15000;
+      const needLadd = !browserLaddCache || nowMs - browserLaddCache.ts >= 18000;
       const lolUrl = isGlobal
         ? 'https://api.adsb.lol/v2/all'
         : `https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/${radiusNm}`;
-      const milUrl = `https://api.adsb.lol/v2/mil`;
-      const laddUrl = `https://api.adsb.lol/v2/ladd`;
       const fiUrl = isGlobal
         ? 'https://opendata.adsb.fi/api/v2/all'
         : `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${radiusNm}`;
-      const directOut: LiveFlight[] = [];
 
-      const directFetches = await Promise.allSettled([
-        fetch(lolUrl, {signal: AbortSignal.timeout(8000)}),
-        fetch(fiUrl, {signal: AbortSignal.timeout(8000)}),
-        radiusNm <= 180 ? fetch(milUrl, {signal: AbortSignal.timeout(7000)}) : Promise.resolve(null),
-        radiusNm <= 180 ? fetch(laddUrl, {signal: AbortSignal.timeout(7000)}) : Promise.resolve(null),
+      const useCachedGlobalLol = isGlobal && browserGlobalLolCache && nowMs - browserGlobalLolCache.ts < 12000;
+      const useCachedGlobalFi = isGlobal && browserGlobalFiCache && nowMs - browserGlobalFiCache.ts < 12000;
+
+      const [lolJson, milJson, laddJson, fiJson] = await Promise.all([
+        useCachedGlobalLol
+          ? Promise.resolve({ac: browserGlobalLolCache!.ac, now: browserGlobalLolCache!.nowSec * 1000})
+          : fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; now?: number}>(lolUrl, isGlobal ? 9000 : 6500),
+        needMil
+          ? fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; now?: number}>('https://api.adsb.lol/v2/mil', 6500)
+          : Promise.resolve(null),
+        needLadd
+          ? fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; now?: number}>('https://api.adsb.lol/v2/ladd', 6500)
+          : Promise.resolve(null),
+        useCachedGlobalFi
+          ? Promise.resolve<{ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}>({
+              aircraft: browserGlobalFiCache!.ac,
+              now: browserGlobalFiCache!.nowSec * 1000,
+            })
+          : fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}>(fiUrl, isGlobal ? 9000 : 6500),
       ]);
 
-      const parseDirectJson = async (item: PromiseSettledResult<Response | null>, kind: 'lol' | 'fi' | 'mil' | 'ladd') => {
-        if (item.status !== 'fulfilled' || !item.value?.ok) return;
-        const t0 = Date.now();
-        try {
-          const json = await item.value.json() as
-            | {ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}
-            | null;
-          const rows = kind === 'fi' ? (json?.aircraft ?? []) : (json?.ac ?? []);
-          if (rows.length === 0) return;
-          const parsed = parseAdsbExchangeList(
-            rows,
-            kind === 'fi' ? 'adsb.fi' : 'adsb.lol',
-            Math.floor((json?.now ?? Date.now()) / 1000),
-            kind === 'mil' ? 1 : kind === 'ladd' ? 8 : 0,
-          );
-          if (parsed.length > 0) {
-            directOut.push(...parsed);
-            providers.push({
-              provider: kind === 'mil' ? 'adsb.lol-mil' : kind === 'ladd' ? 'adsb.lol-ladd' : kind,
-              ok: true,
-              count: parsed.length,
-              latencyMs: Date.now() - t0,
-            });
-          }
-        } catch {
-          // Provider payload may be transiently unavailable.
-        }
-      };
-
-      await Promise.all([
-        parseDirectJson(directFetches[0], 'lol'),
-        parseDirectJson(directFetches[1], 'fi'),
-        parseDirectJson(directFetches[2], 'mil'),
-        parseDirectJson(directFetches[3], 'ladd'),
-      ]);
-      if (directOut.length > 0) return directOut;
-
-      const fr24NativeBoxes: Array<[number, number, number, number]> =
-        latSpan > 16 || lonSpan > 24
-          ? (() => {
-              const mLat = (frMinLat + frMaxLat) / 2;
-              const mLon = (frMinLon + frMaxLon) / 2;
-              return [
-                [frMinLat, mLat, frMinLon, mLon],
-                [frMinLat, mLat, mLon, frMaxLon],
-                [mLat, frMaxLat, frMinLon, mLon],
-                [mLat, frMaxLat, mLon, frMaxLon],
-              ];
-            })()
-          : [[frMinLat, frMaxLat, frMinLon, frMaxLon]];
-      const fr24NativePromises = fr24NativeBoxes.map(async (b) => {
-        try {
-          const url = makeFr24Url(b[0], b[1], b[2], b[3]);
-          const response = await fetch(url, {
-            signal: AbortSignal.timeout(8000),
-            headers: {Accept: 'application/json'},
-          });
-          if (!response.ok) return [];
-          return parseFr24Feed(await response.json() as Record<string, unknown>);
-        } catch {
-          return [];
-        }
-      });
-      const fr24NativeLists = await Promise.all(fr24NativePromises);
-      const fr24Native = fr24NativeLists.flat();
-      if (fr24Native.length > 0) {
-        providers.push({
-          provider: 'fr24-native',
-          ok: true,
-          count: fr24Native.length,
-          latencyMs: 0,
-        });
-        return fr24Native;
+      if (isGlobal && lolJson?.ac && !useCachedGlobalLol) {
+        browserGlobalLolCache = {ts: Date.now(), ac: lolJson.ac, nowSec: Math.floor((lolJson.now ?? Date.now()) / 1000)};
+      }
+      if (milJson?.ac) {
+        browserMilCache = {ts: Date.now(), ac: milJson.ac, nowSec: Math.floor((milJson.now ?? Date.now()) / 1000)};
+      }
+      if (laddJson?.ac) {
+        browserLaddCache = {ts: Date.now(), ac: laddJson.ac, nowSec: Math.floor((laddJson.now ?? Date.now()) / 1000)};
+      }
+      const fiRows = fiJson?.aircraft ?? fiJson?.ac;
+      if (isGlobal && fiRows && !useCachedGlobalFi) {
+        browserGlobalFiCache = {ts: Date.now(), ac: fiRows, nowSec: Math.floor((fiJson?.now ?? Date.now()) / 1000)};
       }
 
-      const hasWorker = Boolean(getCloudflareWorkerUrl());
+      const out: LiveFlight[] = [];
+      if (lolJson?.ac) {
+        const parsed = parseAdsbExchangeList(lolJson.ac, 'adsb.lol', Math.floor((lolJson.now ?? Date.now()) / 1000));
+        out.push(...parsed);
+        providers.push({provider: 'adsb.lol-direct', ok: parsed.length > 0, count: parsed.length, latencyMs: Date.now() - t0});
+      }
+      if (browserLaddCache?.ac) {
+        const laddRows = isGlobal
+          ? browserLaddCache.ac
+          : browserLaddCache.ac.filter((a) => {
+              const lat = Number(a.lat);
+              const lon = Number(a.lon);
+              return Number.isFinite(lat) && Number.isFinite(lon) && lat >= lamin - 1 && lat <= lamax + 1 && lon >= lomin - 1 && lon <= lomax + 1;
+            });
+        const laddParsed = parseAdsbExchangeList(laddRows, 'adsb.lol', browserLaddCache.nowSec, 8);
+        if (laddParsed.length > 0) {
+          out.push(...laddParsed);
+          providers.push({provider: 'adsb.lol-ladd', ok: true, count: laddParsed.length, latencyMs: Date.now() - t0});
+        }
+      }
+      if (browserMilCache?.ac) {
+        const milRows = isGlobal
+          ? browserMilCache.ac
+          : browserMilCache.ac.filter((a) => {
+              const lat = Number(a.lat);
+              const lon = Number(a.lon);
+              return Number.isFinite(lat) && Number.isFinite(lon) && lat >= lamin - 1 && lat <= lamax + 1 && lon >= lomin - 1 && lon <= lomax + 1;
+            });
+        const milParsed = parseAdsbExchangeList(milRows, 'adsb.lol', browserMilCache.nowSec, 1);
+        if (milParsed.length > 0) {
+          out.push(...milParsed);
+          providers.push({provider: 'adsb.lol-mil', ok: true, count: milParsed.length, latencyMs: Date.now() - t0});
+        }
+      }
+      if (fiRows && fiRows.length > 0) {
+        const fiParsed = parseAdsbExchangeList(fiRows, 'adsb.fi', Math.floor((fiJson?.now ?? Date.now()) / 1000));
+        out.push(...fiParsed);
+        providers.push({provider: 'adsb.fi-direct', ok: fiParsed.length > 0, count: fiParsed.length, latencyMs: Date.now() - t0});
+      }
+      return out;
+    })();
 
-      if (hasWorker) {
+    // 3. FR24 Enriched Feed (via Worker or Public CORS Relay when allowed; automatic ./flights/latest.json enrichment when No-Worker mode is enabled)
+    const fr24Promise = (async (): Promise<LiveFlight[]> => {
+      const makeFr24Url = (bMinLat: number, bMaxLat: number, bMinLon: number, bMaxLon: number) =>
+        `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${bMaxLat.toFixed(3)},${bMinLat.toFixed(3)},${bMinLon.toFixed(3)},${bMaxLon.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
+
+      const frOut: LiveFlight[] = [];
+      if (!noWorker) {
         const t0 = Date.now();
-        const nowMs = Date.now();
-        const needMil = !browserMilCache || nowMs - browserMilCache.ts >= 12000;
-        const needLadd = !browserLaddCache || nowMs - browserLaddCache.ts >= 15000;
-        const frBoxes: Array<[number, number, number, number]> =
-          latSpan > 16 || lonSpan > 24
+        const hasWorker = Boolean(getCloudflareWorkerUrl());
+        const frBoxes: Array<[number, number, number, number]> = isGlobal
+          ? [
+              [10, 62, -130, -55],
+              [30, 65, -15, 45],
+              [5, 55, 70, 145],
+              [-45, 15, -80, 160],
+            ]
+          : latSpan > 16 || lonSpan > 24
             ? (() => {
                 const mLat = (frMinLat + frMaxLat) / 2;
                 const mLon = (frMinLon + frMaxLon) / 2;
@@ -750,161 +931,70 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
               })()
             : [[frMinLat, frMaxLat, frMinLon, frMaxLon]];
 
-        const [frJsonList, milJson, laddJson, lolJson] = await Promise.all([
-          Promise.all(
+        if (hasWorker) {
+          const frJsonList = await Promise.all(
             frBoxes.map((b) =>
               fetchJsonViaCorsRelay<Record<string, unknown>>(makeFr24Url(b[0], b[1], b[2], b[3]), 8000),
             ),
-          ),
-          needMil
-            ? fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>(milUrl, 7000)
-            : Promise.resolve(null),
-          needLadd
-            ? fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>(laddUrl, 7000)
-            : Promise.resolve(null),
-          fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>(lolUrl, 7000),
-        ]);
-
-        if (milJson?.ac) {
-          browserMilCache = {ts: Date.now(), ac: milJson.ac, nowSec: Math.floor((milJson.now ?? Date.now()) / 1000)};
-        }
-        if (laddJson?.ac) {
-          browserLaddCache = {ts: Date.now(), ac: laddJson.ac, nowSec: Math.floor((laddJson.now ?? Date.now()) / 1000)};
-        }
-
-        const out: LiveFlight[] = [];
-        let frCount = 0;
-        for (const frJson of frJsonList) {
-          if (!frJson) continue;
-          const parsed = parseFr24Feed(frJson);
-          if (parsed.length > 0) {
-            out.push(...parsed);
-            frCount += parsed.length;
-          }
-        }
-        if (frCount > 0) {
-          providers.push({provider: 'fr24-worker', ok: true, count: frCount, latencyMs: Date.now() - t0});
-        }
-        if (browserLaddCache?.ac) {
-          const laddRows = browserLaddCache.ac.filter((a) => {
-            const lat = Number(a.lat);
-            const lon = Number(a.lon);
-            return Number.isFinite(lat) && Number.isFinite(lon) && lat >= lamin - 1 && lat <= lamax + 1 && lon >= lomin - 1 && lon <= lomax + 1;
-          });
-          const laddParsed = parseAdsbExchangeList(laddRows, 'adsb.lol', browserLaddCache.nowSec, 8);
-          if (laddParsed.length > 0) {
-            out.push(...laddParsed);
-            providers.push({provider: 'adsb.lol-ladd', ok: true, count: laddParsed.length, latencyMs: Date.now() - t0});
-          }
-        }
-        if (browserMilCache?.ac) {
-          const milRows = browserMilCache.ac.filter((a) => {
-            const lat = Number(a.lat);
-            const lon = Number(a.lon);
-            return Number.isFinite(lat) && Number.isFinite(lon) && lat >= lamin - 1 && lat <= lamax + 1 && lon >= lomin - 1 && lon <= lomax + 1;
-          });
-          const milParsed = parseAdsbExchangeList(milRows, 'adsb.lol', browserMilCache.nowSec, 1);
-          if (milParsed.length > 0) {
-            out.push(...milParsed);
-            providers.push({provider: 'adsb.lol-mil', ok: true, count: milParsed.length, latencyMs: Date.now() - t0});
-          }
-        }
-        if (lolJson?.ac) {
-          const lolParsed = parseAdsbExchangeList(lolJson.ac, 'adsb.lol', Math.floor((lolJson.now ?? Date.now()) / 1000));
-          if (lolParsed.length > 0) {
-            out.push(...lolParsed);
-            providers.push({provider: 'adsb.lol', ok: true, count: lolParsed.length, latencyMs: Date.now() - t0});
-          }
-        }
-        if (out.length > 0) return out;
-      }
-
-      const preferLol = radiusNm <= 180 && flightPollCycle % 3 === 2;
-      const targets: Array<'fr24-web' | 'adsb.lol' | 'adsb.fi'> = preferLol
-        ? ['adsb.lol', 'fr24-web', 'adsb.fi']
-        : ['fr24-web', 'adsb.lol', 'adsb.fi'];
-
-      for (const target of targets) {
-        const t0 = Date.now();
-        if (target === 'fr24-web') {
-          const json = await fetchJsonViaCorsRelay<Record<string, unknown>>(fr24Url, 8500);
-          if (json) {
-            const parsed = parseFr24Feed(json);
-            if (parsed.length > 0) {
-              providers.push({
-                provider: 'fr24-web',
-                ok: true,
-                count: parsed.length,
-                latencyMs: Date.now() - t0,
-              });
-              return parsed;
-            }
+          );
+          for (const frJson of frJsonList) {
+            if (!frJson) continue;
+            const parsed = parseFr24Feed(frJson);
+            if (parsed.length > 0) frOut.push(...parsed);
           }
           providers.push({
-            provider: 'fr24-web',
-            ok: false,
-            count: 0,
+            provider: 'fr24-worker',
+            ok: frOut.length > 0,
+            count: frOut.length,
             latencyMs: Date.now() - t0,
-            note: 'Configure Cloudflare Worker in Settings for fast CORS',
-          });
-        } else if (target === 'adsb.lol') {
-          const json = await fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>(lolUrl, 7500);
-          if (json?.ac) {
-            const parsed = parseAdsbExchangeList(json.ac, 'adsb.lol', Math.floor((json.now ?? Date.now()) / 1000));
-            if (parsed.length > 0) {
-              providers.push({
-                provider: 'adsb.lol',
-                ok: true,
-                count: parsed.length,
-                latencyMs: Date.now() - t0,
-              });
-              return parsed;
-            }
-          }
-          providers.push({
-            provider: 'adsb.lol',
-            ok: false,
-            count: 0,
-            latencyMs: Date.now() - t0,
-            note: 'CORS relay unavailable',
+            note: frOut.length === 0 ? 'Worker unavailable or empty' : undefined,
           });
         } else {
-          const json = await fetchJsonViaCorsRelay<{aircraft?: Array<Record<string, unknown>>; now?: number}>(
-            fiUrl,
-            7500,
+          const frJson = await fetchJsonViaCorsRelay<Record<string, unknown>>(
+            makeFr24Url(frMinLat, frMaxLat, frMinLon, frMaxLon),
+            8000,
           );
-          if (json?.aircraft) {
-            const parsed = parseAdsbExchangeList(
-              json.aircraft,
-              'adsb.fi',
-              Math.floor((json.now ?? Date.now()) / 1000),
-            );
-            if (parsed.length > 0) {
-              providers.push({
-                provider: 'adsb.fi',
-                ok: true,
-                count: parsed.length,
-                latencyMs: Date.now() - t0,
-              });
-              return parsed;
-            }
+          if (frJson) {
+            const parsed = parseFr24Feed(frJson);
+            frOut.push(...parsed);
           }
           providers.push({
-            provider: 'adsb.fi',
-            ok: false,
-            count: 0,
+            provider: 'fr24-relay',
+            ok: frOut.length > 0,
+            count: frOut.length,
             latencyMs: Date.now() - t0,
-            note: 'CORS relay unavailable',
           });
         }
       }
-      return [];
+
+      // If strict No-Worker mode OR FR24 relays were blocked/empty, merge same-origin FR24 snapshot for callsign/route enrichment
+      if (noWorker || frOut.length === 0) {
+        const snap = await fetchStaticSnapshotFlights();
+        if (snap.length > 0) {
+          const inBox = snap.filter(
+            (f) => f.lat >= lamin - 2 && f.lat <= lamax + 2 && f.lon >= lomin - 2 && f.lon <= lomax + 2,
+          );
+          frOut.push(...inBox);
+          providers.push({
+            provider: 'fr24-snapshot',
+            ok: true,
+            count: inBox.length,
+            latencyMs: 5,
+            note: noWorker ? 'No-Worker CORS-free mode' : 'FR24 relay fallback',
+          });
+        }
+      }
+      return frOut;
     })();
 
-    const [relayFlights, openSkyFlights] = await Promise.all([relayPromise, openSkyPromise]);
+    const [fr24Flights, directAdsbFlights, openSkyFlights] = await Promise.all([
+      fr24Promise,
+      directAdsbPromise,
+      openSkyPromise,
+    ]);
 
     const mergedMap = new Map<string, LiveFlight>();
-    for (const list of [relayFlights, openSkyFlights]) {
+    for (const list of [fr24Flights, directAdsbFlights, openSkyFlights]) {
       for (const f of list) {
         const key = f.icao24 || f.callsign || f.id;
         const existing = mergedMap.get(key);
@@ -915,6 +1005,8 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
           if (!existing.destination && f.destination) existing.destination = f.destination;
           if (!existing.squawk && f.squawk) existing.squawk = f.squawk;
           if (!existing.registration && f.registration) existing.registration = f.registration;
+          if (!existing.flightNumber && f.flightNumber) existing.flightNumber = f.flightNumber;
+          if (!existing.airlineIcao && f.airlineIcao) existing.airlineIcao = f.airlineIcao;
           if ((!existing.aircraftType || existing.aircraftType === 'A320') && f.aircraftType) {
             existing.aircraftType = f.aircraftType;
           }
@@ -1048,7 +1140,9 @@ async function fetchDirectWeather(params: URLSearchParams): Promise<{airports: A
   }
 
   const targetUrl = `https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(icaosRaw)}&format=json`;
-  const rows = await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(targetUrl, 7500);
+  const rows =
+    (await fetchNativeCorsJson<Array<Record<string, unknown>>>(targetUrl, 5000)) ??
+    (await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(targetUrl, 7500));
   if (!Array.isArray(rows) || rows.length === 0) {
     return {airports: cached?.airports ?? [], cached: Boolean(cached)};
   }
@@ -1107,41 +1201,42 @@ async function fetchDirectWeather(params: URLSearchParams): Promise<{airports: A
 }
 
 async function fetchDirectPhoto(icao24: string, reg: string): Promise<AircraftPhoto | null> {
-  // 1. Planespotters.net is the primary source for aircraft-specific photos.
+  // 1. Planespotters.net official CORS JSON API first
   for (const url of [
     icao24 ? `https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}` : '',
     reg ? `https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}` : '',
   ]) {
     if (!url) continue;
     try {
-      const r = await fetch(url, {signal: AbortSignal.timeout(3500)});
+      const r = await fetch(url, {signal: AbortSignal.timeout(3800)});
       if (!r.ok) continue;
-      const json = await r.json() as {
+      const json = (await r.json()) as {
         photos?: Array<{
-          thumbnail?: {src?: string};
+          thumbnail?: {src?: string; size?: {width?: number; height?: number}};
           thumbnail_large?: {src?: string; size?: {width?: number; height?: number}};
           photographer?: string;
           link?: string;
         }>;
       };
       const p = json.photos?.[0];
-      if (p?.thumbnail_large?.src && p.link) {
+      const large = p?.thumbnail_large;
+      if (p && large?.src && p.link) {
         return {
-          url: p.thumbnail_large.src,
+          url: large.src,
           thumbUrl: p.thumbnail?.src,
           photographer: p.photographer || 'Planespotters.net contributor',
           link: p.link,
           source: 'planespotters.net',
-          width: p.thumbnail_large.size?.width,
-          height: p.thumbnail_large.size?.height,
+          width: large.size?.width,
+          height: large.size?.height,
         };
       }
     } catch {
-      // Continue to the other indexed sources.
+      // continue to wikimedia fallback
     }
   }
 
-  // 2. Wikimedia Commons fallback for full-frame images.
+  // 2. Wikimedia Commons fallback photo search by registration (native CORS via origin=*)
   const normReg = reg.replace(/[^A-Z0-9]/gi, '').toUpperCase();
   if (normReg.length >= 4) {
     try {
@@ -1150,7 +1245,7 @@ async function fetchDirectPhoto(icao24: string, reg: string): Promise<AircraftPh
         {signal: AbortSignal.timeout(4000)},
       );
       if (wmRes.ok) {
-        const wmJson = (await wmRes.json()) as {
+        const wmJson = (await wmJsonPromise(wmRes)) as {
           query?: {pages?: Record<string, {title?: string; imageinfo?: Array<Record<string, unknown>>}>};
         };
         const pages = Object.values(wmJson.query?.pages ?? {});
@@ -1175,46 +1270,15 @@ async function fetchDirectPhoto(icao24: string, reg: string): Promise<AircraftPh
         }
       }
     } catch {
-      // continue to planespotters
-    }
-  }
-
-  // 2. Planespotters.net official CORS JSON API
-  for (const url of [
-    icao24 ? `https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}` : '',
-    reg ? `https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}` : '',
-  ]) {
-    if (!url) continue;
-    try {
-      const r = await fetch(url, {signal: AbortSignal.timeout(3500)});
-      if (!r.ok) continue;
-      const json = (await r.json()) as {
-        photos?: Array<{
-          thumbnail?: {src?: string; size?: {width?: number; height?: number}};
-          thumbnail_large?: {src?: string; size?: {width?: number; height?: number}};
-          photographer?: string;
-          link?: string;
-        }>;
-      };
-      const p = json.photos?.[0];
-      const large = p?.thumbnail_large;
-      if (p && large?.src && p.link) {
-        return {
-          url: large.src,
-          thumbUrl: p.thumbnail?.src,
-          photographer: p.photographer || 'Planespotters.net contributor',
-          link: p.link,
-          source: 'planespotters.net',
-          width: large.size?.width,
-          height: large.size?.height,
-        };
-      }
-    } catch {
-      // continue
+      // ignore
     }
   }
 
   return null;
+}
+
+async function wmJsonPromise(res: Response): Promise<unknown> {
+  return res.json();
 }
 
 async function fetchDirectFlightDetail(params: URLSearchParams): Promise<FlightDetail> {
@@ -1365,6 +1429,56 @@ function mapFr24BoardRow(
   };
 }
 
+function computeDirectDelaySummary(
+  departures: AirportBoardFlight[],
+  arrivals: AirportBoardFlight[],
+  pdDep?: Record<string, unknown> | null,
+  pdArr?: Record<string, unknown> | null,
+): AirportBoardResponse['delayIndex'] {
+  const summarize = (rows: AirportBoardFlight[], pd?: Record<string, unknown> | null) => {
+    const delayed = rows.filter((r) => r.isDelayed).length;
+    const canceled = rows.filter((r) => r.isCancelled).length;
+    const onTime = Math.max(0, rows.length - delayed - canceled);
+    const total = Math.max(1, rows.length);
+    const pct = rows.length > 0 ? Math.round(((delayed + canceled) / total) * 100) : null;
+    const diffs = rows
+      .map((r) => {
+        const t = r.actualTime ?? r.estimatedTime;
+        return t && r.scheduledTime ? Math.max(0, Math.round((t - r.scheduledTime) / 60)) : null;
+      })
+      .filter((v): v is number => v !== null);
+    const avgMin = diffs.length > 0 ? Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length) : pct !== null ? Math.round(pct * 0.35) : null;
+    const flightInfo = (pd?.flightInfo as Record<string, unknown> | undefined) ?? undefined;
+    const rawIdx = Number(flightInfo?.delayIndex);
+    const computedIdx = pct !== null ? Number(Math.min(5, Math.max(0.2, (pct / 18) + (avgMin ?? 0) / 35)).toFixed(2)) : null;
+    return {
+      index: Number.isFinite(rawIdx) ? rawIdx : computedIdx,
+      avgMin,
+      pct,
+      onTime,
+      delayed,
+      canceled,
+    };
+  };
+
+  const d = summarize(departures, pdDep);
+  const a = summarize(arrivals, pdArr);
+  return {
+    arrivalsIndex: a.index,
+    arrivalsDelayAvgMin: a.avgMin,
+    arrivalsDelayedPct: a.pct,
+    arrivalsOnTimeCount: a.onTime,
+    arrivalsDelayedCount: a.delayed,
+    arrivalsCanceledCount: a.canceled,
+    departuresIndex: d.index,
+    departuresDelayAvgMin: d.avgMin,
+    departuresDelayedPct: d.pct,
+    departuresOnTimeCount: d.onTime,
+    departuresDelayedCount: d.delayed,
+    departuresCanceledCount: d.canceled,
+  };
+}
+
 async function fetchDirectAirportBoard(params: URLSearchParams): Promise<AirportBoardResponse> {
   const code = (params.get('code') ?? '').toUpperCase();
   const icao = (params.get('icao') ?? '').toUpperCase();
@@ -1379,164 +1493,33 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
   if (cachedBoard && Date.now() - cachedBoard.ts < 60000) return cachedBoard.board;
 
   const queryCode = (iata || resolvedIcao).toLowerCase();
-  if (queryCode) {
+  if (queryCode && !isNoWorkerModePreferred()) {
     const ts = Math.floor(Date.now() / 1000);
-    const makeUrl = (mode: 'departures' | 'arrivals', page: number) =>
-      `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=${page}&limit=100`;
+    const makeUrl = (mode: 'departures' | 'arrivals') =>
+      `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=1&limit=45`;
 
-    const loadNativeBoardPages = async (
-      mode: 'departures' | 'arrivals',
-    ): Promise<Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>> => {
-      const loaded: Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}> = [];
-      for (const page of [1, 2, 3, 4, 5]) {
-        try {
-          const response = await fetch(makeUrl(mode, page), {
-            signal: AbortSignal.timeout(7000),
-            headers: {Accept: 'application/json'},
-          });
-          if (!response.ok) break;
-          const json = await response.json() as {result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}};
-          loaded.push(json);
-          const pd = json.result?.response?.airport?.pluginData ?? {};
-          const sched = ((((pd.schedule as Record<string, unknown> | undefined)?.[mode] as Record<string, unknown> | undefined)?.data as
-            | Array<{flight?: Record<string, unknown>}>
-            | undefined) ?? []);
-          if (sched.length === 0) break;
-        } catch {
-          break;
-        }
-      }
-      return loaded;
-    };
+    const depJson = await fetchJsonViaCorsRelay<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>(
+      makeUrl('departures'),
+      7000,
+    );
+    const arrJson = await fetchJsonViaCorsRelay<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>(
+      makeUrl('arrivals'),
+      7000,
+    );
 
-    const [nativeDepJsons, nativeArrJsons] = await Promise.all([
-      loadNativeBoardPages('departures'),
-      loadNativeBoardPages('arrivals'),
-    ]);
-    const nativeFound =
-      nativeDepJsons.some((json) => {
-        const pd = json.result?.response?.airport?.pluginData ?? {};
-        return ((((pd.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
-          | Array<{flight?: Record<string, unknown>}>
-          | undefined) ?? []).length > 0;
-      }) ||
-      nativeArrJsons.some((json) => {
-        const pd = json.result?.response?.airport?.pluginData ?? {};
-        return ((((pd.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
-          | Array<{flight?: Record<string, unknown>}>
-          | undefined) ?? []).length > 0;
-      });
-
-    if (nativeFound) {
-      const depJsons = nativeDepJsons;
-      const arrJsons = nativeArrJsons;
-
-      const depRows = depJsons.flatMap((json) => {
-        const pd = json.result?.response?.airport?.pluginData ?? {};
-        return ((((pd.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
-          | Array<{flight?: Record<string, unknown>}>
-          | undefined) ?? []);
-      });
-      const arrRows = arrJsons.flatMap((json) => {
-        const pd = json.result?.response?.airport?.pluginData ?? {};
-        return ((((pd.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
-          | Array<{flight?: Record<string, unknown>}>
-          | undefined) ?? []);
-      });
-
-      if (depRows.length > 0 || arrRows.length > 0) {
-        const apName = catalog?.name ?? dir?.name ?? `${iata || resolvedIcao} Airport`;
-        const departuresById = new Map<string, AirportBoardFlight>();
-        for (const r of depRows) {
-          if (!r.flight) continue;
-          const row = mapFr24BoardRow(r.flight, 'departures', iata, resolvedIcao, apName);
-          departuresById.set(row.id, row);
-        }
-        const arrivalsById = new Map<string, AirportBoardFlight>();
-        for (const r of arrRows) {
-          if (!r.flight) continue;
-          const row = mapFr24BoardRow(r.flight, 'arrivals', iata, resolvedIcao, apName);
-          arrivalsById.set(row.id, row);
-        }
-        const board: AirportBoardResponse = {
-          icao: resolvedIcao,
-          iata,
-          name: apName,
-          city: catalog?.city ?? dir?.city ?? '',
-          country: catalog?.country ?? dir?.country ?? '',
-          lat: catalog?.lat ?? dir?.lat ?? 0,
-          lon: catalog?.lon ?? dir?.lon ?? 0,
-          delayIndex: {
-            arrivalsIndex: null,
-            arrivalsDelayAvgMin: null,
-            arrivalsDelayedPct: null,
-            departuresIndex: null,
-            departuresDelayAvgMin: null,
-            departuresDelayedPct: null,
-          },
-          arrivals: Array.from(arrivalsById.values()),
-          departures: Array.from(departuresById.values()),
-          fetchedAt: Date.now(),
-          source: 'fr24-native-board',
-        };
-        browserBoardCache.set(cacheKey, {ts: Date.now(), board});
-        return board;
-      }
-    }
-
-    const loadBoardPages = async (
-      mode: 'departures' | 'arrivals',
-    ): Promise<Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>> => {
-      const loaded: Array<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}> = [];
-      for (const page of [1, 2, 3, 4, 5]) {
-        const json = await fetchJsonViaCorsRelay<{result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}}>(
-          makeUrl(mode, page),
-          7000,
-        );
-        if (!json) break;
-        loaded.push(json);
-        const pd = json.result?.response?.airport?.pluginData ?? {};
-        const sched = ((((pd.schedule as Record<string, unknown> | undefined)?.[mode] as Record<string, unknown> | undefined)?.data as
-          | Array<{flight?: Record<string, unknown>}>
-          | undefined) ?? []);
-        if (sched.length === 0) break;
-      }
-      return loaded;
-    };
-    const [depJsons, arrJsons] = await Promise.all([
-      loadBoardPages('departures'),
-      loadBoardPages('arrivals'),
-    ]);
-
-    const depRows = depJsons.flatMap((json) => {
-      const pd = json?.result?.response?.airport?.pluginData ?? {};
-      return ((((pd.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
-        | Array<{flight?: Record<string, unknown>}>
-        | undefined) ?? []);
-    });
-    const arrRows = arrJsons.flatMap((json) => {
-      const pd = json?.result?.response?.airport?.pluginData ?? {};
-      return ((((pd.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
-        | Array<{flight?: Record<string, unknown>}>
-        | undefined) ?? []);
-    });
+    const pdDep = depJson?.result?.response?.airport?.pluginData ?? {};
+    const pdArr = arrJson?.result?.response?.airport?.pluginData ?? {};
+    const depRows = ((pdDep.schedule as Record<string, unknown> | undefined)?.departures as Record<string, unknown> | undefined)?.data as
+      | Array<{flight?: Record<string, unknown>}>
+      | undefined;
+    const arrRows = ((pdArr.schedule as Record<string, unknown> | undefined)?.arrivals as Record<string, unknown> | undefined)?.data as
+      | Array<{flight?: Record<string, unknown>}>
+      | undefined;
 
     if ((Array.isArray(depRows) && depRows.length > 0) || (Array.isArray(arrRows) && arrRows.length > 0)) {
       const apName = catalog?.name ?? dir?.name ?? `${iata || resolvedIcao} Airport`;
-      const departuresById = new Map<string, AirportBoardFlight>();
-      for (const r of depRows ?? []) {
-        if (!r.flight) continue;
-        const row = mapFr24BoardRow(r.flight, 'departures', iata, resolvedIcao, apName);
-        departuresById.set(row.id, row);
-      }
-      const arrivalsById = new Map<string, AirportBoardFlight>();
-      for (const r of arrRows ?? []) {
-        if (!r.flight) continue;
-        const row = mapFr24BoardRow(r.flight, 'arrivals', iata, resolvedIcao, apName);
-        arrivalsById.set(row.id, row);
-      }
-      const departures = Array.from(departuresById.values());
-      const arrivals = Array.from(arrivalsById.values());
+      const departures = (depRows ?? []).filter((r) => r.flight).map((r) => mapFr24BoardRow(r.flight!, 'departures', iata, resolvedIcao, apName));
+      const arrivals = (arrRows ?? []).filter((r) => r.flight).map((r) => mapFr24BoardRow(r.flight!, 'arrivals', iata, resolvedIcao, apName));
       const board: AirportBoardResponse = {
         icao: resolvedIcao,
         iata,
@@ -1545,14 +1528,7 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
         country: catalog?.country ?? dir?.country ?? '',
         lat: catalog?.lat ?? dir?.lat ?? 0,
         lon: catalog?.lon ?? dir?.lon ?? 0,
-        delayIndex: {
-          arrivalsIndex: null,
-          arrivalsDelayAvgMin: null,
-          arrivalsDelayedPct: null,
-          departuresIndex: null,
-          departuresDelayAvgMin: null,
-          departuresDelayedPct: null,
-        },
+        delayIndex: computeDirectDelaySummary(departures, arrivals, pdDep, pdArr),
         arrivals,
         departures,
         fetchedAt: Date.now(),
@@ -1563,9 +1539,15 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
     }
   }
 
-  const nearby = Array.from(browserFlightIndex.values());
+  const snapFlights = await fetchStaticSnapshotFlights().catch(() => []);
+  const combinedMap = new Map<string, LiveFlight>();
+  for (const f of [...snapFlights, ...Array.from(browserFlightIndex.values())]) {
+    combinedMap.set(f.icao24 || f.callsign, f);
+  }
+  const nearby = Array.from(combinedMap.values());
   const arrivals: AirportBoardFlight[] = nearby
     .filter((f) => (iata && f.destination === iata) || f.destination === resolvedIcao)
+    .slice(0, 60)
     .map((f) => ({
       id: f.id,
       callsign: f.callsign,
@@ -1589,6 +1571,7 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
     }));
   const departures: AirportBoardFlight[] = nearby
     .filter((f) => (iata && f.origin === iata) || f.origin === resolvedIcao)
+    .slice(0, 60)
     .map((f) => ({
       id: f.id,
       callsign: f.callsign,
@@ -1618,14 +1601,7 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
     country: catalog?.country ?? dir?.country ?? '',
     lat: catalog?.lat ?? dir?.lat ?? 0,
     lon: catalog?.lon ?? dir?.lon ?? 0,
-    delayIndex: {
-      arrivalsIndex: null,
-      arrivalsDelayAvgMin: null,
-      arrivalsDelayedPct: null,
-      departuresIndex: null,
-      departuresDelayAvgMin: null,
-      departuresDelayedPct: null,
-    },
+    delayIndex: computeDirectDelaySummary(departures, arrivals, null, null),
     arrivals,
     departures,
     fetchedAt: Date.now(),
@@ -1844,6 +1820,359 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
   return result;
 }
 
+async function fetchDirectSafetyRecord(params: URLSearchParams): Promise<SafetyRecordResponse> {
+  const registration = (params.get('registration') ?? params.get('reg') ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '');
+  const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(registration)}`;
+  if (!registration) {
+    return {registration: '', items: [], searchUrl, source: 'aviation-safety.net', fetchedAt: Date.now(), note: 'Missing registration'};
+  }
+  const cached = browserSafetyCache.get(registration);
+  if (cached && Date.now() - cached.ts < 3600000) return cached.data;
+
+  const stripTags = (s: string) =>
+    s
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n)))
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const items: SafetyRecordItem[] = [];
+  let note: string | undefined;
+
+  if (isNoWorkerModePreferred()) {
+    note = 'Strict Wi-Fi / No-Worker mode active — open aviation-safety.net directly';
+  } else {
+    const html = await fetchTextViaCorsRelay(searchUrl, 6500);
+    if (!html) {
+      note = 'Relay unavailable — click Open on aviation-safety.net';
+    } else if (/just a moment|cloudflare|cf-challenge/i.test(html) && !html.includes('wikibase') && !html.includes('<table')) {
+      note = 'ASN browser verification active — open aviation-safety.net directly';
+    } else {
+      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = rowRegex.exec(html)) !== null) {
+        const rowHtml = m[1];
+        if (/<th\b/i.test(rowHtml)) continue;
+        const cells = Array.from(rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)).map((c) => c[1]);
+        if (cells.length < 4) continue;
+        const hrefMatch = rowHtml.match(/href=["']([^"']*(?:wikibase|database\/record)[^"']*)["']/i);
+        const hrefRaw = hrefMatch ? hrefMatch[1] : '';
+        const href = hrefRaw
+          ? hrefRaw.startsWith('http')
+            ? hrefRaw
+            : `https://aviation-safety.net${hrefRaw.startsWith('/') ? '' : '/'}${hrefRaw}`
+          : searchUrl;
+        const dateText = stripTags(cells[0]);
+        if (!dateText || !/\d{4}/.test(dateText)) continue;
+        items.push({
+          date: dateText,
+          type: stripTags(cells[1] ?? ''),
+          operator: stripTags(cells[3] ?? cells[2] ?? ''),
+          fatalities: stripTags(cells[4] ?? '0'),
+          location: stripTags(cells[5] ?? ''),
+          damage: stripTags(cells[7] ?? cells[6] ?? ''),
+          href,
+        });
+      }
+    }
+  }
+
+  const data: SafetyRecordResponse = {
+    registration,
+    items: items.slice(0, 30),
+    searchUrl,
+    source: 'aviation-safety.net',
+    fetchedAt: Date.now(),
+    note,
+  };
+  browserSafetyCache.set(registration, {ts: Date.now(), data});
+  return data;
+}
+
+async function fetchDirectPastFlights(params: URLSearchParams): Promise<{query: string; items: PastFlightRecord[]; fetchedAt: number; cached?: boolean}> {
+  const rawQuery = (params.get('query') ?? '').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  const icao24Param = (params.get('icao24') ?? '').trim().toUpperCase();
+  const cacheKey = `${rawQuery}|${icao24Param}`;
+  const cached = browserPastCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 120000) {
+    return {query: rawQuery || icao24Param, items: cached.items, fetchedAt: Date.now(), cached: true};
+  }
+
+  const isReg = /-/.test(rawQuery) || /^[BNVGDF][A-Z0-9]{3,}$/.test(rawQuery);
+  const items: PastFlightRecord[] = [];
+  const seen = new Set<string>();
+
+  const openSkyTask = (async () => {
+    let hex = icao24Param.toLowerCase();
+    if (!hex && rawQuery) {
+      const snap = await fetchStaticSnapshotFlights().catch(() => []);
+      const all = [...Array.from(browserFlightIndex.values()), ...snap];
+      const match = all.find(
+        (f) =>
+          f.registration.toUpperCase() === rawQuery ||
+          f.callsign.toUpperCase() === rawQuery ||
+          f.flightNumber.toUpperCase() === rawQuery,
+      );
+      if (match?.icao24) hex = match.icao24.toLowerCase();
+    }
+    if (!hex) return;
+    const endSec = Math.floor(Date.now() / 1000);
+    const beginSec = endSec - 7 * 86400;
+    const rows = await fetchNativeCorsJson<Array<Record<string, unknown>>>(
+      `https://opensky-network.org/api/flights/aircraft?icao24=${encodeURIComponent(hex)}&begin=${beginSec}&end=${endSec}`,
+      5500,
+    );
+    if (Array.isArray(rows)) {
+      for (const row of rows.slice(0, 14)) {
+        const cs = String(row.callsign ?? hex).trim().toUpperCase();
+        const firstSeen = Number(row.firstSeen ?? 0) || undefined;
+        const lastSeen = Number(row.lastSeen ?? 0) || undefined;
+        const id = `os-${hex}-${firstSeen ?? items.length}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        items.push({
+          id,
+          flightNumber: cs,
+          callsign: cs,
+          registration: isReg ? rawQuery : '',
+          originIata: '',
+          originIcao: String(row.estDepartureAirport ?? '').toUpperCase(),
+          originName: String(row.estDepartureAirport ?? ''),
+          destinationIata: '',
+          destinationIcao: String(row.estArrivalAirport ?? '').toUpperCase(),
+          destinationName: String(row.estArrivalAirport ?? ''),
+          scheduledDep: firstSeen,
+          actualDep: firstSeen,
+          scheduledArr: lastSeen,
+          actualArr: lastSeen,
+          statusText: 'Recorded Track',
+          aircraftCode: '',
+          source: 'opensky-log',
+        });
+      }
+    }
+  })();
+
+  const fr24Task = (async () => {
+    if (!rawQuery || isNoWorkerModePreferred()) return;
+    const modes = isReg ? ['reg', 'flight'] : ['flight', 'reg'];
+    for (const fetchBy of modes) {
+      const json = await fetchJsonViaCorsRelay<{result?: {response?: {data?: Array<Record<string, unknown>>}}}>(
+        `https://api.flightradar24.com/common/v1/flight/list.json?fetchBy=${fetchBy}&page=1&limit=16&query=${encodeURIComponent(rawQuery)}`,
+        6000,
+      );
+      const rows = json?.result?.response?.data ?? [];
+      for (const row of rows) {
+        const ident = (row.identification ?? {}) as Record<string, unknown>;
+        const num = (ident.number ?? {}) as Record<string, unknown>;
+        const ap = (row.airport ?? {}) as Record<string, unknown>;
+        const orig = (ap.origin ?? {}) as Record<string, unknown>;
+        const dest = (ap.destination ?? {}) as Record<string, unknown>;
+        const origCode = (orig.code ?? {}) as Record<string, unknown>;
+        const destCode = (dest.code ?? {}) as Record<string, unknown>;
+        const ac = (row.aircraft ?? {}) as Record<string, unknown>;
+        const acModel = (ac.model ?? {}) as Record<string, unknown>;
+        const timeObj = (row.time ?? {}) as Record<string, unknown>;
+        const sched = (timeObj.scheduled ?? {}) as Record<string, unknown>;
+        const real = (timeObj.real ?? {}) as Record<string, unknown>;
+        const statusObj = (row.status ?? {}) as Record<string, unknown>;
+        const fnum = String(num.default ?? ident.callsign ?? rawQuery).toUpperCase();
+        const depTs = Number(real.departure ?? sched.departure ?? 0) || undefined;
+        const id = String(ident.id ?? `${fnum}-${depTs ?? items.length}`);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        items.push({
+          id,
+          flightNumber: fnum,
+          callsign: String(ident.callsign ?? fnum).toUpperCase(),
+          registration: String(ac.registration ?? (isReg ? rawQuery : '')),
+          originIata: String(origCode.iata ?? '').toUpperCase(),
+          originIcao: String(origCode.icao ?? '').toUpperCase(),
+          originName: String(orig.name ?? ''),
+          destinationIata: String(destCode.iata ?? '').toUpperCase(),
+          destinationIcao: String(destCode.icao ?? '').toUpperCase(),
+          destinationName: String(dest.name ?? ''),
+          scheduledDep: Number(sched.departure ?? 0) || undefined,
+          actualDep: Number(real.departure ?? 0) || undefined,
+          scheduledArr: Number(sched.arrival ?? 0) || undefined,
+          actualArr: Number(real.arrival ?? 0) || undefined,
+          statusText: String(statusObj.text ?? 'Completed'),
+          aircraftCode: String(acModel.code ?? ''),
+          source: 'fr24-history',
+        });
+      }
+      if (rows.length > 0) break;
+    }
+  })();
+
+  await Promise.all([openSkyTask, fr24Task]);
+
+  if (items.length === 0 && rawQuery) {
+    const snap = await fetchStaticSnapshotFlights().catch(() => []);
+    for (const f of [...Array.from(browserFlightIndex.values()), ...snap]) {
+      if (
+        f.registration.toUpperCase() === rawQuery ||
+        f.callsign.toUpperCase() === rawQuery ||
+        f.flightNumber.toUpperCase() === rawQuery
+      ) {
+        const id = `live-${f.icao24}-${f.lastContactEpoch}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        items.push({
+          id,
+          flightNumber: f.flightNumber || f.callsign,
+          callsign: f.callsign,
+          registration: f.registration,
+          originIata: f.origin,
+          originIcao: f.origin,
+          originName: f.origin,
+          destinationIata: f.destination,
+          destinationIcao: f.destination,
+          destinationName: f.destination,
+          scheduledDep: f.lastContactEpoch,
+          actualDep: f.lastContactEpoch,
+          statusText: f.onGround ? 'On Ground' : 'Observed Sector',
+          aircraftCode: f.aircraftType,
+          source: f.source,
+        });
+      }
+    }
+  }
+
+  items.sort((a, b) => (b.actualDep ?? b.scheduledDep ?? 0) - (a.actualDep ?? a.scheduledDep ?? 0));
+  browserPastCache.set(cacheKey, {ts: Date.now(), items});
+  return {query: rawQuery || icao24Param, items: items.slice(0, 24), fetchedAt: Date.now()};
+}
+
+function classifyDirectHazardCategory(hazard: string, rawText: string): HazardCategory {
+  const s = `${hazard} ${rawText}`.toUpperCase();
+  if (/TURB|LLWS|WS\b|LLWAS|MTW|WAV/.test(s)) return 'turbulence';
+  if (/ICE|ICG|FZRA|FZDZ|RIME|MIXED/.test(s)) return 'icing';
+  return 'advisory';
+}
+
+function parseDirectSigmetList(features: Array<Record<string, unknown>>, source: string): SigmetHazard[] {
+  const out: SigmetHazard[] = [];
+  for (let i = 0; i < features.length; i++) {
+    const f = features[i];
+    const props = ((f.properties as Record<string, unknown> | undefined) ?? f) as Record<string, unknown>;
+    const geom = (f.geometry ?? {}) as Record<string, unknown>;
+    const rawCoords = geom.coordinates as unknown;
+    let ring: Array<[number, number]> = [];
+    if (geom.type === 'Polygon' && Array.isArray(rawCoords) && Array.isArray(rawCoords[0])) {
+      ring = (rawCoords[0] as Array<[number, number]>)
+        .filter((p) => Array.isArray(p) && p.length >= 2)
+        .map((p) => [Number(p[1]), Number(p[0])] as [number, number]);
+    } else if (Array.isArray(props.coords)) {
+      ring = (props.coords as Array<{lat?: number; lon?: number}>)
+        .filter((c) => Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lon)))
+        .map((c) => [Number(c.lat), Number(c.lon)] as [number, number]);
+    }
+    if (ring.length < 3) continue;
+    const hazard = String(props.hazard ?? props.airSigmetType ?? 'SIGMET').toUpperCase();
+    const rawText = String(props.rawAirSigmet ?? props.rawSigmet ?? props.rawText ?? '');
+    out.push({
+      id: `${source}-${props.airSigmetId ?? props.isigmetId ?? props.id ?? i}`,
+      hazard,
+      qualifier: String(props.severity ?? props.qualifier ?? ''),
+      category: classifyDirectHazardCategory(hazard, rawText),
+      validFrom: String(props.validTimeFrom ?? props.validFrom ?? ''),
+      validTo: String(props.validTimeTo ?? props.validTo ?? ''),
+      baseFt: Number.isFinite(Number(props.altitudeLow1 ?? props.base)) ? Number(props.altitudeLow1 ?? props.base) : null,
+      topFt: Number.isFinite(Number(props.altitudeHi1 ?? props.top)) ? Number(props.altitudeHi1 ?? props.top) : null,
+      rawText,
+      coords: ring,
+      source,
+    });
+  }
+  return out;
+}
+
+async function fetchDirectHazards(): Promise<{sigmets: SigmetHazard[]; rainviewer: RainViewerMeta | null; cached: boolean}> {
+  const awcFetch = async (url: string) =>
+    (await fetchNativeCorsJson<Record<string, unknown> | Array<Record<string, unknown>>>(url, 4500)) ??
+    (await fetchJsonViaCorsRelay<Record<string, unknown> | Array<Record<string, unknown>>>(url, 6500));
+
+  const [airRaw, intlRaw, gAirRaw, rvJson] = await Promise.all([
+    awcFetch('https://aviationweather.gov/api/data/airsigmet?format=geojson'),
+    awcFetch('https://aviationweather.gov/api/data/isigmet?format=geojson'),
+    awcFetch('https://aviationweather.gov/api/data/gairmet?format=geojson'),
+    fetchNativeCorsJson<{
+      host?: string;
+      radar?: {past?: Array<{time: number; path: string}>; nowcast?: Array<{time: number; path: string}>};
+    }>('https://api.rainviewer.com/public/weather-maps.json', 4500),
+  ]);
+
+  const toFeatures = (raw: unknown): Array<Record<string, unknown>> =>
+    Array.isArray(raw)
+      ? (raw as Array<Record<string, unknown>>)
+      : Array.isArray((raw as {features?: unknown[]})?.features)
+        ? ((raw as {features: Array<Record<string, unknown>>}).features)
+        : [];
+
+  const sigmets = [
+    ...parseDirectSigmetList(toFeatures(airRaw), 'US AIR/SIGMET'),
+    ...parseDirectSigmetList(toFeatures(intlRaw), 'INTL SIGMET'),
+    ...parseDirectSigmetList(toFeatures(gAirRaw), 'G-AIRMET').slice(0, 80),
+  ];
+
+  let rainviewer: RainViewerMeta | null = null;
+  if (rvJson?.host) {
+    const frames = [...(rvJson.radar?.past ?? []), ...(rvJson.radar?.nowcast ?? [])].slice(-8);
+    if (frames.length > 0) rainviewer = {host: rvJson.host, frames};
+  }
+  return {sigmets, rainviewer, cached: false};
+}
+
+async function fetchDirectDisruptions(): Promise<{items: AirportDisruption[]; sources: string[]; cached: boolean}> {
+  const items: AirportDisruption[] = [];
+  const sources: string[] = [];
+  const hubIcaos = AIRPORT_CATALOG.map((a) => a.icao).join(',');
+  const metarUrl = `https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(hubIcaos)}&format=json`;
+  const metars =
+    (await fetchNativeCorsJson<Array<Record<string, unknown>>>(metarUrl, 4500)) ??
+    (await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(metarUrl, 6500)) ??
+    [];
+
+  if (Array.isArray(metars) && metars.length > 0) {
+    sources.push('NOAA AWC Hub Weather');
+    for (const m of metars) {
+      const icao = String(m.icaoId ?? '').toUpperCase();
+      const cat = String(m.fltCat ?? '').toUpperCase();
+      const wx = String(m.wxString ?? '');
+      const wspd = Number(m.wspd ?? 0);
+      const wgst = Number(m.wgst ?? 0);
+      const spec = AIRPORT_CATALOG.find((a) => a.icao === icao);
+      if (!spec) continue;
+      if (cat === 'IFR' || cat === 'LIFR' || /TS|FZ|SQ|GR|BLSN/i.test(wx) || wgst >= 28 || wspd >= 25) {
+        const reasons: string[] = [];
+        if (cat === 'LIFR' || cat === 'IFR') reasons.push(`${cat} low ceiling/visibility`);
+        if (wx) reasons.push(`Weather: ${wx}`);
+        if (wgst >= 28 || wspd >= 25) reasons.push(`Surface winds ${wspd}${wgst ? `G${wgst}` : ''} kt`);
+        items.push({
+          id: `WX-${icao}`,
+          icao,
+          iata: spec.iata,
+          airportName: spec.name,
+          type: 'WX-OPS',
+          severity: cat === 'LIFR' || /TS|FZ/i.test(wx) ? 'HIGH' : 'MEDIUM',
+          reason: reasons.join(' · '),
+          avgDelayMinutes: null,
+          trend: 'Live METAR advisory',
+          updatedAt: String(m.reportTime ?? new Date().toISOString()),
+          source: 'NOAA METAR',
+        });
+      }
+    }
+  }
+  return {items, sources, cached: false};
+}
+
 async function handleStaticRoute(path: string, params: URLSearchParams): Promise<unknown> {
   if (path === '/api/flights') {
     return fetchDirectFlights(params);
@@ -1865,6 +2194,12 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
   if (path === '/api/flight-detail') {
     return fetchDirectFlightDetail(params);
   }
+  if (path === '/api/safety-record') {
+    return fetchDirectSafetyRecord(params);
+  }
+  if (path === '/api/past-flights') {
+    return fetchDirectPastFlights(params);
+  }
   if (path === '/api/surface') {
     return fetchDirectSurface(params);
   }
@@ -1880,37 +2215,10 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
     };
   }
   if (path === '/api/weather/hazards') {
-    let rainviewer: RainViewerMeta | null = null;
-    try {
-      const rv = await fetch('https://api.rainviewer.com/public/weather-maps.json', {
-        signal: AbortSignal.timeout(4000),
-      });
-      if (rv.ok) {
-        const rvJson = (await rv.json()) as {
-          host?: string;
-          radar?: {past?: Array<{time: number; path: string}>; nowcast?: Array<{time: number; path: string}>};
-        };
-        const frames = [...(rvJson.radar?.past ?? []), ...(rvJson.radar?.nowcast ?? [])].slice(-8);
-        if (rvJson.host && frames.length > 0) rainviewer = {host: rvJson.host, frames};
-      }
-    } catch {
-      // optional
-    }
-    return {sigmets: [], rainviewer, cached: false};
+    return fetchDirectHazards();
   }
   if (path === '/api/airport-board') {
     return fetchDirectAirportBoard(params);
-  }
-  if (path === '/api/safety-record') {
-    const registration = (params.get('registration') ?? '').trim().toUpperCase();
-    const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(registration)}`;
-    return {
-      registration,
-      items: [],
-      searchUrl,
-      source: 'aviation-safety.net',
-      fetchedAt: Date.now(),
-    };
   }
   if (path === '/api/airport-taxi') {
     const icao = (params.get('icao') ?? 'ZBAA').toUpperCase();
@@ -1931,8 +2239,8 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
   if (path === '/api/weather') {
     return fetchDirectWeather(params);
   }
-  if (path === '/api/disruptions') return {items: [], sources: [], cached: false};
-  if (path === '/api/acars') return {messages: [], sourceStatus: 'Static CORS Relay Mode', cached: false};
+  if (path === '/api/disruptions') return fetchDirectDisruptions();
+  if (path === '/api/acars') return {messages: [], sourceStatus: 'Static CORS Direct Mode', cached: false};
   return {};
 }
 

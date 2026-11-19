@@ -4,7 +4,8 @@ import path from 'path';
 import {createServer as createViteServer} from 'vite';
 import {createApiRouter} from './server/api';
 
-const PORT = Number(process.env.PORT) || 3000;
+const envPort = Number(process.env.SKYDECK_PORT || process.env.PORT);
+const PORT = Number.isFinite(envPort) && envPort > 0 && envPort !== 8080 ? envPort : 3000;
 
 async function startServer() {
   const app = express();

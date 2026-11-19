@@ -16,9 +16,11 @@ import {
 } from './aircraftIcons';
 import type {
   AirfieldSurfaceData,
+  AirportDisruption,
   AirportMarker,
   AirportWeather,
   FlightDetail,
+  HazardCategory,
   LiveFlight,
   RadarSettings,
   RainViewerMeta,
@@ -37,10 +39,14 @@ export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
   showPlaneLabels: false,
   showMetarDots: true,
   showSigmets: true,
+  showTurbHazards: true,
+  showIceHazards: true,
+  showAdvisoryHazards: true,
   showRadar: false,
   radarOpacity: 0.5,
   showGroundTraffic: true,
   showDrRings: true,
+  preferNoWorkerMode: false,
   apiBaseUrl: '',
   cfWorkerUrl: DEFAULT_CF_WORKER_URL,
 };
@@ -168,20 +174,23 @@ export const RadarSettingsPopover: React.FC<{
 
       {/* Map Overlay & Locate Toggles */}
       <div className="space-y-2">
-        <div className="text-xs font-medium text-foreground">Map Overlays & Controls</div>
+        <div className="text-xs font-medium text-foreground">Map Overlays &amp; Hazards</div>
         <div className="grid grid-cols-2 gap-1.5">
           {(
             [
               {key: 'locateMeEnabled', label: 'Locate Me'},
               {key: 'showPlaneLabels', label: 'Plane Labels'},
               {key: 'showMetarDots', label: 'METAR Colors'},
-              {key: 'showSigmets', label: 'SIGMET Zones'},
+              {key: 'showSigmets', label: 'WX Hazards'},
+              {key: 'showTurbHazards', label: 'Turbulence'},
+              {key: 'showIceHazards', label: 'Icing Zones'},
+              {key: 'showAdvisoryHazards', label: 'Advisories/TFR'},
               {key: 'showGroundTraffic', label: 'Ground Traffic'},
               {key: 'showDrRings', label: 'DR Rings'},
               {key: 'showRadar', label: 'Precip Radar'},
             ] as const
           ).map((item) => {
-            const active = settings[item.key];
+            const active = Boolean(settings[item.key]);
             return (
               <Button
                 key={item.key}
@@ -220,30 +229,82 @@ export const RadarSettingsPopover: React.FC<{
 
       <Separator />
 
+      {/* Restricted-WiFi / No-Worker Direct CORS Mode */}
       <div className="space-y-1.5">
-        <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-foreground">Custom Backend Relay (Optional)</span>
-          <span className="text-[10px] text-muted-foreground font-mono">Netlify / Node</span>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-xs font-medium text-foreground">Strict Wi-Fi / No-Worker Mode</div>
+            <div className="text-[10.5px] text-muted-foreground leading-tight">
+              Bypass .workers.dev relays using direct ADS-B, OpenSky &amp; live snapshots
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant={settings.preferNoWorkerMode ? 'default' : 'outline'}
+            onClick={() => onUpdateSettings({preferNoWorkerMode: !settings.preferNoWorkerMode})}
+          >
+            {settings.preferNoWorkerMode ? 'Enabled' : 'Off'}
+          </Button>
         </div>
-        <input
-          type="url"
-          value={settings.apiBaseUrl ?? ''}
-          onChange={(e) => {
-            const val = e.target.value;
-            onUpdateSettings({apiBaseUrl: val});
-            try {
-              const clean = val.trim().replace(/\/+$/, '');
-              if (clean) window.localStorage.setItem('skydeck-api-base', clean);
-              else window.localStorage.removeItem('skydeck-api-base');
-            } catch {
-              // ignore storage errors
-            }
-          }}
-          placeholder="Optional https://your-site.netlify.app"
-          aria-label="Custom SkyDeck API relay URL"
-          className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
       </div>
+
+      {/* Collapsed Advanced Proxy / Worker Configuration */}
+      <details className="rounded-lg border border-border bg-secondary/35 px-2.5 py-2 text-xs">
+        <summary className="cursor-pointer font-medium text-foreground select-none">
+          Advanced Proxy &amp; Worker Settings
+        </summary>
+        <div className="mt-2.5 space-y-2.5">
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-medium text-foreground">Cloudflare Worker URL</span>
+              <span className="text-[10px] text-muted-foreground font-mono">Optional</span>
+            </div>
+            <input
+              type="url"
+              value={settings.cfWorkerUrl ?? ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                onUpdateSettings({cfWorkerUrl: val});
+                try {
+                  const clean = val.trim().replace(/\/+$/, '');
+                  if (clean) window.localStorage.setItem('skydeck-cf-worker', clean);
+                  else window.localStorage.removeItem('skydeck-cf-worker');
+                } catch {
+                  // ignore
+                }
+              }}
+              placeholder={DEFAULT_CF_WORKER_URL}
+              aria-label="Cloudflare Worker CORS proxy URL"
+              className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-medium text-foreground">Custom Backend Relay</span>
+              <span className="text-[10px] text-muted-foreground font-mono">Node / Netlify</span>
+            </div>
+            <input
+              type="url"
+              value={settings.apiBaseUrl ?? ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                onUpdateSettings({apiBaseUrl: val});
+                try {
+                  const clean = val.trim().replace(/\/+$/, '');
+                  if (clean) window.localStorage.setItem('skydeck-api-base', clean);
+                  else window.localStorage.removeItem('skydeck-api-base');
+                } catch {
+                  // ignore storage errors
+                }
+              }}
+              placeholder="Optional https://your-site.netlify.app"
+              aria-label="Custom SkyDeck API relay URL"
+              className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+        </div>
+      </details>
     </PopoverContent>
   </Popover>
 );
@@ -256,6 +317,7 @@ interface RadarMapProps {
   mapAirports?: AirportMarker[];
   airports: AirportWeather[];
   sigmets: SigmetHazard[];
+  disruptions?: AirportDisruption[];
   rainviewer: RainViewerMeta | null;
   activeRegion: RegionPreset;
   theme: 'dark' | 'light';
@@ -593,6 +655,23 @@ function offsetLatLonMeters(
   return [lat + dLat, lon + dLon];
 }
 
+function metersPerPixelAtLatZoom(lat: number, zoom: number): number {
+  const cosLat = Math.max(0.18, Math.cos((lat * Math.PI) / 180));
+  return (156543.03392 * cosLat) / Math.pow(2, zoom);
+}
+
+function pxFromMeters(meters: number, mPerPx: number, minPx: number, maxPx: number): number {
+  return Math.max(minPx, Math.min(maxPx, meters / Math.max(0.05, mPerPx)));
+}
+
+function classifySigmetCategory(sig: SigmetHazard): HazardCategory {
+  if (sig.category) return sig.category;
+  const text = `${sig.hazard} ${sig.rawText}`.toUpperCase();
+  if (/TURB|LLWS|MTW|CAT/.test(text)) return 'turbulence';
+  if (/ICE|ICG|FZLVL|FZL|MIX|CLR/.test(text)) return 'icing';
+  return 'advisory';
+}
+
 export const RadarMap: React.FC<RadarMapProps> = ({
   flights,
   selectedFlight,
@@ -601,6 +680,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   mapAirports = [],
   airports,
   sigmets,
+  disruptions = [],
   rainviewer,
   activeRegion,
   theme,
@@ -707,16 +787,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const map = L.map(el, {
       center: activeRegion.center,
       zoom: activeRegion.zoom,
-      minZoom: 3,
+      minZoom: 2,
       maxZoom: 20,
+      zoomSnap: 0.5,
+      zoomDelta: 0.5,
+      wheelPxPerZoomLevel: 65,
+      zoomAnimation: true,
+      fadeAnimation: true,
       zoomControl: false,
       preferCanvas: true,
-      zoomAnimation: true,
       markerZoomAnimation: true,
-      fadeAnimation: false,
-      zoomSnap: 1,
-      zoomDelta: 1,
-      wheelPxPerZoomLevel: 42,
       wheelDebounceTime: 8,
       zoomAnimationThreshold: 8,
     });
@@ -892,7 +972,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView(activeRegion.center, activeRegion.zoom, {animate: true, duration: 0.32, easeLinearity: 0.8});
+    map.setView(activeRegion.center, activeRegion.zoom, {animate: true});
     setMapZoom(activeRegion.zoom);
   }, [activeRegion]);
 
@@ -900,11 +980,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const map = mapRef.current;
     if (!map || !flyToLocation) return;
     const z = flyToLocation.zoom ?? 8;
-    map.setView([flyToLocation.lat, flyToLocation.lon], z, {
-      animate: true,
-      duration: 0.28,
-      easeLinearity: 0.82,
-    });
+    map.setView([flyToLocation.lat, flyToLocation.lon], z, {animate: true});
     setMapZoom(z);
   }, [flyToLocation]);
 
@@ -956,11 +1032,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         : settings.basemapStyle;
 
     const tileOpts = {
-      keepBuffer: 4,
-      updateWhenIdle: true,
-      updateWhenZooming: false,
       detectRetina: true,
+      keepBuffer: 6,
+      updateWhenIdle: false,
+      updateWhenZooming: true,
+      crossOrigin: true,
     };
+
+    const effectiveBg = effectiveStyle === 'light' || effectiveStyle === 'osm' ? '#dce6f2' : '#0b111c';
+    map.getContainer().style.backgroundColor = effectiveBg;
 
     if (effectiveStyle === 'satellite') {
       layers.push(
@@ -988,8 +1068,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
           ...tileOpts,
           attribution: '&copy; OpenStreetMap contributors',
-          maxNativeZoom: 19,
-          maxZoom: 19,
+          maxNativeZoom: 18,
+          maxZoom: 20,
         }),
       );
     } else if (effectiveStyle === 'light') {
@@ -1035,6 +1115,9 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     }
 
     for (const l of layers) {
+      l.on('tileerror', (ev: L.TileErrorEvent) => {
+        if (ev.tile) ev.tile.style.display = 'none';
+      });
       l.addTo(map);
       l.bringToBack();
     }
@@ -1086,21 +1169,23 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     if (!settings.showSigmets) return;
 
     for (const sig of sigmets) {
-      const color = sig.hazard.includes('TURB')
-        ? '#F59E0B'
-        : sig.hazard.includes('ICE')
-          ? '#0284C7'
-          : '#EF4444';
+      const cat = classifySigmetCategory(sig);
+      if (cat === 'turbulence' && !settings.showTurbHazards) continue;
+      if (cat === 'icing' && !settings.showIceHazards) continue;
+      if (cat === 'advisory' && !settings.showAdvisoryHazards) continue;
+
+      const color =
+        cat === 'turbulence' ? '#F59E0B' : cat === 'icing' ? '#0EA5E9' : '#EF4444';
       const poly = L.polygon(sig.coords, {
         color,
         weight: 1.5,
         fillColor: color,
-        fillOpacity: 0.1,
-        dashArray: '4 4',
+        fillOpacity: cat === 'icing' ? 0.14 : 0.11,
+        dashArray: cat === 'turbulence' ? '5 4' : cat === 'icing' ? '2 4' : '6 3',
       });
       poly.bindPopup(
         `<div style="font-family:monospace;font-size:11px;max-width:260px;">
-          <strong>${sig.hazard} ${sig.qualifier}</strong><br/>
+          <strong>${cat.toUpperCase()} · ${sig.hazard} ${sig.qualifier}</strong><br/>
           ${sig.baseFt !== null ? `FL${Math.round(sig.baseFt / 100)}` : 'SFC'} - ${
             sig.topFt !== null ? `FL${Math.round(sig.topFt / 100)}` : 'UNL'
           }<br/>
@@ -1109,7 +1194,46 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       );
       poly.addTo(layer);
     }
-  }, [sigmets, settings.showSigmets]);
+
+    if (settings.showAdvisoryHazards && disruptions.length > 0) {
+      for (const d of disruptions) {
+        const matchAp =
+          mapAirports.find((a) => a.icao === d.icao || (d.iata && a.iata === d.iata)) ??
+          AIRPORT_CATALOG.find((a) => a.icao === d.icao || (d.iata && a.iata === d.iata));
+        if (!matchAp) continue;
+        const ringColor =
+          d.type === 'GS' || d.type === 'CLOSURE'
+            ? '#EF4444'
+            : d.type === 'GDP'
+              ? '#F59E0B'
+              : '#0EA5E9';
+        const ring = L.circle([matchAp.lat, matchAp.lon], {
+          radius: d.severity === 'HIGH' ? 32000 : 22000,
+          color: ringColor,
+          weight: 1.8,
+          dashArray: '4 4',
+          fillColor: ringColor,
+          fillOpacity: 0.08,
+        });
+        ring.bindPopup(
+          `<div style="font-family:monospace;font-size:11px;max-width:240px;">
+            <strong>${d.iata || d.icao} · ${d.type} (${d.severity})</strong><br/>
+            ${d.reason}${d.avgDelayMinutes ? ` · Avg ${d.avgDelayMinutes}m` : ''}<br/>
+            <span style="opacity:0.75">${d.source}</span>
+          </div>`,
+        );
+        ring.addTo(layer);
+      }
+    }
+  }, [
+    sigmets,
+    disruptions,
+    mapAirports,
+    settings.showSigmets,
+    settings.showTurbHazards,
+    settings.showIceHazards,
+    settings.showAdvisoryHazards,
+  ]);
 
   // All Airports merged (Viewport global directory + Catalog + Weather)
   const unifiedAirports = useMemo(() => {
@@ -1293,8 +1417,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     };
   }, [mapZoom, viewportTick, unifiedAirports, selectedAirportIcao]);
 
-  // Render FlightDeck-Precision Illuminated Airfields across ALL airports:
-  // Terminals, Numbered/Named Aprons, Numbered Parking Stands, All Gold-Trimmed Taxiways, Luminous White Runways & Dashed Approach Guides
+  // Aspect-Locked Metric Illuminated Airfields across ALL airports:
+  // Grouped Sublayers, Meter-Scaled Runways/Taxiways, Close-Zoom Gate Cap (<=55), 4-Unit PAPI, TDZ Barrettes & Hold-Short Bars
   useEffect(() => {
     const layer = surfaceLayerRef.current;
     const renderer = canvasRendererRef.current;
@@ -1304,20 +1428,30 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     if (surfaceList.length === 0 || mapZoom < 9.6) return;
 
     const viewBounds = map ? map.getBounds().pad(0.22) : null;
-    const apronFill = isDark ? '#0f141e' : '#334155';
-    const apronStroke = isDark ? 'rgba(234, 179, 8, 0.32)' : 'rgba(245, 158, 11, 0.5)';
-    const termFill = isDark ? '#1a2538' : '#3b4a62';
-    const termStroke = isDark ? 'rgba(56, 189, 248, 0.65)' : 'rgba(14, 165, 233, 0.85)';
-    const taxiFill = isDark ? '#0b101b' : '#475569';
-    const taxiRim = isDark ? 'rgba(234, 179, 8, 0.44)' : 'rgba(245, 158, 11, 0.72)';
-    const rwyAsphalt = '#060910';
+    const apronsGroup = L.layerGroup().addTo(layer);
+    const terminalsGroup = L.layerGroup().addTo(layer);
+    const taxiwaysGroup = L.layerGroup().addTo(layer);
+    const runwaysGroup = L.layerGroup().addTo(layer);
+    const lightingGroup = L.layerGroup().addTo(layer);
+    const gatesGroup = L.layerGroup().addTo(layer);
+
+    const apronFill = isDark ? '#111722' : '#3b485c';
+    const apronStroke = isDark ? 'rgba(234, 179, 8, 0.28)' : 'rgba(245, 158, 11, 0.48)';
+    const termFill = isDark ? '#1c293d' : '#37475e';
+    const termStroke = isDark ? 'rgba(56, 189, 248, 0.55)' : 'rgba(14, 165, 233, 0.78)';
+    const taxiFill = isDark ? '#0e1420' : '#475569';
+    const taxiRim = isDark ? 'rgba(234, 179, 8, 0.36)' : 'rgba(245, 158, 11, 0.62)';
+    const rwyAsphalt = '#090d14';
     const twyLabelSeen = new Set<string>();
     const apronLabelSeen = new Set<string>();
     const termLabelSeen = new Set<string>();
     const standLabelSeen = new Set<string>();
+    let gateBadgeCount = 0;
 
     for (const surfaceData of surfaceList) {
-      // 1. Subtle Dark Aprons with Gold Perimeter + Apron Names/Numbers
+      const mPerPx = metersPerPixelAtLatZoom(surfaceData.lat, mapZoom);
+
+      // 1. Subtle Dark Aprons with Gold Perimeter + Apron Designators
       const apronItems =
         surfaceData.labeledAprons && surfaceData.labeledAprons.length > 0
           ? surfaceData.labeledAprons
@@ -1346,13 +1480,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         L.polygon(ap.coords, {
           renderer,
           color: apronStroke,
-          weight: 0.95,
+          weight: 0.9,
           fillColor: apronFill,
-          fillOpacity: isDark ? 0.54 : 0.44,
+          fillOpacity: isDark ? 0.52 : 0.42,
           interactive: false,
-        }).addTo(layer);
+        }).addTo(apronsGroup);
 
-        if (mapZoom >= 14.8) {
+        if (mapZoom >= 13.0) {
           let minLat = Infinity;
           let maxLat = -Infinity;
           let minLon = Infinity;
@@ -1367,7 +1501,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           const explicitLabel = ap.ref || ap.name;
           const label = explicitLabel || (span >= 0.0022 ? `APRON ${autoApronNum++}` : '');
           if (label && (!viewBounds || viewBounds.contains(ap.center))) {
-            const apKey = `${Math.round(ap.center[0] * 320)}-${Math.round(ap.center[1] * 320)}`;
+            const apKey = `${Math.round(ap.center[0] * 300)}-${Math.round(ap.center[1] * 300)}`;
             if (!apronLabelSeen.has(apKey)) {
               apronLabelSeen.add(apKey);
               const shortLbl = label.length > 18 ? `${label.slice(0, 17)}…` : label;
@@ -1377,9 +1511,9 @@ export const RadarMap: React.FC<RadarMapProps> = ({
                   className: 'skydeck-apron-badge',
                   iconSize: [96, 16],
                   iconAnchor: [48, 8],
-                  html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;background:rgba(15,23,42,0.72);border:1px solid rgba(250,204,21,0.35);font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:#FDE68A;letter-spacing:0.04em;white-space:nowrap;">${shortLbl}</span>`,
+                  html: `<span style="display:inline-block;padding:1px 5px;border-radius:4px;background:rgba(15,23,42,0.72);border:1px solid rgba(250,204,21,0.3);font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:#FDE68A;letter-spacing:0.04em;white-space:nowrap;">${shortLbl}</span>`,
                 }),
-              }).addTo(layer);
+              }).addTo(apronsGroup);
             }
           }
         }
@@ -1391,16 +1525,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         L.polygon(term.coords, {
           renderer,
           color: termStroke,
-          weight: mapZoom >= 14 ? 1.6 : 1.2,
+          weight: mapZoom >= 14 ? 1.4 : 1.0,
           fillColor: termFill,
           fillOpacity: isDark ? 0.9 : 0.85,
           interactive: false,
-        }).addTo(layer);
+        }).addTo(terminalsGroup);
 
         const termLabel = term.name || term.ref;
-        if (mapZoom >= 13.8 && termLabel && (!viewBounds || viewBounds.contains(term.center))) {
-          const tKey = `${termLabel.toUpperCase()}-${Math.round(term.center[0] * 260)}-${Math.round(
-            term.center[1] * 260,
+        if (mapZoom >= 12.2 && termLabel && (!viewBounds || viewBounds.contains(term.center))) {
+          const tKey = `${termLabel.toUpperCase()}-${Math.round(term.center[0] * 240)}-${Math.round(
+            term.center[1] * 240,
           )}`;
           if (!termLabelSeen.has(tKey)) {
             termLabelSeen.add(tKey);
@@ -1409,70 +1543,74 @@ export const RadarMap: React.FC<RadarMapProps> = ({
               interactive: false,
               icon: L.divIcon({
                 className: 'skydeck-term-badge',
-                iconSize: [120, 18],
-                iconAnchor: [60, 9],
-                html: `<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(12,20,34,0.82);border:1px solid rgba(56,189,248,0.45);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#E0F2FE;letter-spacing:0.02em;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.45);">${shortName}</span>`,
+                iconSize: [116, 18],
+                iconAnchor: [58, 9],
+                html: `<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(12,20,34,0.8);border:1px solid rgba(56,189,248,0.4);font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:#E0F2FE;letter-spacing:0.02em;white-space:nowrap;">${shortName}</span>`,
               }),
-            }).addTo(layer);
+            }).addTo(terminalsGroup);
           }
         }
       }
 
-      // 3. Apron Parking Lead-In Guidelines (zoom >= 13.4)
-      if (mapZoom >= 13.4) {
+      // 3. Apron Parking Lead-In Guidelines (zoom >= 13.8)
+      if (mapZoom >= 13.8) {
+        const leadW = pxFromMeters(0.8, mPerPx, 0.7, 1.4);
         for (const stand of surfaceData.stands ?? []) {
           if (!stand.coords || stand.coords.length < 2) continue;
           if (viewBounds && !viewBounds.contains([stand.lat, stand.lon])) continue;
           L.polyline(stand.coords, {
             renderer,
             color: '#FACC15',
-            weight: mapZoom >= 15 ? 1.4 : 1.0,
-            opacity: 0.62,
+            weight: leadW,
+            opacity: 0.55,
             interactive: false,
-          }).addTo(layer);
+          }).addTo(taxiwaysGroup);
         }
       }
 
-      // 4. FlightDeck Taxiway Network: All Taxiways & Taxilanes + Green/Blue Lights + Unboxed Gold Letters
-      const twyWeight = mapZoom >= 15 ? 5.5 : mapZoom >= 13 ? 3.8 : 2.2;
+      // 4. Aspect-Locked Taxiway Network (Meter-scaled width + Emerald Centerline + Sapphire Edge Lights)
       for (const twy of surfaceData.taxiways) {
         const isLane = twy.kind === 'taxilane';
-        const w = isLane ? Math.max(2, twyWeight * 0.65) : twyWeight;
+        const twyWidthM = twy.widthM ?? (isLane ? 13 : 22);
+        const w = pxFromMeters(twyWidthM, mPerPx, isLane ? 1.8 : 2.6, isLane ? 14 : 26);
+        const rimPad = pxFromMeters(2.2, mPerPx, 0.8, 2.6);
+        const centerLineW = pxFromMeters(0.7, mPerPx, 0.7, 1.5);
 
         L.polyline(twy.coords, {
           renderer,
           color: taxiRim,
-          weight: w + (isLane ? 1.2 : 2),
-          opacity: isLane ? 0.65 : 0.9,
+          weight: w + rimPad,
+          opacity: isLane ? 0.52 : 0.78,
           lineCap: 'round',
           lineJoin: 'round',
           interactive: false,
-        }).addTo(layer);
+        }).addTo(taxiwaysGroup);
 
         L.polyline(twy.coords, {
           renderer,
           color: taxiFill,
           weight: w,
-          opacity: 0.95,
+          opacity: 0.96,
           lineCap: 'round',
           lineJoin: 'round',
           interactive: false,
-        }).addTo(layer);
+        }).addTo(taxiwaysGroup);
 
         L.polyline(twy.coords, {
           renderer,
           color: '#FACC15',
-          weight: isLane ? 0.85 : mapZoom >= 14 ? 1.3 : 0.9,
-          opacity: isLane ? 0.55 : 0.72,
+          weight: centerLineW,
+          opacity: isLane ? 0.48 : 0.68,
           dashArray: mapZoom >= 13.5 ? undefined : '4 4',
           interactive: false,
-        }).addTo(layer);
+        }).addTo(taxiwaysGroup);
 
-        // Delicate green centerline & blue edge lighting (culled to visible viewport for 60fps zoom)
-        if (mapZoom >= 13.8 && !isLane && twy.coords.length >= 2) {
+        // Taxiway green centerline & blue outer edge lights + amber hold-short bars at close zoom
+        if (mapZoom >= 14.0 && !isLane && twy.coords.length >= 2) {
           const midCheck = twy.coords[Math.floor(twy.coords.length / 2)];
           if (!viewBounds || viewBounds.contains(midCheck)) {
-            const maxSegs = Math.min(twy.coords.length - 1, 4);
+            const maxSegs = Math.min(twy.coords.length - 1, 5);
+            const halfTwyEdgeM = Math.max(7.5, twyWidthM * 0.45);
             for (let segIdx = 0; segIdx < maxSegs; segIdx++) {
               const pA = twy.coords[segIdx];
               const pB = twy.coords[segIdx + 1];
@@ -1480,35 +1618,51 @@ export const RadarMap: React.FC<RadarMapProps> = ({
               const midPt: [number, number] = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5];
               L.circleMarker(midPt, {
                 renderer,
-                radius: mapZoom >= 15 ? 1.5 : 1.1,
+                radius: pxFromMeters(0.55, mPerPx, 1.0, 1.6),
                 color: '#22c55e',
                 fillColor: '#4ade80',
-                fillOpacity: 0.92,
+                fillOpacity: 0.78,
                 weight: 0,
                 interactive: false,
-              }).addTo(layer);
+              }).addTo(lightingGroup);
 
-              if (mapZoom >= 14.8) {
-                const leftEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, -9.5);
-                const rightEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, 9.5);
+              if (mapZoom >= 15.0) {
+                const leftEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, -halfTwyEdgeM);
+                const rightEdge = offsetLatLonMeters(midPt[0], midPt[1], brg, 0, halfTwyEdgeM);
                 for (const edgePt of [leftEdge, rightEdge]) {
                   L.circleMarker(edgePt, {
                     renderer,
-                    radius: 1.2,
+                    radius: pxFromMeters(0.45, mPerPx, 0.9, 1.4),
                     color: '#0ea5e9',
                     fillColor: '#38bdf8',
-                    fillOpacity: 0.85,
+                    fillOpacity: 0.7,
                     weight: 0,
                     interactive: false,
-                  }).addTo(layer);
+                  }).addTo(lightingGroup);
                 }
               }
+            }
+
+            // Amber hold-short guard lights near taxiway exit nodes at high zoom
+            if (mapZoom >= 14.6 && twy.ref && /\d/.test(twy.ref)) {
+              const exitPt = twy.coords[0];
+              const holdBrg = computeBearingDeg(twy.coords[0], twy.coords[1]);
+              const hL = offsetLatLonMeters(exitPt[0], exitPt[1], holdBrg, 18, -halfTwyEdgeM * 0.75);
+              const hR = offsetLatLonMeters(exitPt[0], exitPt[1], holdBrg, 18, halfTwyEdgeM * 0.75);
+              L.polyline([hL, hR], {
+                renderer,
+                color: '#f59e0b',
+                weight: pxFromMeters(1.4, mPerPx, 1.4, 2.4),
+                opacity: 0.85,
+                dashArray: '3 2',
+                interactive: false,
+              }).addTo(lightingGroup);
             }
           }
         }
 
-        // Clean unboxed amber-gold taxiway designator directly over centerline (~320m spatial grid)
-        if (mapZoom >= 14.2 && twy.ref) {
+        // Crisp unboxed gold taxiway letter designator (~320m grid)
+        if (mapZoom >= 12.2 && twy.ref) {
           const mid = twy.coords[Math.floor(twy.coords.length / 2)];
           if (!viewBounds || viewBounds.contains(mid)) {
             const badgeKey = `${twy.ref}-${Math.round(mid[0] * 320)}-${Math.round(mid[1] * 320)}`;
@@ -1518,56 +1672,57 @@ export const RadarMap: React.FC<RadarMapProps> = ({
                 interactive: false,
                 icon: L.divIcon({
                   className: 'skydeck-taxi-badge',
-                  iconSize: [34, 16],
-                  iconAnchor: [17, 8],
+                  iconSize: [30, 14],
+                  iconAnchor: [15, 7],
                   html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
-                    mapZoom >= 14 ? 10 : 9
-                  }px;font-weight:800;color:#FDE047;text-shadow:0 0 3px #000,0 0 6px #000,0 1px 2px #000;letter-spacing:0.03em;white-space:nowrap;">${
+                    mapZoom >= 14.5 ? 9.5 : 8.5
+                  }px;font-weight:800;color:#FDE047;text-shadow:0 0 3px #000,0 1px 2px #000;letter-spacing:0.03em;white-space:nowrap;">${
                     twy.ref
                   }</span>`,
                 }),
-              }).addTo(layer);
+              }).addTo(gatesGroup);
             }
           }
         }
       }
 
-      // 5. Numbered Airplane Apron Stands & Terminal Gates (viewport-culled & density-deduped)
-      if (mapZoom >= 13.8) {
-        const standGrid = mapZoom >= 15.6 ? 4200 : mapZoom >= 14.7 ? 2400 : 1200;
+      // 5. Close-Zoom Compact Gate & Stand Numbers (zoom >= 15.0, hard-capped at 55 to prevent lag)
+      if (mapZoom >= 15.0 && gateBadgeCount < 55) {
+        const standGrid = mapZoom >= 16.5 ? 4200 : 2800;
         const standItems =
           surfaceData.stands && surfaceData.stands.length > 0
             ? surfaceData.stands.filter((s) => Boolean(s.ref))
             : surfaceData.gates.map((g) => ({...g, kind: 'gate' as const}));
 
         for (const stand of standItems) {
+          if (gateBadgeCount >= 55) break;
           if (viewBounds && !viewBounds.contains([stand.lat, stand.lon])) continue;
           const cellKey = `${Math.round(stand.lat * standGrid)}-${Math.round(stand.lon * standGrid)}`;
           if (standLabelSeen.has(cellKey)) continue;
           standLabelSeen.add(cellKey);
+          gateBadgeCount++;
           const isPark = stand.kind === 'parking_position';
           L.marker([stand.lat, stand.lon], {
             interactive: false,
             icon: L.divIcon({
               className: 'skydeck-taxi-badge',
-              iconSize: [30, 14],
-              iconAnchor: [15, 7],
-              html: `<span style="display:inline-block;padding:0 3px;border-radius:3px;background:rgba(11,16,27,0.78);border:1px solid ${
-                isPark ? 'rgba(250,204,21,0.38)' : 'rgba(148,163,184,0.35)'
-              };font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;color:${
-                isPark ? '#FEF08A' : '#E2E8F0'
-              };white-space:nowrap;">${stand.ref}</span>`,
+              iconSize: [24, 12],
+              iconAnchor: [12, 6],
+              html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:7.5px;font-weight:700;color:${
+                isPark ? '#FDE68A' : '#CBD5E1'
+              };text-shadow:0 0 3px #000,0 1px 2px #000;white-space:nowrap;">${stand.ref}</span>`,
             }),
-          }).addTo(layer);
+          }).addTo(gatesGroup);
         }
       }
 
-      // 6. FlightDeck Luminous White Runways + Red Threshold Stop-Bars + Glowing Approach Beams
-      const rwyWeight = mapZoom >= 16 ? 26 : mapZoom >= 15 ? 20 : mapZoom >= 13.2 ? 12 : 7;
-
+      // 6. Aspect-Locked Precision Runways, 4-Unit PAPI, TDZ Barrettes & Dashed |- - - - -| Approach Paths
       for (const rwy of surfaceData.runways) {
         if (rwy.coords.length < 2) continue;
 
+        const rwyWidthM = rwy.widthM ?? 45;
+        const rwyWeight = pxFromMeters(rwyWidthM, mPerPx, 5.5, 48);
+        const shoulderWeight = rwyWeight + pxFromMeters(8, mPerPx, 2.5, 9);
         const startPt = rwy.coords[0];
         const endPt = rwy.coords[rwy.coords.length - 1];
         const brg = computeBearingDeg(startPt, endPt);
@@ -1576,89 +1731,80 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
         const drawApproachPath = (thresholdPt: [number, number], landingHeadingDeg: number) => {
           const outboundBrg = (landingHeadingDeg + 180) % 360;
-          const beamLenM = mapZoom >= 13 ? 2800 : 7500;
+          const beamLenM = mapZoom >= 13.5 ? 2400 : 6000;
           const appBeamEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, beamLenM, 0);
           const appLongEnd = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, 10186, 0);
 
-          // Extended |- - - - -| approach dashed path
+          // Extended |- - - - -| ILS/Final Approach dashed centerline
           L.polyline([appBeamEnd, appLongEnd], {
             renderer,
-            color: isDark ? 'rgba(248, 250, 252, 0.56)' : '#0369A1',
-            weight: 1.4,
-            opacity: 0.78,
+            color: isDark ? 'rgba(226, 232, 240, 0.48)' : '#0369A1',
+            weight: 1.25,
+            opacity: 0.72,
             dashArray: '7 7',
             interactive: false,
-          }).addTo(layer);
+          }).addTo(lightingGroup);
 
-          // Glowing white FlightDeck approach centerline lead-in halo + core
+          // Approach Lighting System lead-in beam (restrained opacity so it doesn't look artificial)
           L.polyline([thresholdPt, appBeamEnd], {
             renderer,
-            color: 'rgba(255, 255, 255, 0.34)',
-            weight: mapZoom >= 13.5 ? 8 : 5,
-            opacity: 0.9,
+            color: 'rgba(255, 255, 255, 0.22)',
+            weight: pxFromMeters(10, mPerPx, 3.2, 7.5),
+            opacity: 0.75,
             interactive: false,
-          }).addTo(layer);
+          }).addTo(lightingGroup);
           L.polyline([thresholdPt, appBeamEnd], {
             renderer,
-            color: '#ffffff',
-            weight: mapZoom >= 13.5 ? 2.6 : 1.8,
-            opacity: 0.98,
+            color: '#f8fafc',
+            weight: pxFromMeters(2.5, mPerPx, 1.3, 2.4),
+            opacity: 0.78,
             interactive: false,
-          }).addTo(layer);
+          }).addTo(lightingGroup);
 
-          // Subtle perpendicular | range gate ticks every 1 NM
+          // Perpendicular 1 NM range gate ticks along |- - - - -|
           for (let nm = 1; nm <= 5; nm++) {
             const distM = nm * 1852;
-            const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -110);
-            const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 110);
+            const barL = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, -100);
+            const barR = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distM, 100);
             L.polyline([barL, barR], {
               renderer,
-              color: isDark ? 'rgba(248, 250, 252, 0.48)' : '#0284C7',
-              weight: 1.1,
-              opacity: 0.75,
+              color: isDark ? 'rgba(226, 232, 240, 0.42)' : '#0284C7',
+              weight: 1.0,
+              opacity: 0.68,
               interactive: false,
-            }).addTo(layer);
+            }).addTo(lightingGroup);
           }
 
-          // Flashing Sequenced Approach Lights ("Rabbit" strobes) + Red pre-threshold decision bar
-          if (mapZoom >= 12.0) {
-            const strobeCount = 7;
+          // Flashing Sequenced Approach Lights ("Rabbit" strobes) + ALSF-II Red Decision Bar
+          if (mapZoom >= 12.2) {
+            const strobeCount = 6;
             for (let s = 1; s <= strobeCount; s++) {
-              const distFromThresholdM = 110 + (strobeCount - s) * 115;
+              const distFromThresholdM = 120 + (strobeCount - s) * 125;
               const sPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, distFromThresholdM, 0);
-              const delaySec = (s * 0.14).toFixed(2);
+              const delaySec = (s * 0.15).toFixed(2);
               L.marker(sPt, {
                 interactive: false,
                 icon: L.divIcon({
                   className: 'skydeck-rabbit-icon',
-                  iconSize: [8, 8],
-                  iconAnchor: [4, 4],
+                  iconSize: [7, 7],
+                  iconAnchor: [3.5, 3.5],
                   html: `<div class="skydeck-rabbit-dot" style="animation-delay:${delaySec}s;"></div>`,
                 }),
-              }).addTo(layer);
+              }).addTo(lightingGroup);
             }
 
-            // Iconic red threshold / stop-bar light clusters with soft halo
+            // Red ALSF-II side-row barrettes at 45m & 220m prior to threshold
             for (const d of [45, 220]) {
               const rPt = offsetLatLonMeters(thresholdPt[0], thresholdPt[1], outboundBrg, d, 0);
               L.circleMarker(rPt, {
                 renderer,
-                radius: mapZoom >= 14 ? 6.5 : 4.5,
-                color: '#ef4444',
-                fillColor: '#ef4444',
-                fillOpacity: 0.35,
-                weight: 0,
-                interactive: false,
-              }).addTo(layer);
-              L.circleMarker(rPt, {
-                renderer,
-                radius: mapZoom >= 14 ? 2.6 : 1.9,
+                radius: pxFromMeters(2.2, mPerPx, 1.5, 2.8),
                 color: '#fca5a5',
                 fillColor: '#ef4444',
-                fillOpacity: 1,
-                weight: 0.8,
+                fillOpacity: 0.9,
+                weight: 0.6,
                 interactive: false,
-              }).addTo(layer);
+              }).addTo(lightingGroup);
             }
           }
 
@@ -1687,17 +1833,17 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         drawApproachPath(startPt, brg);
         drawApproachPath(endPt, revBrg);
 
-        // Luminous outer runway glow halo
+        // Runway shoulder apron bed (aspect-locked in real meters)
         L.polyline(rwy.coords, {
           renderer,
-          color: isDark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(15, 23, 42, 0.28)',
-          weight: rwyWeight + 7,
+          color: isDark ? 'rgba(226, 232, 240, 0.16)' : 'rgba(15, 23, 42, 0.25)',
+          weight: shoulderWeight,
           opacity: 0.9,
           lineCap: 'butt',
           interactive: false,
-        }).addTo(layer);
+        }).addTo(runwaysGroup);
 
-        // Dark runway asphalt bed
+        // Runway asphalt pavement
         L.polyline(rwy.coords, {
           renderer,
           color: rwyAsphalt,
@@ -1705,22 +1851,23 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           opacity: 1,
           lineCap: 'butt',
           interactive: false,
-        }).addTo(layer);
+        }).addTo(runwaysGroup);
 
-        // Bright crisp white runway centerline beam
+        // Crisp white runway centerline
         L.polyline(rwy.coords, {
           renderer,
-          color: '#ffffff',
-          weight: mapZoom >= 14 ? 2.2 : 1.6,
-          opacity: 0.96,
+          color: '#f8fafc',
+          weight: pxFromMeters(1.2, mPerPx, 1.1, 2.4),
+          opacity: 0.9,
           dashArray: mapZoom >= 14.5 ? '10 8' : undefined,
           interactive: false,
-        }).addTo(layer);
+        }).addTo(runwaysGroup);
 
-        // Dense luminous runway edge light chain (white + amber caution ends)
-        if (mapZoom >= 11.5) {
-          const steps = mapZoom >= 15 ? 22 : 16;
-          const halfW = (rwy.widthM ?? 45) * 0.5;
+        // Runway edge lights (white -> amber last 600m caution zone -> red runway end)
+        if (mapZoom >= 12.0) {
+          const steps = 26;
+          const halfW = rwyWidthM * 0.49;
+          const edgeR = pxFromMeters(0.9, mPerPx, 1.0, 2.0);
           for (let s = 0; s <= steps; s++) {
             const frac = s / steps;
             const lat = startPt[0] + (endPt[0] - startPt[0]) * frac;
@@ -1729,52 +1876,104 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             const rEdge = offsetLatLonMeters(lat, lon, brg, 0, halfW);
             const isEnd = s === 0 || s === steps;
             const isCautionZone = !isEnd && (s <= 2 || s >= steps - 2);
-            const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#ffffff';
+            const lightColor = isEnd ? '#ef4444' : isCautionZone ? '#f59e0b' : '#f8fafc';
             for (const pt of [lEdge, rEdge]) {
               L.circleMarker(pt, {
                 renderer,
-                radius: mapZoom >= 14.5 ? 1.8 : 1.3,
+                radius: edgeR,
                 color: lightColor,
                 fillColor: lightColor,
-                fillOpacity: 0.96,
+                fillOpacity: 0.88,
                 weight: 0,
                 interactive: false,
-              }).addTo(layer);
+              }).addTo(lightingGroup);
             }
           }
         }
 
-        // Runway thresholds: green bar + ICAO piano keys + upright bold white threshold labels
+        // Threshold lights, ICAO piano keys, Touchdown Zone barrettes, 4-Unit PAPI & runway designators
         const drawEnd = (pt: [number, number], endBrg: number, rwyNum: string) => {
-          const halfW = (rwy.widthM ?? 45) * 0.46;
+          const halfW = rwyWidthM * 0.45;
+
+          // Green threshold light bar
           for (let t = -3; t <= 3; t++) {
             const tPt = offsetLatLonMeters(pt[0], pt[1], endBrg, 0, (t / 3) * halfW);
             L.circleMarker(tPt, {
               renderer,
-              radius: mapZoom >= 14 ? 2.1 : 1.5,
+              radius: pxFromMeters(0.9, mPerPx, 1.2, 2.2),
               color: '#16a34a',
               fillColor: '#4ade80',
-              fillOpacity: 0.96,
+              fillOpacity: 0.9,
               weight: 0,
               interactive: false,
-            }).addTo(layer);
+            }).addTo(lightingGroup);
           }
 
+          // 4-Unit PAPI Array (2 White / 2 Red = on 3.0° glideslope) left of runway 300m upwind
+          if (mapZoom >= 13.8) {
+            for (let u = 0; u < 4; u++) {
+              const papiPt = offsetLatLonMeters(
+                pt[0],
+                pt[1],
+                endBrg,
+                305,
+                -(rwyWidthM * 0.5 + 14 + u * 6),
+              );
+              const isRed = u >= 2;
+              L.circleMarker(papiPt, {
+                renderer,
+                radius: pxFromMeters(1.5, mPerPx, 1.6, 3.0),
+                color: isRed ? '#ef4444' : '#ffffff',
+                fillColor: isRed ? '#ef4444' : '#f8fafc',
+                fillOpacity: 0.95,
+                weight: 0.5,
+                interactive: false,
+              }).addTo(lightingGroup);
+            }
+          }
+
+          // ICAO piano keys + aiming point blocks + TDZ barrettes (zoom >= 13.5)
           if (mapZoom >= 13.5) {
             const numKeys = 5;
+            const keyW = pxFromMeters(1.8, mPerPx, 1.1, 3.2);
             for (let k = -numKeys; k <= numKeys; k++) {
               if (k === 0) continue;
-              const latOffset = (k / numKeys) * (halfW * 0.85);
+              const latOffset = (k / numKeys) * (halfW * 0.84);
               const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
               const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
               L.polyline([p1, p2], {
                 renderer,
-                color: '#ffffff',
-                weight: mapZoom >= 15 ? 2.1 : 1.4,
-                opacity: 0.9,
+                color: '#f8fafc',
+                weight: keyW,
+                opacity: 0.88,
                 lineCap: 'butt',
                 interactive: false,
-              }).addTo(layer);
+              }).addTo(runwaysGroup);
+            }
+
+            // Touchdown zone white barrettes (zoom >= 14.2)
+            if (mapZoom >= 14.2) {
+              for (const distM of [150, 300, 450, 600]) {
+                for (const side of [-1, 1]) {
+                  const isAiming = distM === 300;
+                  const b1 = offsetLatLonMeters(pt[0], pt[1], endBrg, distM, side * (halfW * 0.42));
+                  const b2 = offsetLatLonMeters(
+                    pt[0],
+                    pt[1],
+                    endBrg,
+                    distM + (isAiming ? 45 : 22),
+                    side * (halfW * 0.42),
+                  );
+                  L.polyline([b1, b2], {
+                    renderer,
+                    color: '#f8fafc',
+                    weight: pxFromMeters(isAiming ? 4.5 : 2.2, mPerPx, 1.2, 4.2),
+                    opacity: 0.85,
+                    lineCap: 'butt',
+                    interactive: false,
+                  }).addTo(runwaysGroup);
+                }
+              }
             }
           }
 
@@ -1785,15 +1984,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             interactive: false,
             icon: L.divIcon({
               className: 'skydeck-runway-num',
-              iconSize: [40, 20],
-              iconAnchor: [20, 10],
+              iconSize: [38, 18],
+              iconAnchor: [19, 9],
               html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:${
-                mapZoom >= 14 ? 12 : 10.5
-              }px;font-weight:800;letter-spacing:0.06em;color:#ffffff;text-shadow:0 0 4px #000,0 0 7px #000,0 1px 3px #000;transform:rotate(${Math.round(
+                mapZoom >= 14.5 ? 11 : 9.5
+              }px;font-weight:800;letter-spacing:0.05em;color:#ffffff;text-shadow:0 0 4px #000,0 1px 3px #000;transform:rotate(${Math.round(
                 uprightDeg,
               )}deg);">${rwyNum}</span>`,
             }),
-          }).addTo(layer);
+          }).addTo(runwaysGroup);
         };
 
         drawEnd(startPt, brg, labelA);
@@ -2108,6 +2307,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         ctx.save();
         ctx.translate(pt.x, pt.y);
         ctx.rotate((nextTrack * Math.PI) / 180);
+        ctx.shadowColor = f.onGround ? 'rgba(0, 0, 0, 0.92)' : 'rgba(0, 0, 0, 0.45)';
+        ctx.shadowBlur = f.onGround ? 5.5 : 2;
         if (sprite) {
           ctx.drawImage(sprite, -iconSize / 2, -iconSize / 2, iconSize, iconSize);
         } else {
@@ -2121,7 +2322,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           ctx.fillStyle = iconFill;
           ctx.fill();
           ctx.strokeStyle = stroke;
-          ctx.lineWidth = 1;
+          ctx.lineWidth = 1.2;
           ctx.stroke();
         }
         ctx.restore();
