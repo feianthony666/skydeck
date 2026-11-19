@@ -2362,11 +2362,9 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             const keyW = pxFromMeters(1.8, mPerPx, 1.1, 3.2);
             for (let k = -numKeys; k <= numKeys; k++) {
               if (k === 0) continue;
-              // Keep piano keys modest and close to the threshold while preserving
-              // the original geographic rendering/scaling method.
-              const latOffset = (k / numKeys) * (halfEndW * 0.90);
+              const latOffset = (k / numKeys) * (halfEndW * 0.84);
               const p1 = offsetLatLonMeters(pt[0], pt[1], endBrg, 14, latOffset);
-              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 24, latOffset);
+              const p2 = offsetLatLonMeters(pt[0], pt[1], endBrg, 46, latOffset);
               L.polyline([p1, p2], {
                 renderer,
                 color: '#f8fafc',
