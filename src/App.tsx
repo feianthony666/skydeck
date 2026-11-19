@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  SlidersHorizontal,
   Sun,
   WifiOff,
   X,
@@ -37,7 +38,12 @@ import {Popover, PopoverContent, PopoverTrigger} from './components/ui/popover';
 import {Separator} from './components/ui/separator';
 import {Table, TableBody, TableCell, TableHead, TableHeader, TableRow} from './components/ui/table';
 import {TabsList, TabsTrigger} from './components/ui/tabs';
-import {AIRPORT_CATALOG, REGION_PRESETS, type RegionPreset} from './data/aviationCatalog';
+import {
+  AIRPORT_CATALOG,
+  REGION_PRESETS,
+  resolveCountryFromFlight,
+  type RegionPreset,
+} from './data/aviationCatalog';
 import {useOnlineStatus} from './hooks/useOnlineStatus';
 import {apiFetchJson, DEFAULT_CF_WORKER_URL} from './services/directAviationClient';
 import {
@@ -137,6 +143,8 @@ export default function App() {
   const [bounds, setBounds] = useState(REGION_PRESETS[0].bounds);
   const [phaseFilter, setPhaseFilter] = useState<'all' | 'air' | 'ground'>('all');
   const [trafficFilter, setTrafficFilter] = useState<TrafficFlagFilter>('all');
+  const [modelFilter, setModelFilter] = useState<string>('all');
+  const [countryFilter, setCountryFilter] = useState<string>('all');
   const [isPortraitMobile, setIsPortraitMobile] = useState<boolean>(() => detectPortraitMobileViewport());
   const [mobileSheetDetent, setMobileSheetDetent] = useState<'peek' | 'expanded'>('peek');
 
@@ -196,7 +204,6 @@ export default function App() {
   const initialLocateAttemptedRef = useRef(false);
   const flightsAbortRef = useRef<AbortController | null>(null);
   const airportsAbortRef = useRef<AbortController | null>(null);
-  const airportSelectionRequestRef = useRef(0);
 
   useEffect(() => {
     const updateViewport = () => setIsPortraitMobile(detectPortraitMobileViewport());
@@ -529,6 +536,36 @@ export default function App() {
     return rawFlights.map((f) => deadReckonFlight(f, nowEpochSec, !isOnline));
   }, [rawFlights, nowEpochSec, isOnline]);
 
+  const availableModels = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const f of flights) {
+      const code = (f.aircraftType || '').trim().toUpperCase();
+      if (!code || code === 'UNKN') continue;
+      counts.set(code, (counts.get(code) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([code, count]) => ({code, count}))
+      .sort((a, b) => a.code.localeCompare(b.code));
+  }, [flights]);
+
+  const availableCountries = useMemo(() => {
+    const map = new Map<string, {code: string; name: string; count: number}>();
+    for (const f of flights) {
+      const info = resolveCountryFromFlight(f.icao24, f.registration);
+      const prev = map.get(info.code);
+      if (prev) prev.count += 1;
+      else map.set(info.code, {code: info.code, name: info.name, count: 1});
+    }
+    return Array.from(map.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [flights]);
+
+  const activeFilterCount =
+    (searchQuery.trim() ? 1 : 0) +
+    (phaseFilter !== 'all' ? 1 : 0) +
+    (trafficFilter !== 'all' ? 1 : 0) +
+    (modelFilter !== 'all' ? 1 : 0) +
+    (countryFilter !== 'all' ? 1 : 0);
+
   const filteredFlights = useMemo(() => {
     const q = searchQuery.trim().toUpperCase();
 
@@ -565,6 +602,15 @@ export default function App() {
       if (trafficFilter === 'pia' && !(f.isPia || ((f.dbFlags ?? 0) & 4) !== 0)) return false;
       if (trafficFilter === 'emergency' && !getEmergencySquawkMeta(f.squawk)) return false;
 
+      if (modelFilter !== 'all' && (f.aircraftType || '').trim().toUpperCase() !== modelFilter) {
+        return false;
+      }
+
+      if (countryFilter !== 'all') {
+        const regCountry = resolveCountryFromFlight(f.icao24, f.registration);
+        if (regCountry.code !== countryFilter) return false;
+      }
+
       if (selectedAirport && airportTrafficFilter !== 'none') {
         const orig = f.origin.toUpperCase();
         const dest = f.destination.toUpperCase();
@@ -599,7 +645,17 @@ export default function App() {
         f.squawk.includes(q)
       );
     });
-  }, [flights, searchQuery, phaseFilter, trafficFilter, selectedAirport, airportTrafficFilter, airportBoard]);
+  }, [
+    flights,
+    searchQuery,
+    phaseFilter,
+    trafficFilter,
+    modelFilter,
+    countryFilter,
+    selectedAirport,
+    airportTrafficFilter,
+    airportBoard,
+  ]);
 
   const selectedFlight = useMemo(
     () => flights.find((f) => f.id === selectedFlightId) ?? null,
@@ -758,7 +814,6 @@ export default function App() {
   }, []);
 
   const handleSelectAirport = useCallback(async (ap: {icao: string; iata: string; name: string}) => {
-    const requestId = ++airportSelectionRequestRef.current;
     setSelectedAirport(ap);
     setSidebarMode('airport');
     setMobileSheetDetent('peek');
@@ -776,17 +831,13 @@ export default function App() {
       apiFetchJson<AirfieldSurfaceData>(
         `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${matchMarker.lat}&lon=${matchMarker.lon}`,
       )
-        .then((surf) => {
-          if (airportSelectionRequestRef.current === requestId) setSelectedAirportSurface(surf);
-        })
+        .then((surf) => setSelectedAirportSurface(surf))
         .catch(() => {});
     } else {
       apiFetchJson<AirfieldSurfaceData>(
         `/api/surface?icao=${encodeURIComponent(ap.icao || ap.iata)}`,
       )
-        .then((surf) => {
-          if (airportSelectionRequestRef.current === requestId) setSelectedAirportSurface(surf);
-        })
+        .then((surf) => setSelectedAirportSurface(surf))
         .catch(() => {});
     }
 
@@ -796,7 +847,6 @@ export default function App() {
         icao: ap.icao,
       });
       const data = await apiFetchJson<AirportBoardResponse>(`/api/airport-board?${qs.toString()}`);
-      if (airportSelectionRequestRef.current !== requestId) return;
       setAirportBoard(data);
       // Track gate/terminal changes across airport board polls
       const apKey = (data.iata || data.icao || ap.icao).toUpperCase();
@@ -829,15 +879,13 @@ export default function App() {
         apiFetchJson<AirfieldSurfaceData>(
           `/api/surface?icao=${encodeURIComponent(ap.icao)}&lat=${data.lat}&lon=${data.lon}`,
         )
-          .then((surf) => {
-            if (airportSelectionRequestRef.current === requestId) setSelectedAirportSurface(surf);
-          })
+          .then((surf) => setSelectedAirportSurface(surf))
           .catch(() => {});
       }
     } catch {
       // Keep panel open with local catalog info
     } finally {
-      if (airportSelectionRequestRef.current === requestId) setAirportBoardLoading(false);
+      setAirportBoardLoading(false);
     }
   }, [mapAirports]);
 
@@ -960,30 +1008,104 @@ export default function App() {
           <div className="flex items-center gap-1 shrink-0">
             <Popover>
               <PopoverTrigger
-                className={`inline-flex items-center justify-center min-w-[40px] min-h-[40px] rounded-xl border border-border transition-colors cursor-pointer ${
-                  searchQuery
+                className={`inline-flex items-center justify-center min-w-[40px] min-h-[40px] rounded-xl border border-border transition-colors cursor-pointer relative ${
+                  activeFilterCount > 0
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-background text-foreground hover:bg-accent'
                 }`}
-                aria-label="Search flights"
+                aria-label="Search and filter flights"
               >
-                <Search className="w-4 h-4" />
+                <SlidersHorizontal className="w-4 h-4" />
+                {activeFilterCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 rounded-full bg-amber-500 text-[10px] font-mono font-bold text-slate-950 px-1 flex items-center justify-center">
+                    {activeFilterCount}
+                  </span>
+                )}
               </PopoverTrigger>
-              <PopoverContent side="bottom" align="end" className="w-[min(300px,calc(100vw-24px))] rounded-2xl p-3 space-y-2 shadow-xl z-[700]">
-                <div className="text-xs font-semibold text-foreground">Search Callsign, Hex, Tail, Squawk</div>
+              <PopoverContent side="bottom" align="end" className="w-[min(320px,calc(100vw-24px))] rounded-2xl p-3 space-y-2.5 shadow-xl z-[700]">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-foreground">Search &amp; Radar Filters</span>
+                  {activeFilterCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setPhaseFilter('all');
+                        setTrafficFilter('all');
+                        setModelFilter('all');
+                        setCountryFilter('all');
+                      }}
+                      className="text-[11px] text-primary hover:underline cursor-pointer"
+                    >
+                      Reset ({activeFilterCount})
+                    </button>
+                  )}
+                </div>
                 <div className="flex items-center gap-1.5">
                   <Input
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="e.g. CCA981, N123AB, 7700"
+                    placeholder="Callsign, tail, hex, squawk 7700"
                     aria-label="Search live ADS-B flights"
-                    className="h-10"
+                    className="h-9"
                   />
                   {searchQuery && (
                     <Button size="icon" variant="ghost" onClick={() => setSearchQuery('')} aria-label="Clear search">
                       <X className="w-4 h-4" />
                     </Button>
                   )}
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <select
+                    value={trafficFilter}
+                    onChange={(e) => setTrafficFilter(e.target.value as TrafficFlagFilter)}
+                    aria-label="Filter by emergency squawk or DB flag"
+                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
+                  >
+                    <option value="all">All Feeds</option>
+                    <option value="emergency">Emergency (7500/7600/7700) · {emergencyFlights.length}</option>
+                    <option value="ladd">LADD Restricted · {laddCount}</option>
+                    <option value="military">Military / State · {militaryCount}</option>
+                    <option value="pia">PIA Privacy · {piaCount}</option>
+                  </select>
+                  <select
+                    value={phaseFilter}
+                    onChange={(e) => setPhaseFilter(e.target.value as 'all' | 'air' | 'ground')}
+                    aria-label="Filter by flight phase"
+                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
+                  >
+                    <option value="all">Air &amp; Ground</option>
+                    <option value="air">Airborne ({airborneTraffic.length})</option>
+                    <option value="ground">On Ground ({groundTraffic.length})</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <select
+                    value={modelFilter}
+                    onChange={(e) => setModelFilter(e.target.value)}
+                    aria-label="Filter by aircraft model"
+                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
+                  >
+                    <option value="all">All Models ({availableModels.length})</option>
+                    {availableModels.map((m) => (
+                      <option key={m.code} value={m.code}>
+                        {m.code} ({m.count})
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={countryFilter}
+                    onChange={(e) => setCountryFilter(e.target.value)}
+                    aria-label="Filter by country of registration"
+                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
+                  >
+                    <option value="all">All Countries ({availableCountries.length})</option>
+                    {availableCountries.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.name} ({c.count})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </PopoverContent>
             </Popover>
@@ -1016,13 +1138,16 @@ export default function App() {
         </header>
       )}
 
-      {/* Compact Top Status, Emergency Squawk, LADD Filter & Mode Banners */}
+      {/* Compact Top Status, Emergency Squawk, Filter & Mode Banners */}
       {(!isOnline ||
         flightsError ||
         emergencyFlights.length > 0 ||
         isolateSelected ||
         followSelected ||
         trafficFilter !== 'all' ||
+        modelFilter !== 'all' ||
+        countryFilter !== 'all' ||
+        phaseFilter !== 'all' ||
         (selectedAirport && airportTrafficFilter !== 'none')) && (
         <div
           className={`fixed z-[520] flex flex-wrap items-center gap-1.5 transition-all duration-300 ${
@@ -1075,7 +1200,40 @@ export default function App() {
               onClick={() => setTrafficFilter('all')}
               className="shadow-md"
             >
-              Filter: {trafficFilter.toUpperCase()} ({filteredFlights.length})
+              Flag: {trafficFilter.toUpperCase()} ({filteredFlights.length})
+              <X className="w-3 h-3" />
+            </Button>
+          )}
+          {modelFilter !== 'all' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setModelFilter('all')}
+              className="shadow-md"
+            >
+              Model: {modelFilter} ({filteredFlights.length})
+              <X className="w-3 h-3" />
+            </Button>
+          )}
+          {countryFilter !== 'all' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setCountryFilter('all')}
+              className="shadow-md"
+            >
+              Origin: {availableCountries.find((c) => c.code === countryFilter)?.name || countryFilter}
+              <X className="w-3 h-3" />
+            </Button>
+          )}
+          {phaseFilter !== 'all' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setPhaseFilter('all')}
+              className="shadow-md"
+            >
+              Phase: {phaseFilter === 'air' ? 'Airborne' : 'Ground'}
               <X className="w-3 h-3" />
             </Button>
           )}
@@ -1123,6 +1281,7 @@ export default function App() {
             {(
               [
                 {id: 'all', label: `All (${flights.length})`},
+                {id: 'emergency', label: `EMERG (${emergencyFlights.length})`},
                 {id: 'ladd', label: `LADD (${laddCount})`},
                 {id: 'military', label: `MIL (${militaryCount})`},
                 {id: 'pia', label: `PIA (${piaCount})`},
@@ -1134,11 +1293,13 @@ export default function App() {
                 onClick={() => setTrafficFilter(opt.id)}
                 className={`min-h-[38px] rounded-xl px-2.5 text-[11px] font-mono font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
                   trafficFilter === opt.id
-                    ? opt.id === 'ladd'
-                      ? 'bg-purple-600 text-white'
-                      : opt.id === 'military'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-primary text-primary-foreground'
+                    ? opt.id === 'emergency'
+                      ? 'bg-red-600 text-white'
+                      : opt.id === 'ladd'
+                        ? 'bg-purple-600 text-white'
+                        : opt.id === 'military'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -1343,6 +1504,9 @@ export default function App() {
                 allFlights={flights}
                 groundTraffic={groundTraffic}
                 nearestWeather={nearestWeather}
+                airportsWeather={airportsWeather}
+                sigmets={sigmets}
+                disruptions={disruptions}
                 viewMode={threeViewMode}
                 onViewModeChange={setThreeViewMode}
               />
@@ -1393,14 +1557,14 @@ export default function App() {
                   </TabsList>
                 </div>
 
-                {/* adsb.lol DB Flag & Emergency Filter Strip */}
+                {/* adsb.lol DB Flag, Emergency, Aircraft Model & Registration Country Strip */}
                 <div className="flex flex-wrap items-center gap-1.5">
                   {(
                     [
                       {id: 'all', label: 'All Feeds'},
-                      {id: 'ladd', label: `LADD Restricted (${laddCount})`},
+                      {id: 'ladd', label: `LADD (${laddCount})`},
                       {id: 'military', label: `Military (${militaryCount})`},
-                      {id: 'pia', label: `PIA Privacy (${piaCount})`},
+                      {id: 'pia', label: `PIA (${piaCount})`},
                       {id: 'emergency', label: `Emergency (${emergencyFlights.length})`},
                     ] as const
                   ).map((item) => (
@@ -1413,6 +1577,50 @@ export default function App() {
                       {item.label}
                     </Button>
                   ))}
+
+                  <select
+                    value={modelFilter}
+                    onChange={(e) => setModelFilter(e.target.value)}
+                    aria-label="Filter traffic by aircraft model"
+                    className="h-8 rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground cursor-pointer"
+                  >
+                    <option value="all">All Models ({availableModels.length})</option>
+                    {availableModels.map((m) => (
+                      <option key={m.code} value={m.code}>
+                        {m.code} ({m.count})
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={countryFilter}
+                    onChange={(e) => setCountryFilter(e.target.value)}
+                    aria-label="Filter traffic by country of origin"
+                    className="h-8 rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground cursor-pointer"
+                  >
+                    <option value="all">All Countries ({availableCountries.length})</option>
+                    {availableCountries.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.name} ({c.count})
+                      </option>
+                    ))}
+                  </select>
+
+                  {activeFilterCount > 0 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setPhaseFilter('all');
+                        setTrafficFilter('all');
+                        setModelFilter('all');
+                        setCountryFilter('all');
+                      }}
+                    >
+                      Clear ({activeFilterCount})
+                    </Button>
+                  )}
                 </div>
               </CardHeader>
               <CardContent className="px-0 pb-0">
@@ -1661,7 +1869,7 @@ export default function App() {
               SkyDeck Dock · {filteredFlights.length} ADS-B
             </button>
           ) : (
-            <div className="flex items-center gap-1.5 rounded-full bg-card/95 backdrop-blur-md border border-border px-2.5 py-1.5 shadow-2xl overflow-x-auto max-w-full">
+            <div className="flex items-center gap-1 rounded-full bg-card/95 backdrop-blur-md border border-border px-2 py-1 shadow-2xl overflow-x-auto max-w-full">
               {/* Brand + View Switcher */}
               <button
                 type="button"
@@ -1669,12 +1877,12 @@ export default function App() {
                   setShowTrafficSheet(false);
                   setActiveView('radar');
                 }}
-                className="font-display text-sm font-bold tracking-tight text-foreground px-2.5 py-1 rounded-full hover:bg-accent whitespace-nowrap shrink-0 cursor-pointer"
+                className="font-display text-xs sm:text-sm font-bold tracking-tight text-foreground px-2 py-1 rounded-full hover:bg-accent whitespace-nowrap shrink-0 cursor-pointer"
               >
                 SkyDeck
               </button>
 
-              <div className="flex items-center gap-1 rounded-full bg-secondary/75 p-0.5 shrink-0">
+              <div className="flex items-center gap-0.5 rounded-full bg-secondary/75 p-0.5 shrink-0">
                 {(
                   [
                     {id: 'radar', label: 'Radar'},
@@ -1701,12 +1909,12 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Region Selector */}
+              {/* Compact Region Selector */}
               <select
                 value={activeRegion.id}
                 onChange={(e) => handleSelectRegion(e.target.value)}
                 aria-label="Select radar coverage region"
-                className="h-8 max-w-[140px] sm:max-w-[175px] rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
+                className="h-8 max-w-[132px] sm:max-w-[155px] rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
               >
                 {localRegion && <option value={localRegion.id}>{localRegion.label}</option>}
                 {REGION_PRESETS.map((r) => (
@@ -1716,116 +1924,191 @@ export default function App() {
                 ))}
               </select>
 
-              {/* Optional Near Me Button (Controlled by Locate Me setting) */}
+              {/* Optional Compact Locate Me */}
               {radarSettings.locateMeEnabled && (
                 <Button
-                  size="sm"
+                  size="icon"
                   variant={activeRegion.id === 'local' ? 'secondary' : 'outline'}
                   onClick={() => void syncToUserLocation()}
                   disabled={locating}
-                  className="shrink-0"
+                  className="shrink-0 h-8 w-8"
                   title="Sync map and ADS-B sector to your current location"
+                  aria-label="Locate me"
                 >
                   <LocateFixed className={`w-3.5 h-3.5 ${locating ? 'animate-spin' : ''}`} />
-                  <span className="hidden md:inline">{locating ? 'Locating' : 'Locate'}</span>
                 </Button>
               )}
 
-              {/* Search Popover */}
+              {/* Unified Search, Squawk Emergency, Model & Country Filter Popover */}
               <Popover>
                 <PopoverTrigger
-                  className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-3 text-xs font-medium transition-all cursor-pointer shrink-0 ${
-                    searchQuery
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-background text-foreground hover:bg-accent'
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                    trafficFilter === 'emergency'
+                      ? 'bg-red-600 text-white border-red-500'
+                      : activeFilterCount > 0
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-background text-foreground hover:bg-accent'
                   }`}
-                  aria-label="Search flights"
+                  aria-label="Search and filter radar traffic"
                 >
-                  <Search className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">{searchQuery ? searchQuery : 'Search'}</span>
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span>
+                    {activeFilterCount > 0 ? `Filters (${activeFilterCount})` : 'Filter'}
+                  </span>
                 </PopoverTrigger>
-                <PopoverContent side="top" align="center" className="w-72 rounded-2xl p-3 space-y-2 shadow-xl">
-                  <div className="text-xs font-semibold text-foreground">Search Callsign, Hex, Tail, Squawk</div>
+                <PopoverContent side="top" align="center" className="w-80 rounded-2xl p-3.5 space-y-3 shadow-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-foreground">Search &amp; Traffic Filters</span>
+                    {activeFilterCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setPhaseFilter('all');
+                          setTrafficFilter('all');
+                          setModelFilter('all');
+                          setCountryFilter('all');
+                        }}
+                        className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
+                      >
+                        Reset all
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Callsign / Tail / Squawk Search */}
                   <div className="flex items-center gap-1.5">
-                    <Input
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="e.g. CCA981, B-2008, 2241"
-                      aria-label="Search live ADS-B flights"
-                      className="h-8"
-                    />
+                    <div className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <Input
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Callsign, tail, hex, squawk (7700)"
+                        aria-label="Search live ADS-B flights"
+                        className="h-8 pl-8"
+                      />
+                    </div>
                     {searchQuery && (
                       <Button size="icon" variant="ghost" onClick={() => setSearchQuery('')} aria-label="Clear search">
                         <X className="w-3.5 h-3.5" />
                       </Button>
                     )}
                   </div>
-                </PopoverContent>
-              </Popover>
 
-              {/* DB Flag Quick Filter Popover (LADD / MIL / PIA / EMERG) */}
-              <Popover>
-                <PopoverTrigger
-                  className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-3 text-xs font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                    trafficFilter !== 'all'
-                      ? 'bg-purple-600 text-white border-purple-500'
-                      : 'bg-background text-foreground hover:bg-accent'
-                  }`}
-                  aria-label="Filter adsb.lol DB flags (LADD, Military, PIA)"
-                >
-                  <ShieldAlert className="w-3.5 h-3.5" />
-                  <span>
-                    {trafficFilter === 'all'
-                      ? `LADD ${laddCount}`
-                      : `${trafficFilter.toUpperCase()} (${filteredFlights.length})`}
-                  </span>
-                </PopoverTrigger>
-                <PopoverContent side="top" align="center" className="w-64 rounded-2xl p-3 space-y-2 shadow-xl">
-                  <div className="text-xs font-semibold text-foreground">adsb.lol DB Flag Filter</div>
-                  <div className="grid grid-cols-1 gap-1.5">
+                  {/* Emergency Squawk & adsb.lol DB Flag Grid */}
+                  <div className="space-y-1">
+                    <div className="text-[10.5px] font-medium text-muted-foreground flex items-center gap-1">
+                      <ShieldAlert className="w-3 h-3" />
+                      Emergency Squawk &amp; DB Flags
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(
+                        [
+                          {id: 'all', label: `All (${flights.length})`},
+                          {id: 'emergency', label: `Emergency (${emergencyFlights.length})`},
+                          {id: 'ladd', label: `LADD (${laddCount})`},
+                          {id: 'military', label: `Military (${militaryCount})`},
+                          {id: 'pia', label: `PIA (${piaCount})`},
+                        ] as const
+                      ).map((opt) => (
+                        <Button
+                          key={opt.id}
+                          size="sm"
+                          variant={trafficFilter === opt.id ? 'default' : 'outline'}
+                          onClick={() => setTrafficFilter(opt.id)}
+                          className={`justify-start h-7 text-[11px] ${
+                            opt.id === 'emergency' ? 'col-span-2' : ''
+                          }`}
+                        >
+                          {opt.label}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Phase Toggle */}
+                  <div className="grid grid-cols-3 gap-1 rounded-xl bg-secondary/70 p-1">
                     {(
                       [
-                        {id: 'all', label: `All Aircraft (${flights.length})`},
-                        {id: 'ladd', label: `LADD Restricted (${laddCount})`},
-                        {id: 'military', label: `Military / State (${militaryCount})`},
-                        {id: 'pia', label: `PIA Privacy (${piaCount})`},
-                        {id: 'emergency', label: `Emergency Squawk (${emergencyFlights.length})`},
+                        {id: 'all', label: 'All'},
+                        {id: 'air', label: `Air (${airborneTraffic.length})`},
+                        {id: 'ground', label: `Gnd (${groundTraffic.length})`},
                       ] as const
-                    ).map((opt) => (
-                      <Button
-                        key={opt.id}
-                        size="sm"
-                        variant={trafficFilter === opt.id ? 'default' : 'outline'}
-                        onClick={() => setTrafficFilter(opt.id)}
-                        className="justify-between"
+                    ).map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setPhaseFilter(p.id)}
+                        className={`rounded-lg py-1 text-[11px] font-medium cursor-pointer ${
+                          phaseFilter === p.id
+                            ? 'bg-background text-foreground shadow-xs'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
                       >
-                        <span>{opt.label}</span>
-                      </Button>
+                        {p.label}
+                      </button>
                     ))}
+                  </div>
+
+                  {/* Aircraft Model & Country of Registration Dropdowns */}
+                  <div className="grid grid-cols-1 gap-2">
+                    <label className="space-y-1">
+                      <span className="text-[10.5px] font-medium text-muted-foreground block">
+                        Aircraft Model
+                      </span>
+                      <select
+                        value={modelFilter}
+                        onChange={(e) => setModelFilter(e.target.value)}
+                        aria-label="Filter by aircraft model"
+                        className="w-full h-8 rounded-lg bg-background border border-input px-2.5 text-xs text-foreground cursor-pointer"
+                      >
+                        <option value="all">All Aircraft Models ({availableModels.length})</option>
+                        {availableModels.map((m) => (
+                          <option key={m.code} value={m.code}>
+                            {m.code} — {m.count} live
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="space-y-1">
+                      <span className="text-[10.5px] font-medium text-muted-foreground block">
+                        Country of Registration
+                      </span>
+                      <select
+                        value={countryFilter}
+                        onChange={(e) => setCountryFilter(e.target.value)}
+                        aria-label="Filter by country of origin"
+                        className="w-full h-8 rounded-lg bg-background border border-input px-2.5 text-xs text-foreground cursor-pointer"
+                      >
+                        <option value="all">All Countries ({availableCountries.length})</option>
+                        {availableCountries.map((c) => (
+                          <option key={c.code} value={c.code}>
+                            {c.name} ({c.count})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                 </PopoverContent>
               </Popover>
 
-              {/* Live Feeds & Traffic Drawer Trigger */}
+              {/* Compact ADS-B Count & Traffic Drawer Trigger */}
               <Popover>
                 <PopoverTrigger
-                  className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border bg-background px-3 font-mono text-[11px] text-foreground hover:bg-accent tabular-nums cursor-pointer whitespace-nowrap shrink-0"
+                  className="inline-flex h-8 items-center gap-1 rounded-full border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:bg-accent tabular-nums cursor-pointer whitespace-nowrap shrink-0"
                   aria-label="View ADS-B feed status and sector traffic"
                 >
                   <span className="font-semibold">{filteredFlights.length}</span>
-                  <span className="hidden md:inline text-muted-foreground">ADS-B</span>
-                  {estimatedCount > 0 && (
-                    <span className="text-amber-600 dark:text-amber-400 font-semibold hidden lg:inline">
-                      · {estimatedCount} DR
-                    </span>
-                  )}
+                  <span className="hidden lg:inline text-muted-foreground">ADS-B</span>
                 </PopoverTrigger>
                 <PopoverContent side="top" align="center" className="w-80 rounded-2xl p-4 space-y-3 shadow-xl">
                   <div className="flex items-center justify-between gap-2">
                     <div>
-                      <h3 className="text-xs font-semibold text-foreground">Live ADS-B & Web Feeds</h3>
+                      <h3 className="text-xs font-semibold text-foreground">Live ADS-B &amp; Web Feeds</h3>
                       <p className="text-[11px] text-muted-foreground">
                         {airborneTraffic.length} air · {groundTraffic.length} gnd · {laddCount} LADD
+                        {estimatedCount > 0 ? ` · ${estimatedCount} DR` : ''}
                       </p>
                     </div>
                     <Button
@@ -1861,7 +2144,7 @@ export default function App() {
                 </PopoverContent>
               </Popover>
 
-              {/* Ops Drawer Trigger (Past Flights, Live Updates, WX & Safety) */}
+              {/* Compact Ops Drawer Trigger */}
               <Button
                 size="sm"
                 variant={opsDrawerOpen && activeView === 'radar' ? 'default' : 'outline'}
@@ -1871,29 +2154,29 @@ export default function App() {
                   setOpsDrawerOpen((v) => !v);
                 }}
                 aria-label="Open flight operations drawer"
-                className="shrink-0 whitespace-nowrap"
+                className="shrink-0 h-8 px-2.5 whitespace-nowrap"
               >
                 <Activity className="w-3.5 h-3.5" />
                 <span>Ops{liveUpdates.length > 0 ? ` (${liveUpdates.length})` : ''}</span>
               </Button>
 
-              {/* Settings Inside Bottom Dynamic Island */}
+              {/* Settings Inside Compact Dock */}
               <RadarSettingsPopover
                 settings={radarSettings}
                 onUpdateSettings={updateRadarSettings}
                 onResetSettings={resetRadarSettings}
               />
 
-              {/* Fixed-Width Equal-Character Theme Toggle ("Light" / "Night" inside w-[84px]) */}
+              {/* Compact Icon Theme Toggle */}
               <Button
-                size="sm"
+                size="icon"
                 variant="outline"
                 onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
                 aria-label="Toggle dark or light theme"
-                className="w-[84px] justify-center shrink-0 tabular-nums"
+                title={theme === 'dark' ? 'Switch to light map' : 'Switch to night map'}
+                className="shrink-0 h-8 w-8"
               >
-                {theme === 'dark' ? <Sun className="w-3.5 h-3.5 shrink-0" /> : <Moon className="w-3.5 h-3.5 shrink-0" />}
-                <span>{theme === 'dark' ? 'Light' : 'Night'}</span>
+                {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
               </Button>
 
               {/* Manual Refresh */}
@@ -1902,12 +2185,13 @@ export default function App() {
                 variant="outline"
                 onClick={() => fetchLiveFlights(bounds, activeRegion.id)}
                 aria-label="Refresh live ADS-B traffic"
-                className="shrink-0"
+                title="Refresh traffic"
+                className="shrink-0 h-8 w-8"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${flightsLoading ? 'animate-spin' : ''}`} />
               </Button>
 
-              <div className="hidden lg:block shrink-0">
+              <div className="hidden xl:block shrink-0">
                 <PWAInstallButton onFallbackSync={() => fetchLiveFlights(bounds, activeRegion.id)} />
               </div>
 
@@ -1918,7 +2202,7 @@ export default function App() {
                 onClick={() => setDockHidden(true)}
                 aria-label="Hide bottom dock"
                 title="Hide dock"
-                className="shrink-0"
+                className="shrink-0 h-8 w-8"
               >
                 <ChevronDown className="w-4 h-4" />
               </Button>

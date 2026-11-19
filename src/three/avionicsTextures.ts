@@ -612,7 +612,15 @@ export function createAirlineLiveryTexture(
   canvas.height = H;
   const ctx = canvas.getContext('2d')!;
 
-  const baseColor = specialLivery?.theme === 'turtle' ? specialLivery.primaryHex : livery.fuselageHex;
+  const isFullDarkBase =
+    specialLivery?.theme === 'turtle' ||
+    specialLivery?.theme === 'allblacks' ||
+    specialLivery?.theme === 'aurora';
+  const baseColor = isFullDarkBase
+    ? specialLivery!.primaryHex
+    : specialLivery?.theme === 'skyteam'
+      ? '#CBD5E1'
+      : livery.fuselageHex;
   const bellyColor = specialLivery?.bellyHex || livery.bellyHex;
   const accentColor = specialLivery?.accentHex || livery.accentHex;
   const titleText = (specialLivery?.titleText || livery.name).toUpperCase();
@@ -663,7 +671,6 @@ export function createAirlineLiveryTexture(
         ctx.closePath();
         ctx.fill();
 
-        // Crisp white ribbon pinstripe
         ctx.strokeStyle = '#FFFFFF';
         ctx.lineWidth = 4;
         ctx.beginPath();
@@ -671,11 +678,10 @@ export function createAirlineLiveryTexture(
         ctx.bezierCurveTo(-180, -10, 120, 54, 480, 18);
         ctx.stroke();
 
-        // 17-segment SDG color ring aft of wing
         drawSdgWheel(ctx, dir * 135, 36, 46, 20);
       } else if (specialLivery.theme === 'turtle') {
-        // ANA JA381A Flying Honu turquoise Hawaiian sea waves & turtle motif
-        ctx.fillStyle = '#38BDF8';
+        // ANA JA381A/JA382A/JA383A Flying Honu turquoise/emerald/sunset sea waves & turtle motif
+        ctx.fillStyle = specialLivery.secondaryHex;
         ctx.beginPath();
         ctx.moveTo(-480, -40);
         ctx.bezierCurveTo(-140, 25, 160, -35, 480, 15);
@@ -683,29 +689,93 @@ export function createAirlineLiveryTexture(
         ctx.lineTo(-480, 120);
         ctx.closePath();
         ctx.fill();
-        ctx.fillStyle = '#E0F2FE';
+        ctx.fillStyle = specialLivery.accentHex;
         ctx.beginPath();
         ctx.ellipse(dir * 120, 8, 52, 34, 0, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#0369A1';
+        ctx.fillStyle = specialLivery.primaryHex;
         ctx.beginPath();
         ctx.ellipse(dir * 120, 8, 38, 24, 0, 0, Math.PI * 2);
         ctx.fill();
       } else if (specialLivery.theme === 'retro') {
-        // Classic Speedbird / China Eastern C919 / Lufthansa heritage cheatline
+        // Classic Speedbird / China Eastern C919 / Lufthansa / TWA / Team USA heritage cheatline
         ctx.fillStyle = specialLivery.primaryHex;
         ctx.fillRect(-480, -4, 960, 26);
         ctx.fillStyle = specialLivery.secondaryHex;
         ctx.fillRect(-480, 22, 960, 9);
       } else if (specialLivery.theme === 'cartoon') {
-        // R2-D2 Blue Droid Panels / Disney Theme Stripes
+        // R2-D2 / BB-8 / Disney / Sanrio themed bold fuselage panels
         ctx.fillStyle = specialLivery.primaryHex;
         ctx.fillRect(-380, -68, 90, 145);
         ctx.fillRect(220, -68, 120, 145);
         ctx.fillStyle = specialLivery.accentHex;
         ctx.fillRect(-240, 18, 420, 20);
+      } else if (specialLivery.theme === 'panda') {
+        // Sichuan Panda Route / Hainan Kung Fu Panda bamboo & stylized panda face medallion
+        ctx.fillStyle = specialLivery.accentHex;
+        ctx.fillRect(-480, 28, 960, 18);
+        const px = dir * 130;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.arc(px, 14, 34, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#0F172A';
+        ctx.beginPath();
+        ctx.arc(px - 24, -12, 11, 0, Math.PI * 2);
+        ctx.arc(px + 24, -12, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(px - 11, 10, 8, 10, -0.2, 0, Math.PI * 2);
+        ctx.ellipse(px + 11, 10, 8, 10, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (specialLivery.theme === 'aurora') {
+        // Icelandair Hekla Aurora glowing Borealis waves across deep midnight fuselage
+        const aurGrad = ctx.createLinearGradient(-420, -60, 420, 60);
+        aurGrad.addColorStop(0, '#0EA5E9');
+        aurGrad.addColorStop(0.5, '#4ADE80');
+        aurGrad.addColorStop(1, '#38BDF8');
+        ctx.fillStyle = aurGrad;
+        ctx.beginPath();
+        ctx.moveTo(-480, 12);
+        ctx.bezierCurveTo(-160, -58, 160, 44, 480, -28);
+        ctx.lineTo(480, 52);
+        ctx.bezierCurveTo(160, 84, -160, -18, -480, 48);
+        ctx.closePath();
+        ctx.fill();
+      } else if (specialLivery.theme === 'allblacks') {
+        // Air New Zealand silver fern & charcoal sash
+        ctx.strokeStyle = '#E2E8F0';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(dir * 60, 60);
+        ctx.quadraticCurveTo(dir * 180, 0, dir * 320, -45);
+        ctx.stroke();
+        for (let f = 0; f < 10; f++) {
+          const fx = dir * (85 + f * 22);
+          const fy = 44 - f * 9;
+          ctx.beginPath();
+          ctx.moveTo(fx, fy);
+          ctx.lineTo(fx + dir * 12, fy - 14);
+          ctx.moveTo(fx, fy);
+          ctx.lineTo(fx - dir * 6, fy + 12);
+          ctx.stroke();
+        }
+      } else if (specialLivery.theme === 'expo' || specialLivery.theme === 'oneworld' || specialLivery.theme === 'skyteam') {
+        // Flowing ribbon arc + alliance/expo emblem
+        ctx.fillStyle = specialLivery.secondaryHex;
+        ctx.beginPath();
+        ctx.moveTo(-480, 26);
+        ctx.bezierCurveTo(-140, -12, 140, 44, 480, 12);
+        ctx.lineTo(480, 68);
+        ctx.lineTo(-480, 68);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = specialLivery.accentHex;
+        ctx.beginPath();
+        ctx.arc(dir * 140, 24, 32, 0, Math.PI * 2);
+        ctx.fill();
       } else if (specialLivery.theme === 'dreaming' || specialLivery.theme === 'floral') {
-        // Qantas Yam Dreaming / EVA Starlight Ribbon dots & arcs
+        // Qantas Yam Dreaming / Juneyao Chinese Peony / Air China Smiling China ribbon & petals
         const dotPalette = [specialLivery.primaryHex, specialLivery.secondaryHex, specialLivery.accentHex, '#38BDF8'];
         for (let i = 0; i < 42; i++) {
           ctx.fillStyle = dotPalette[i % dotPalette.length];
@@ -717,7 +787,7 @@ export function createAirlineLiveryTexture(
     }
 
     // Passenger Cabin Window Rows (Lower deck + Upper deck for A380/B747)
-    const isDarkSide = specialLivery?.theme === 'turtle';
+    const isDarkSide = isFullDarkBase;
     ctx.fillStyle = isDarkSide ? '#E0F2FE' : '#0F172A';
     const winStep = spec.category === 'widebody' ? 18 : 22;
     for (let wx = -390; wx <= 390; wx += winStep) {
@@ -755,20 +825,22 @@ export function createAirlineLiveryTexture(
     }
 
     // Main Airline / Special Livery Titles (Centered cleanly above forward window belt)
-    ctx.fillStyle = specialLivery?.theme === 'turtle' ? '#FFFFFF' : livery.titleColor;
+    ctx.fillStyle = isDarkSide ? '#FFFFFF' : livery.titleColor;
     ctx.font = 'bold 34px "Outfit", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(titleText, -dir * 165, -54);
 
     if (subtitleText) {
       ctx.font = 'bold 14px "JetBrains Mono", monospace';
-      ctx.fillStyle = specialLivery?.theme === 'un-sdg' ? '#FFFFFF' : '#475569';
+      ctx.fillStyle =
+        specialLivery?.theme === 'un-sdg' || isDarkSide ? '#FFFFFF' : '#475569';
       ctx.fillText(subtitleText, -dir * 165, 58);
     }
 
     // Aft Aircraft Tail Registration Stencil
     if (registration) {
-      ctx.fillStyle = specialLivery?.theme === 'un-sdg' || specialLivery?.theme === 'turtle' ? '#FFFFFF' : '#334155';
+      ctx.fillStyle =
+        specialLivery?.theme === 'un-sdg' || isDarkSide ? '#FFFFFF' : '#334155';
       ctx.font = 'bold 20px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       ctx.fillText(registration.toUpperCase(), dir * 285, 22);
@@ -827,6 +899,32 @@ export function createTailFinTexture(
     ctx.font = 'bold 34px "JetBrains Mono", monospace';
     ctx.textAlign = 'center';
     ctx.fillText('UN SDGs', 256, 392);
+  } else if (specialLivery?.theme === 'panda') {
+    // Giant Panda Emblem on vertical tail
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(256, 244, 86, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0F172A';
+    ctx.beginPath();
+    ctx.arc(192, 178, 26, 0, Math.PI * 2);
+    ctx.arc(320, 178, 26, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(226, 235, 20, 26, -0.2, 0, Math.PI * 2);
+    ctx.ellipse(286, 235, 20, 26, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (specialLivery?.theme === 'allblacks') {
+    // Crisp White Koru / Silver Fern Emblem
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(256, 256, 76, 0.2, Math.PI * 1.6);
+    ctx.stroke();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(256, 256, 26, 0, Math.PI * 2);
+    ctx.fill();
   } else {
     // Crisp IATA Carrier / Livery Fin Monogram
     ctx.fillStyle = '#FFFFFF';

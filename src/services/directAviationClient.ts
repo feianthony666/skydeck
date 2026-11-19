@@ -902,34 +902,51 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
       return out;
     })();
 
-    // 3. FR24 Enriched Feed (via Worker or Public CORS Relay when allowed; automatic ./flights/latest.json enrichment when No-Worker mode is enabled)
+    // 3. FR24 Enriched Feed (via Worker or non-worker CORS Relays; always kept active for China even in Strict Wi-Fi / No-Worker Mode)
     const fr24Promise = (async (): Promise<LiveFlight[]> => {
       const makeFr24Url = (bMinLat: number, bMaxLat: number, bMinLon: number, bMaxLon: number) =>
         `https://data-cloud.flightradar24.com/zones/fcgi/feed.js?bounds=${bMaxLat.toFixed(3)},${bMinLat.toFixed(3)},${bMinLon.toFixed(3)},${bMaxLon.toFixed(3)}&faa=1&satellite=1&mlat=1&flarm=1&adsb=1&gnd=1&air=1&vehicles=0&estimated=1&maxage=14400&gliders=1&stats=1`;
 
+      const overlapsChina = isGlobal || (lamax >= 15 && lamin <= 56 && lomax >= 70 && lomin <= 140);
       const frOut: LiveFlight[] = [];
-      if (!noWorker) {
+
+      if (!noWorker || overlapsChina) {
         const t0 = Date.now();
         const hasWorker = Boolean(getCloudflareWorkerUrl());
-        const frBoxes: Array<[number, number, number, number]> = isGlobal
-          ? [
-              [10, 62, -130, -55],
-              [30, 65, -15, 45],
-              [5, 55, 70, 145],
-              [-45, 15, -80, 160],
-            ]
-          : latSpan > 16 || lonSpan > 24
-            ? (() => {
-                const mLat = (frMinLat + frMaxLat) / 2;
-                const mLon = (frMinLon + frMaxLon) / 2;
-                return [
-                  [frMinLat, mLat, frMinLon, mLon],
-                  [frMinLat, mLat, mLon, frMaxLon],
-                  [mLat, frMaxLat, frMinLon, mLon],
-                  [mLat, frMaxLat, mLon, frMaxLon],
-                ];
-              })()
-            : [[frMinLat, frMaxLat, frMinLon, frMaxLon]];
+        const frBoxes: Array<[number, number, number, number]> =
+          noWorker && isGlobal
+            ? [
+                [29, 48, 102, 134],
+                [17, 31, 74, 126],
+              ]
+            : isGlobal
+              ? [
+                  [10, 62, -130, -55],
+                  [30, 65, -15, 45],
+                  [5, 55, 70, 145],
+                  [-45, 15, -80, 160],
+                ]
+              : noWorker && overlapsChina
+                ? [
+                    [
+                      Math.max(15, frMinLat),
+                      Math.min(55, frMaxLat),
+                      Math.max(70, frMinLon),
+                      Math.min(138, frMaxLon),
+                    ],
+                  ]
+                : latSpan > 16 || lonSpan > 24
+                  ? (() => {
+                      const mLat = (frMinLat + frMaxLat) / 2;
+                      const mLon = (frMinLon + frMaxLon) / 2;
+                      return [
+                        [frMinLat, mLat, frMinLon, mLon],
+                        [frMinLat, mLat, mLon, frMaxLon],
+                        [mLat, frMaxLat, frMinLon, mLon],
+                        [mLat, frMaxLat, mLon, frMaxLon],
+                      ];
+                    })()
+                  : [[frMinLat, frMaxLat, frMinLon, frMaxLon]];
 
         if (hasWorker) {
           const frJsonList = await Promise.all(
@@ -950,19 +967,22 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
             note: frOut.length === 0 ? 'Worker unavailable or empty' : undefined,
           });
         } else {
-          const frJson = await fetchJsonViaCorsRelay<Record<string, unknown>>(
-            makeFr24Url(frMinLat, frMaxLat, frMinLon, frMaxLon),
-            8000,
-          );
-          if (frJson) {
-            const parsed = parseFr24Feed(frJson);
-            frOut.push(...parsed);
+          for (const b of frBoxes.slice(0, 2)) {
+            const frJson = await fetchJsonViaCorsRelay<Record<string, unknown>>(
+              makeFr24Url(b[0], b[1], b[2], b[3]),
+              8000,
+            );
+            if (frJson) {
+              const parsed = parseFr24Feed(frJson);
+              if (parsed.length > 0) frOut.push(...parsed);
+            }
           }
           providers.push({
-            provider: 'fr24-relay',
+            provider: noWorker ? 'fr24-china-relay' : 'fr24-relay',
             ok: frOut.length > 0,
             count: frOut.length,
             latencyMs: Date.now() - t0,
+            note: noWorker ? 'China FR24 active (Strict Wi-Fi)' : undefined,
           });
         }
       }
@@ -980,7 +1000,7 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
             ok: true,
             count: inBox.length,
             latencyMs: 5,
-            note: noWorker ? 'No-Worker CORS-free mode' : 'FR24 relay fallback',
+            note: noWorker ? 'Strict Wi-Fi snapshot + China FR24' : 'FR24 relay fallback',
           });
         }
       }
@@ -1959,7 +1979,7 @@ async function fetchDirectPastFlights(params: URLSearchParams): Promise<{query: 
   })();
 
   const fr24Task = (async () => {
-    if (!rawQuery || isNoWorkerModePreferred()) return;
+    if (!rawQuery) return;
     const modes = isReg ? ['reg', 'flight'] : ['flight', 'reg'];
     for (const fetchBy of modes) {
       const json = await fetchJsonViaCorsRelay<{result?: {response?: {data?: Array<Record<string, unknown>>}}}>(

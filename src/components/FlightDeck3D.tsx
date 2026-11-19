@@ -1,4 +1,4 @@
-import {ChevronDown, ChevronUp, Eye, Gauge, Plane, Radio} from 'lucide-react';
+import {ChevronDown, ChevronUp, CloudRain, Eye, Gauge, Plane, Radio} from 'lucide-react';
 import React, {useEffect, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
@@ -9,10 +9,12 @@ import {
   resolveSpecialLivery,
 } from '../data/aviationCatalog';
 import type {
+  AirportDisruption,
   AirportWeather,
   CockpitCameraPreset,
   FlightDetail,
   LiveFlight,
+  SigmetHazard,
   ThreeViewMode,
 } from '../types/aviation';
 import {buildProceduralAircraft, type AircraftModelRefs} from '../three/aircraftBuilder';
@@ -31,6 +33,7 @@ import {
   type ApronRefs,
   type CockpitRefs,
 } from '../three/cockpitBuilder';
+import {buildPanSectorGroup, type PanSectorRefs} from '../three/panWeatherBuilder';
 
 interface FlightDeck3DProps {
   flight: LiveFlight | null;
@@ -38,6 +41,9 @@ interface FlightDeck3DProps {
   allFlights: LiveFlight[];
   groundTraffic: LiveFlight[];
   nearestWeather?: AirportWeather;
+  airportsWeather?: AirportWeather[];
+  sigmets?: SigmetHazard[];
+  disruptions?: AirportDisruption[];
   viewMode: ThreeViewMode;
   onViewModeChange: (mode: ThreeViewMode) => void;
   reducedMotion?: boolean;
@@ -59,6 +65,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   allFlights,
   groundTraffic,
   nearestWeather,
+  airportsWeather = [],
+  sigmets = [],
+  disruptions = [],
   viewMode,
   onViewModeChange,
 }) => {
@@ -66,6 +75,12 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   const [cockpitPreset, setCockpitPreset] = useState<CockpitCameraPreset>('captain');
   const [dockCollapsed, setDockCollapsed] = useState(false);
   const [contextLost, setContextLost] = useState(false);
+  const [panTelemetry, setPanTelemetry] = useState<{
+    clouds: number;
+    tfrs: number;
+    ceilingFt: number;
+    hasPrecip: boolean;
+  }>({clouds: 0, tfrs: 0, ceilingFt: 8500, hasPrecip: false});
 
   // Mutable refs so React state updates never tear down the WebGL context
   const stateRef = useRef({
@@ -74,6 +89,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     allFlights,
     groundTraffic,
     nearestWeather,
+    airportsWeather,
+    sigmets,
+    disruptions,
     viewMode,
     cockpitPreset,
     transitionActive: false,
@@ -86,6 +104,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   stateRef.current.allFlights = allFlights;
   stateRef.current.groundTraffic = groundTraffic;
   stateRef.current.nearestWeather = nearestWeather;
+  stateRef.current.airportsWeather = airportsWeather;
+  stateRef.current.sigmets = sigmets;
+  stateRef.current.disruptions = disruptions;
   stateRef.current.viewMode = viewMode;
   stateRef.current.cockpitPreset = cockpitPreset;
 
@@ -100,12 +121,16 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     exteriorRoot?: THREE.Group;
     extShadow?: THREE.Mesh;
     taxiRoot?: THREE.Group;
+    panRoot?: THREE.Group;
+    panSectorRefs?: PanSectorRefs | null;
+    panAircraftRefs?: AircraftModelRefs | null;
     aircraftRefs?: AircraftModelRefs | null;
     taxiModels?: AircraftModelRefs[];
     maxAnisotropy: number;
     lastAircraftKey: string;
     lastTaxiHash: string;
-  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: ''});
+    lastPanKey: string;
+  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: '', lastPanKey: ''});
 
   // Trigger camera glide when viewMode or cockpitPreset changes
   useEffect(() => {
@@ -117,6 +142,10 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     } else if (viewMode === 'exterior') {
       s.desiredCamPos.set(6.8, 3.1, 7.6);
       s.desiredTarget.set(0, 0.7, 0);
+    } else if (viewMode === 'pan') {
+      const flY = s.flight ? THREE.MathUtils.clamp(s.flight.altitudeFt / 1100, 1.2, 42) : 12;
+      s.desiredCamPos.set(34, flY + 18, 44);
+      s.desiredTarget.set(0, Math.max(2, flY * 0.55), 0);
     } else {
       s.desiredCamPos.set(16, 7.5, 20);
       s.desiredTarget.set(0, 0.9, -6);
@@ -172,7 +201,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       52,
       (container.clientWidth || 640) / (container.clientHeight || 420),
       0.08,
-      600,
+      1200,
     );
     camera.position.set(-0.62, 1.38, -0.05);
 
@@ -232,6 +261,11 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     taxiRoot.add(apronRefs.group);
     scene.add(taxiRoot);
 
+    // 4. 3D PAN Tactical Weather & TFR Root
+    const panRoot = new THREE.Group();
+    panRoot.visible = false;
+    scene.add(panRoot);
+
     sceneRefs.current = {
       renderer,
       scene,
@@ -243,11 +277,15 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       exteriorRoot,
       extShadow,
       taxiRoot,
+      panRoot,
+      panSectorRefs: null,
+      panAircraftRefs: null,
       aircraftRefs: null,
       taxiModels: [],
       maxAnisotropy: maxAniso,
       lastAircraftKey: '',
       lastTaxiHash: '',
+      lastPanKey: '',
     };
 
     if (!isSoftwareGl) {
@@ -301,8 +339,12 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       const s = stateRef.current;
       const refs = sceneRefs.current;
 
-      // Adapt sky & fog to real METAR visibility & flight category
+      // Adapt sky, fog & OrbitControls pan freedom to viewMode + METAR visibility
       const wx = s.nearestWeather;
+      controls.enablePan = s.viewMode === 'pan' || s.viewMode === 'taxi';
+      controls.maxDistance = s.viewMode === 'pan' ? 280 : 120;
+      controls.minDistance = s.viewMode === 'pan' ? 4 : 0.4;
+
       if (s.viewMode === 'cockpit' && s.flight && !s.flight.onGround) {
         const altRatio = Math.min(1, s.flight.altitudeFt / 36000);
         workSky.copy(skyAirLow).lerp(skyAirHigh, altRatio);
@@ -313,7 +355,8 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       } else {
         scene.background = skyGround;
         (scene.fog as THREE.FogExp2).color.copy(skyGround);
-        (scene.fog as THREE.FogExp2).density = wx?.visibilitySm && wx.visibilitySm < 3 ? 0.022 : 0.006;
+        (scene.fog as THREE.FogExp2).density =
+          s.viewMode === 'pan' ? 0.0018 : wx?.visibilitySm && wx.visibilitySm < 3 ? 0.022 : 0.006;
       }
 
       // Smooth damped camera preset glide
@@ -354,6 +397,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
         cockpitRefs.group.visible = s.viewMode === 'cockpit';
         exteriorRoot.visible = s.viewMode === 'exterior';
         taxiRoot.visible = s.viewMode === 'taxi';
+        panRoot.visible = s.viewMode === 'pan';
 
         // Rebuild exterior aircraft when selected flight / livery / gear / reg changes
         const gearDown = activeFlight.onGround || activeFlight.altitudeFt < 2600;
@@ -461,6 +505,89 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
         cockpitRefs.group.visible = s.viewMode === 'cockpit';
         exteriorRoot.visible = s.viewMode === 'exterior';
         taxiRoot.visible = s.viewMode === 'taxi';
+        panRoot.visible = s.viewMode === 'pan';
+      }
+
+      // Sync 3D PAN Sector (Real METAR Clouds, Precip & 3D TFR/SIGMET Restriction Outlines)
+      if (s.viewMode === 'pan') {
+        const anchorLat = s.flight?.lat ?? s.nearestWeather?.lat ?? 40.08;
+        const anchorLon = s.flight?.lon ?? s.nearestWeather?.lon ?? 116.6;
+        const pFlight = s.flight;
+        const regStr = s.detail?.registration || pFlight?.registration || '';
+        const typeStr = s.detail?.aircraftCode || pFlight?.aircraftType || 'A320';
+        const airStr = s.detail?.airlineIcao || pFlight?.airlineIcao || '';
+        const panKey = [
+          pFlight?.icao24 || 'sector',
+          anchorLat.toFixed(1),
+          anchorLon.toFixed(1),
+          airStr,
+          typeStr,
+          regStr,
+          s.sigmets.length,
+          s.disruptions.length,
+          s.nearestWeather?.rawMetar || '',
+        ].join('|');
+
+        if (panKey !== refs.lastPanKey) {
+          if (refs.panSectorRefs) {
+            panRoot.remove(refs.panSectorRefs.group);
+            refs.panSectorRefs.dispose();
+          }
+          if (refs.panAircraftRefs) {
+            panRoot.remove(refs.panAircraftRefs.group);
+            refs.panAircraftRefs.dispose();
+            refs.panAircraftRefs = null;
+          }
+
+          const sector = buildPanSectorGroup({
+            anchorLat,
+            anchorLon,
+            flight: pFlight,
+            nearestWeather: s.nearestWeather,
+            airportsWeather: s.airportsWeather,
+            sigmets: s.sigmets,
+            disruptions: s.disruptions,
+          });
+          panRoot.add(sector.group);
+          refs.panSectorRefs = sector;
+
+          if (pFlight) {
+            const pSpec = resolveAircraftSpec(typeStr);
+            const pLiv = resolveAirlineLivery(airStr, pFlight.callsign);
+            const pSpLiv = resolveSpecialLivery(regStr, pFlight.callsign);
+            const pAc = buildProceduralAircraft(
+              pSpec,
+              pLiv,
+              regStr,
+              refs.maxAnisotropy,
+              pFlight.onGround,
+              pSpLiv,
+            );
+            const flY = THREE.MathUtils.clamp(pFlight.altitudeFt / 1100, 0.8, 42);
+            pAc.group.scale.setScalar(1.35);
+            pAc.group.position.set(0, pFlight.onGround ? -pAc.groundContactOffsetY * 1.35 : flY, 0);
+            pAc.group.rotation.y = THREE.MathUtils.degToRad(-pFlight.trueTrackDeg);
+            panRoot.add(pAc.group);
+            refs.panAircraftRefs = pAc;
+          }
+
+          refs.lastPanKey = panKey;
+          setPanTelemetry({
+            clouds: sector.cloudCount,
+            tfrs: sector.tfrVolumeCount,
+            ceilingFt: sector.ceilingFt,
+            hasPrecip: sector.hasPrecip,
+          });
+        }
+
+        refs.panSectorRefs?.update(dt);
+        if (refs.panAircraftRefs) {
+          for (const fan of refs.panAircraftRefs.fanBlades) {
+            fan.rotation.z += dt * 18;
+          }
+          refs.panAircraftRefs.strobeLight.visible = now % 1400 < 120;
+          refs.panAircraftRefs.beaconLight.visible = Math.floor(now / 900) % 2 === 0;
+        }
       }
 
       // Sync 3D Ground Taxi Traffic & Radar Scanner Rotation on airport apron
@@ -527,6 +654,8 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       controls.dispose();
       cockpitRefs.dispose();
       apronRefs.dispose();
+      sceneRefs.current.panSectorRefs?.dispose();
+      sceneRefs.current.panAircraftRefs?.dispose();
       sceneRefs.current.aircraftRefs?.dispose();
       for (const tm of sceneRefs.current.taxiModels ?? []) tm.dispose();
       avionics.dispose();
@@ -609,6 +738,23 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
         )}
       </div>
 
+      {/* Top-Right 3D PAN Weather & TFR Legend (Solid dark surface, no backdrop-blur over WebGL) */}
+      {viewMode === 'pan' && (
+        <div className="pointer-events-none absolute top-4 right-4 z-10 rounded-lg bg-[#080D16]/90 border border-slate-800 px-3 py-2 text-[11px] font-mono text-slate-200 space-y-1">
+          <div className="text-sky-400 font-semibold">3D PAN · METAR &amp; TFR AIRSPACE</div>
+          <div className="text-slate-300 tabular-nums">
+            Clouds: {panTelemetry.clouds} · Ceiling ~{panTelemetry.ceilingFt.toLocaleString()} ft ·{' '}
+            {panTelemetry.hasPrecip ? 'Precip Active' : 'Dry Sector'}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            <span className="text-red-400">■ TFR / CONV ({panTelemetry.tfrs})</span>
+            <span className="text-amber-400">■ TURB</span>
+            <span className="text-sky-400">■ ICE</span>
+            <span className="text-slate-400">· Right-drag / 2-finger to PAN</span>
+          </div>
+        </div>
+      )}
+
       {contextLost && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#080D16]/95 text-slate-200 text-sm">
           WebGL context paused — restoring 3D Flight Deck…
@@ -659,6 +805,16 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
               >
                 <Radio className="w-3.5 h-3.5" />
                 Ground Taxi 3D
+              </button>
+              <button
+                type="button"
+                onClick={() => onViewModeChange('pan')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  viewMode === 'pan' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <CloudRain className="w-3.5 h-3.5" />
+                3D PAN
               </button>
             </div>
 

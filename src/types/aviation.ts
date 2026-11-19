@@ -404,7 +404,20 @@ export interface SpecialLiverySpec {
   airlineName: string;
   aircraftType: string;
   liveryName: string;
-  theme: 'un-sdg' | 'retro' | 'floral' | 'cartoon' | 'turtle' | 'dreaming' | 'expo';
+  theme:
+    | 'un-sdg'
+    | 'retro'
+    | 'floral'
+    | 'cartoon'
+    | 'turtle'
+    | 'dreaming'
+    | 'expo'
+    | 'panda'
+    | 'aurora'
+    | 'allblacks'
+    | 'staralliance'
+    | 'skyteam'
+    | 'oneworld';
   primaryHex: string;
   secondaryHex: string;
   accentHex: string;
@@ -480,5 +493,5 @@ export interface RadarSettings {
 
 export type AppView = 'radar' | 'deck' | 'taxi' | 'planner';
 export type LayoutMode = 'split' | 'radar' | 'deck';
-export type ThreeViewMode = 'cockpit' | 'exterior' | 'taxi';
+export type ThreeViewMode = 'cockpit' | 'exterior' | 'taxi' | 'pan';
 export type CockpitCameraPreset = 'captain' | 'hud' | 'overhead' | 'pedestal';

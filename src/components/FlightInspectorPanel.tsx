@@ -3,6 +3,7 @@ import {
   Camera,
   ChevronDown,
   Clock,
+  CloudRain,
   Crosshair,
   DoorOpen,
   ExternalLink,
@@ -566,39 +567,49 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
           )}
 
           {/* Follow (Preserves User Zoom) + Isolate (Full Route) + 3D Quick Action Bar */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pb-0.5">
-            {onToggleFollow && (
-              <Button
-                variant={followSelected ? 'default' : 'outline'}
-                size="sm"
-                onClick={onToggleFollow}
-                className="w-full justify-center"
-                title="Keep aircraft centered at your current map zoom"
-              >
-                <Crosshair className="w-3.5 h-3.5 shrink-0" />
-                <span>{followSelected ? 'Following' : 'Follow'}</span>
-              </Button>
+          <div className="space-y-1.5 pb-0.5">
+            {(onToggleFollow || onToggleIsolate) && (
+              <div className="grid grid-cols-2 gap-1.5">
+                {onToggleFollow && (
+                  <Button
+                    variant={followSelected ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={onToggleFollow}
+                    className="w-full justify-center"
+                    title="Keep aircraft centered at your current map zoom"
+                  >
+                    <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                    <span>{followSelected ? 'Following' : 'Follow'}</span>
+                  </Button>
+                )}
+                {onToggleIsolate && (
+                  <Button
+                    variant={isolateSelected ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={onToggleIsolate}
+                    className="w-full justify-center"
+                    title="Hide all other traffic and show complete flight path"
+                  >
+                    <Eye className="w-3.5 h-3.5 shrink-0" />
+                    <span>{isolateSelected ? 'Isolated' : 'Isolate'}</span>
+                  </Button>
+                )}
+              </div>
             )}
-            {onToggleIsolate && (
-              <Button
-                variant={isolateSelected ? 'default' : 'outline'}
-                size="sm"
-                onClick={onToggleIsolate}
-                className="w-full justify-center"
-                title="Hide all other traffic and show complete flight path"
-              >
-                <Eye className="w-3.5 h-3.5 shrink-0" />
-                <span>{isolateSelected ? 'Isolated' : 'Isolate'}</span>
+            <div className="grid grid-cols-3 gap-1.5">
+              <Button variant="outline" size="sm" onClick={() => onOpen3DMode('cockpit')} className="w-full justify-center">
+                <Gauge className="w-3.5 h-3.5 shrink-0" />
+                <span>3D Deck</span>
               </Button>
-            )}
-            <Button variant="outline" size="sm" onClick={() => onOpen3DMode('cockpit')} className="w-full justify-center">
-              <Gauge className="w-3.5 h-3.5 shrink-0" />
-              <span>3D Deck</span>
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => onOpen3DMode('exterior')} className="w-full justify-center">
-              <Plane className="w-3.5 h-3.5 shrink-0" />
-              <span>Livery</span>
-            </Button>
+              <Button variant="outline" size="sm" onClick={() => onOpen3DMode('exterior')} className="w-full justify-center">
+                <Plane className="w-3.5 h-3.5 shrink-0" />
+                <span>Livery</span>
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => onOpen3DMode('pan')} className="w-full justify-center" title="3D PAN view with live clouds, precip & TFR/SIGMET boundaries">
+                <CloudRain className="w-3.5 h-3.5 shrink-0" />
+                <span>3D PAN</span>
+              </Button>
+            </div>
           </div>
 
           {/* Landing ETA & Live Route Header */}
