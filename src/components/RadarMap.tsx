@@ -2182,9 +2182,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (rwy.coords.length < 2) continue;
 
         const rwyWidthM = rwy.widthM ?? 45;
-        // Conservative width adjustment to better align with the basemap runway path.
-        // Keep geographic scaling; avoid fixed screen-pixel runway widths.
-        const rwyWeight = pxFromMeters(rwyWidthM * 1.12, mPerPx, 4.5, 48);
+        const rwyWeight = pxFromMeters(rwyWidthM, mPerPx, 4.5, 48);
         const shoulderWeight = rwyWeight + pxFromMeters(8, mPerPx, 2.0, 9);
         const startPt = rwy.coords[0];
         const endPt = rwy.coords[rwy.coords.length - 1];
