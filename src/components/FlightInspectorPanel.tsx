@@ -19,6 +19,7 @@ import {
 import React, {useEffect, useMemo, useState} from 'react';
 import {AIRPORT_CATALOG, resolveAirlineLivery} from '../data/aviationCatalog';
 import {haversineNm} from '../services/offlineStore';
+import {apiFetchJson} from '../services/directAviationClient';
 import type {
   AcarsMessage,
   AirportMarker,
@@ -26,7 +27,7 @@ import type {
   LiveFlight,
   ThreeViewMode,
 } from '../types/aviation';
-import {getDbFlagMeta, getEmergencySquawkMeta} from './aircraftIcons';
+import {getDbFlagMeta, getEmergencySquawkMeta, getFr24OperatorLogoUrl} from './aircraftIcons';
 import {Badge} from './ui/badge';
 import {Button} from './ui/button';
 import {Card, CardContent, CardHeader, CardTitle} from './ui/card';
@@ -54,6 +55,16 @@ interface TelemetrySample {
   altFt: number;
   spdKts: number;
   terrainFt: number;
+}
+
+interface SafetyRecordItem {
+  date: string;
+  type: string;
+  registration: string;
+  operator: string;
+  location: string;
+  damage: string;
+  url: string;
 }
 
 function formatEpochTime(ts?: number, mode: 'airport' | 'local' | 'utc' = 'local'): string {
@@ -139,6 +150,8 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
 }) => {
   const [photoError, setPhotoError] = useState(false);
   const [liveSamples, setLiveSamples] = useState<TelemetrySample[]>([]);
+  const [safetyItems, setSafetyItems] = useState<SafetyRecordItem[]>([]);
+  const [safetySearchUrl, setSafetySearchUrl] = useState('');
 
   const squawkCode = detail?.squawk || flight.squawk || '';
   const emerg = getEmergencySquawkMeta(squawkCode);
@@ -150,6 +163,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     dynamics: boolean;
     airframe: boolean;
     acars: boolean;
+    charts: boolean;
   }>({
     route: true,
     profile: true,
@@ -157,6 +171,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     dynamics: false,
     airframe: false,
     acars: false,
+    charts: false,
   });
 
   const toggleSection = (key: keyof typeof openSections) => {
@@ -209,6 +224,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
     detail?.airlineIcao || flight.airlineIcao,
     flight.callsign,
   );
+  const fr24OperatorLogoUrl = getFr24OperatorLogoUrl(detail?.airlineIcao || flight.airlineIcao);
 
   const dbMeta = getDbFlagMeta(flight);
   const registration = detail?.registration || flight.registration || '—';
@@ -217,6 +233,30 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
   const operatorName = detail?.registeredOwner || flight.ownerOperator || detail?.airlineName || livery.name;
   const originCode = detail?.originIata || flight.origin || '—';
   const destCode = detail?.destinationIata || flight.destination || '—';
+  useEffect(() => {
+    if (registration === '—') {
+      setSafetyItems([]);
+      setSafetySearchUrl('');
+      return;
+    }
+    let cancelled = false;
+    apiFetchJson<{items?: SafetyRecordItem[]; searchUrl?: string}>(
+      `/api/safety-record?registration=${encodeURIComponent(registration)}`,
+    )
+      .then((record) => {
+        if (cancelled) return;
+        setSafetyItems(record.items ?? []);
+        setSafetySearchUrl(record.searchUrl ?? '');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSafetyItems([]);
+        setSafetySearchUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [registration]);
   const originIcao = detail?.originIcao || '';
   const destIcao = detail?.destinationIcao || '';
 
@@ -747,6 +787,46 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
 
               <div className="rounded-lg border border-border bg-card/80 p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] font-semibold text-foreground">
+                  <span>Aviation Safety Network</span>
+                  {safetySearchUrl && (
+                    <a
+                      href={safetySearchUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-primary hover:underline"
+                    >
+                      Open ASN <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
+                {safetyItems.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {safetyItems.slice(0, 6).map((item, index) => (
+                      <a
+                        key={`${item.date}-${item.location}-${index}`}
+                        href={item.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block border-t border-border/60 pt-1.5 first:border-t-0 first:pt-0 hover:text-primary"
+                      >
+                        <div className="font-mono text-[10.5px]">
+                          {item.date || 'Date unknown'} · {item.type || 'Aircraft occurrence'}
+                        </div>
+                        <div className="text-[10.5px] text-muted-foreground truncate">
+                          {item.location || 'Location unknown'} · {item.damage || 'Damage not listed'}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[10.5px] text-muted-foreground">
+                    No indexed occurrences found or Aviation Safety Network is unavailable.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-border bg-card/80 p-2.5 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-foreground">
                   <span className="inline-flex items-center gap-1.5">
                     <Wrench className="w-3.5 h-3.5 text-muted-foreground" />
                     Airframe &amp; Maintenance Status
@@ -873,6 +953,16 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             onToggle={() => toggleSection('airframe')}
           >
             <div className="rounded-xl border border-border overflow-hidden bg-muted/30">
+              {fr24OperatorLogoUrl && (
+                <div className="h-10 px-2.5 py-1.5 border-b border-border bg-white flex items-center">
+                  <img
+                    src={fr24OperatorLogoUrl}
+                    alt={`${livery.name} official Flightradar24 operator logo`}
+                    referrerPolicy="no-referrer"
+                    className="max-h-7 max-w-28 object-contain"
+                  />
+                </div>
+              )}
               {photo?.url ? (
                 <img
                   src={photo.url}
@@ -938,6 +1028,42 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
           </CollapsibleSection>
 
           {/* 6. Matched ACARS & Ground Mode */}
+          <CollapsibleSection
+            title="Official Aerodrome & Approach Charts"
+            subtitle={`${originCode} departure · ${destCode} arrival`}
+            icon={<MapPin className="w-3.5 h-3.5" />}
+            open={openSections.charts}
+            onToggle={() => toggleSection('charts')}
+          >
+            <div className="grid grid-cols-1 gap-2">
+              {[originCode, destCode]
+                .filter((code, index, codes) => code !== '—' && codes.indexOf(code) === index)
+                .map((code) => (
+                  <div key={code} className="rounded-lg border border-border p-2">
+                    <div className="text-[10px] font-mono text-muted-foreground mb-1.5">{code}</div>
+                    <div className="flex flex-wrap gap-2">
+                      <a
+                        href={`https://skyvector.com/airport/${encodeURIComponent(code)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+                      >
+                        Airport charts <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <a
+                        href={`https://www.google.com/search?q=${encodeURIComponent(`${code} official aerodrome and approach charts`)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+                      >
+                        Official AIP / approach charts <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </CollapsibleSection>
+
           {matchingAcars.length > 0 && (
             <CollapsibleSection
               title={`Matched ACARS (${matchingAcars.length})`}

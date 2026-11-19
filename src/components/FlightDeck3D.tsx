@@ -3,10 +3,12 @@ import React, {useEffect, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {resolveAircraftSpec, resolveAirlineLivery} from '../data/aviationCatalog';
 import type {
   AirportWeather,
   CockpitCameraPreset,
+  FlightDetail,
   LiveFlight,
   ThreeViewMode,
 } from '../types/aviation';
@@ -23,6 +25,7 @@ import {buildAirportApronGroup, buildFlightDeckCockpit} from '../three/cockpitBu
 
 interface FlightDeck3DProps {
   flight: LiveFlight | null;
+  detail?: FlightDetail | null;
   allFlights: LiveFlight[];
   groundTraffic: LiveFlight[];
   nearestWeather?: AirportWeather;
@@ -43,6 +46,7 @@ const CAMERA_PRESETS: Record<
 
 export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   flight,
+  detail,
   allFlights,
   groundTraffic,
   nearestWeather,
@@ -57,6 +61,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   // Mutable refs so React state updates never tear down the WebGL context
   const stateRef = useRef({
     flight,
+    detail,
     allFlights,
     groundTraffic,
     nearestWeather,
@@ -68,6 +73,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   });
 
   stateRef.current.flight = flight;
+  stateRef.current.detail = detail;
   stateRef.current.allFlights = allFlights;
   stateRef.current.groundTraffic = groundTraffic;
   stateRef.current.nearestWeather = nearestWeather;
@@ -85,10 +91,19 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     taxiRoot?: THREE.Group;
     aircraftRefs?: AircraftModelRefs | null;
     taxiModels?: AircraftModelRefs[];
+    realAircraftRoot?: THREE.Group;
+    realAircraftKey: string;
+    realAircraftLoading: boolean;
     maxAnisotropy: number;
     lastAircraftKey: string;
     lastTaxiHash: string;
-  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: ''});
+  }>({
+    maxAnisotropy: 1,
+    lastAircraftKey: '',
+    lastTaxiHash: '',
+    realAircraftKey: '',
+    realAircraftLoading: false,
+  });
 
   // Trigger camera glide when viewMode or cockpitPreset changes
   useEffect(() => {
@@ -223,6 +238,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       taxiRoot,
       aircraftRefs: null,
       taxiModels: [],
+      realAircraftRoot: exteriorRoot,
+      realAircraftKey: '',
+      realAircraftLoading: false,
       maxAnisotropy: maxAniso,
       lastAircraftKey: '',
       lastTaxiHash: '',
@@ -245,6 +263,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
 
     let frameId = 0;
     let lastTime = performance.now();
+    let lastRenderTime = 0;
     let avionicsTimer = 0;
     let disposed = false;
 
@@ -268,6 +287,16 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     const tick = () => {
       if (disposed) return;
       const now = performance.now();
+      if (document.hidden) {
+        lastTime = now;
+        frameId = window.setTimeout(tick, 500);
+        return;
+      }
+      if (!isSoftwareGl && now - lastRenderTime < 1000 / 30) {
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
+      lastRenderTime = now;
       const dt = Math.min(0.1, (now - lastTime) / 1000);
       lastTime = now;
 
@@ -316,20 +345,23 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       const activeFlight = s.flight;
       if (activeFlight) {
         const gearDown = activeFlight.onGround || activeFlight.altitudeFt < 2600;
-        const acKey = `${activeFlight.icao24}-${activeFlight.airlineIcao}-${activeFlight.aircraftType}-${gearDown}`;
+        const aircraftCode = s.detail?.aircraftCode || activeFlight.aircraftType;
+        const airlineCode = s.detail?.airlineIcao || activeFlight.airlineIcao;
+        const acKey = `${activeFlight.icao24}-${airlineCode}-${aircraftCode}-${gearDown}-${s.detail?.registration || activeFlight.registration}`;
         if (acKey !== refs.lastAircraftKey) {
           if (refs.aircraftRefs) {
             exteriorRoot.remove(refs.aircraftRefs.group);
             refs.aircraftRefs.dispose();
           }
-          const spec = resolveAircraftSpec(activeFlight.aircraftType);
-          const livery = resolveAirlineLivery(activeFlight.airlineIcao, activeFlight.callsign);
+          const spec = resolveAircraftSpec(aircraftCode);
+          const livery = resolveAirlineLivery(airlineCode, activeFlight.callsign);
           const model = buildProceduralAircraft(
             spec,
             livery,
-            activeFlight.registration,
+            s.detail?.registration || activeFlight.registration,
             refs.maxAnisotropy,
             gearDown,
+            s.detail?.photo?.url,
           );
           exteriorRoot.add(model.group);
           refs.aircraftRefs = model;

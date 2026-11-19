@@ -47,6 +47,12 @@ export function getEmergencySquawkMeta(squawk?: string): EmergencySquawkMeta | n
   return null;
 }
 
+export function getFr24OperatorLogoUrl(airlineIcao?: string): string | null {
+  const code = (airlineIcao ?? '').trim().toUpperCase();
+  if (!code) return null;
+  return `https://www.flightradar24.com/static/images/data/operators/${encodeURIComponent(code)}_logo0.png`;
+}
+
 export interface DbFlagMeta {
   kind: 'LADD' | 'MIL' | 'PIA';
   shortLabel: string;

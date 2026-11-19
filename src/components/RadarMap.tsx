@@ -32,7 +32,7 @@ export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
   planeSize: 20,
   basemapStyle: 'auto',
   flightPathMode: 'all',
-  locateMeEnabled: true,
+  locateMeEnabled: false,
   timeDisplayMode: 'airport',
   showPlaneLabels: false,
   showMetarDots: true,
@@ -711,6 +711,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       maxZoom: 20,
       zoomControl: false,
       preferCanvas: true,
+      zoomAnimation: true,
+      markerZoomAnimation: true,
+      fadeAnimation: true,
+      zoomSnap: 1,
+      zoomDelta: 1,
+      wheelPxPerZoomLevel: 55,
+      wheelDebounceTime: 12,
+      zoomAnimationThreshold: 8,
     });
 
     // Subtle top-right zoom controls that don't clash with the Left Sidebar or Bottom Dock
@@ -883,7 +891,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView(activeRegion.center, activeRegion.zoom, {animate: true});
+    map.setView(activeRegion.center, activeRegion.zoom, {animate: true, duration: 0.32, easeLinearity: 0.8});
     setMapZoom(activeRegion.zoom);
   }, [activeRegion]);
 
@@ -891,7 +899,11 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const map = mapRef.current;
     if (!map || !flyToLocation) return;
     const z = flyToLocation.zoom ?? 8;
-    map.setView([flyToLocation.lat, flyToLocation.lon], z, {animate: true});
+    map.setView([flyToLocation.lat, flyToLocation.lon], z, {
+      animate: true,
+      duration: 0.28,
+      easeLinearity: 0.82,
+    });
     setMapZoom(z);
   }, [flyToLocation]);
 

@@ -366,14 +366,15 @@ async function fetchPlanespottersPhoto(icao24: string, reg: string): Promise<Air
     return null;
   };
 
-  const [wmPhoto, psHexPhoto] = await Promise.all([
-    tryWikimedia(),
-    icao24 ? tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`) : Promise.resolve(null),
-  ]);
-
-  let photo: AircraftPhoto | null = wmPhoto ?? psHexPhoto;
+  const psHexPhoto = icao24
+    ? await tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`)
+    : null;
+  let photo: AircraftPhoto | null = psHexPhoto;
   if (!photo && reg) {
     photo = await tryPlanespotters(`https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}`);
+  }
+  if (!photo) {
+    photo = await tryWikimedia();
   }
   if (!photo && icao24) {
     try {
@@ -529,37 +530,25 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     `https://api.flightradar24.com/common/v1/airport.json?code=${encodeURIComponent(queryCode)}&plugin[]=&plugin-setting[schedule][timestamp]=${ts}&plugin-setting[schedule][mode]=${mode}&page=${page}&limit=100`;
 
   try {
-    const [depRes1, depRes2, arrRes1, arrRes2] = await Promise.all([
-      fetch(makeBoardUrl('departures', 1), {
+    const boardPages = [1, 2, 3, 4, 5];
+    const fetchPage = (mode: 'departures' | 'arrivals', page: number) =>
+      fetch(makeBoardUrl(mode, page), {
         headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
         signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
-      fetch(makeBoardUrl('departures', 2), {
-        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
-        signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
-      fetch(makeBoardUrl('arrivals', 1), {
-        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
-        signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
-      fetch(makeBoardUrl('arrivals', 2), {
-        headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'},
-        signal: AbortSignal.timeout(5200),
-      }).catch(() => null),
+      }).catch(() => null);
+    const [depResponses, arrResponses] = await Promise.all([
+      Promise.all(boardPages.map((page) => fetchPage('departures', page))),
+      Promise.all(boardPages.map((page) => fetchPage('arrivals', page))),
     ]);
 
     type Fr24ApResp = {result?: {response?: {airport?: {pluginData?: Record<string, unknown>}}}};
-    const [depJson1, depJson2, arrJson1, arrJson2] = await Promise.all([
-      safeJson<Fr24ApResp>(depRes1),
-      safeJson<Fr24ApResp>(depRes2),
-      safeJson<Fr24ApResp>(arrRes1),
-      safeJson<Fr24ApResp>(arrRes2),
+    const [depJsons, arrJsons] = await Promise.all([
+      Promise.all(depResponses.map((res) => safeJson<Fr24ApResp>(res))),
+      Promise.all(arrResponses.map((res) => safeJson<Fr24ApResp>(res))),
     ]);
 
-    const pdDep1 = depJson1?.result?.response?.airport?.pluginData ?? {};
-    const pdDep2 = depJson2?.result?.response?.airport?.pluginData ?? {};
-    const pdArr1 = arrJson1?.result?.response?.airport?.pluginData ?? {};
-    const pdArr2 = arrJson2?.result?.response?.airport?.pluginData ?? {};
+    const pdDep1 = depJsons[0]?.result?.response?.airport?.pluginData ?? {};
+    const pdArr1 = arrJsons[0]?.result?.response?.airport?.pluginData ?? {};
     const details = ((pdDep1.details ?? pdArr1.details) ?? {}) as Record<string, unknown>;
     const stats = (details.stats ?? {}) as Record<string, unknown>;
     const codeObj = (details.code ?? {}) as Record<string, unknown>;
@@ -615,8 +604,12 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
       return Array.from(seen.values());
     };
 
-    const depRows = [...getRows(pdDep1, 'departures'), ...getRows(pdDep2, 'departures')];
-    const arrRows = [...getRows(pdArr1, 'arrivals'), ...getRows(pdArr2, 'arrivals')];
+    const depRows = depJsons.flatMap((json) =>
+      getRows(json?.result?.response?.airport?.pluginData ?? {}, 'departures'),
+    );
+    const arrRows = arrJsons.flatMap((json) =>
+      getRows(json?.result?.response?.airport?.pluginData ?? {}, 'arrivals'),
+    );
 
     const departures = dedupeBoardRows(
       depRows.filter((r) => r.flight).map((r) => mapFr24ScheduleRow(r.flight!, 'departures', iata, icao, name)),
@@ -786,7 +779,24 @@ async function fetchFr24Web(
     const lonSpan = lomax - lomin;
     // Tile wide/zoomed-out viewports into a 2x2 grid so FR24's per-request ~1500 aircraft zone limit doesn't drop planes
     const boxes: Array<[number, number, number, number]> =
-      latSpan > 16 || lonSpan > 24
+      latSpan >= 160 && lonSpan >= 340
+        ? (() => {
+            const latBands = [-85, -45, 0, 45, 85];
+            const lonBands = [-180, -90, 0, 90, 180];
+            const tiles: Array<[number, number, number, number]> = [];
+            for (let latIndex = 0; latIndex < latBands.length - 1; latIndex++) {
+              for (let lonIndex = 0; lonIndex < lonBands.length - 1; lonIndex++) {
+                tiles.push([
+                  latBands[latIndex],
+                  lonBands[lonIndex],
+                  latBands[latIndex + 1],
+                  lonBands[lonIndex + 1],
+                ]);
+              }
+            }
+            return tiles;
+          })()
+        : latSpan > 16 || lonSpan > 24
         ? (() => {
             const midLat = (lamin + lamax) / 2;
             const midLon = (lomin + lomax) / 2;
@@ -1590,8 +1600,123 @@ export function createApiRouter(): express.Router {
     const latSpanNm = Math.abs(lamax - lamin) * 60;
     const lonSpanNm = Math.abs(lomax - lomin) * 60 * Math.cos((centerLat * Math.PI) / 180);
     const radiusNm = Math.min(250, Math.max(40, Math.hypot(latSpanNm, lonSpanNm) / 2));
+    const isGlobal =
+      lamax - lamin >= 160 &&
+      lomax - lomin >= 340;
 
-    const [fr24Res, adsbRes, adsbMilRes, adsbLaddRes, adsbFiRes, openSkyRes, airNavRes, variFlightRes] = await Promise.all([
+    const globalAdsbLolPromise = isGlobal
+      ? (async (): Promise<{flights: LiveFlight[]; status: ProviderStatus}> => {
+          const start = Date.now();
+          try {
+            const res = await fetch('https://api.adsb.lol/v2/all', {
+              headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+              signal: AbortSignal.timeout(15000),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = await res.json() as {ac?: Array<Record<string, unknown>>; now?: number};
+            const nowSec = Math.floor((json.now ?? Date.now()) / 1000);
+            const flights = (json.ac ?? [])
+              .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
+              .map((a) => {
+                const icao24 = String(a.hex ?? '').toUpperCase();
+                const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
+                const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
+                return {
+                  id: icao24,
+                  icao24,
+                  callsign,
+                  flightNumber: callsign,
+                  registration: String(a.r ?? ''),
+                  airlineIcao: String(a.call ?? '').slice(0, 3).toUpperCase(),
+                  airlineName: String(a.ownOp ?? ''),
+                  aircraftType: String(a.t ?? 'A320').toUpperCase(),
+                  lat: Number(a.lat),
+                  lon: Number(a.lon),
+                  altitudeFt: onGround ? 0 : Math.max(0, Math.round(Number(a.alt_baro ?? a.alt_geom ?? 0))),
+                  groundSpeedKts: Math.round(Number(a.gs ?? 0)),
+                  trueTrackDeg: Math.round(Number(a.track ?? 0)),
+                  verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
+                  onGround,
+                  squawk: String(a.squawk ?? ''),
+                  origin: '',
+                  destination: '',
+                  lastContactEpoch: nowSec - Math.round(Number(a.seen_pos ?? 0)),
+                  source: 'adsb.lol',
+                  isEstimated: false,
+                  uncertaintyNm: 0,
+                  dbFlags: Number(a.dbFlags ?? 0) || 0,
+                } satisfies LiveFlight;
+              });
+            return {
+              flights,
+              status: {provider: 'adsb.lol-global', ok: true, count: flights.length, latencyMs: Date.now() - start},
+            };
+          } catch (err) {
+            return {
+              flights: [],
+              status: {provider: 'adsb.lol-global', ok: false, count: 0, latencyMs: Date.now() - start, note: err instanceof Error ? err.message : 'Timeout'},
+            };
+          }
+        })()
+      : Promise.resolve({flights: [], status: {provider: 'adsb.lol-global', ok: false, count: 0, latencyMs: 0, note: 'Regional sector'}});
+
+    const globalAdsbFiPromise = isGlobal
+      ? (async (): Promise<{flights: LiveFlight[]; status: ProviderStatus}> => {
+          const start = Date.now();
+          try {
+            const res = await fetch('https://opendata.adsb.fi/api/v2/all', {
+              headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+              signal: AbortSignal.timeout(15000),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = await res.json() as {aircraft?: Array<Record<string, unknown>>; now?: number};
+            const nowSec = Math.floor((json.now ?? Date.now()) / 1000);
+            const flights = (json.aircraft ?? [])
+              .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
+              .map((a) => {
+                const icao24 = String(a.hex ?? '').toUpperCase();
+                const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
+                const onGround = a.alt_baro === 'ground' || Number(a.alt_baro ?? 0) <= 0;
+                return {
+                  id: icao24,
+                  icao24,
+                  callsign,
+                  flightNumber: callsign,
+                  registration: String(a.r ?? ''),
+                  airlineIcao: '',
+                  airlineName: String(a.ownOp ?? ''),
+                  aircraftType: String(a.t ?? 'A320').toUpperCase(),
+                  lat: Number(a.lat),
+                  lon: Number(a.lon),
+                  altitudeFt: onGround ? 0 : Math.max(0, Math.round(Number(a.alt_baro ?? a.alt_geom ?? 0))),
+                  groundSpeedKts: Math.round(Number(a.gs ?? 0)),
+                  trueTrackDeg: Math.round(Number(a.track ?? 0)),
+                  verticalRateFpm: Math.round(Number(a.baro_rate ?? a.geom_rate ?? 0)),
+                  onGround,
+                  squawk: String(a.squawk ?? ''),
+                  origin: '',
+                  destination: '',
+                  lastContactEpoch: nowSec - Math.round(Number(a.seen_pos ?? 0)),
+                  source: 'adsb.fi',
+                  isEstimated: false,
+                  uncertaintyNm: 0,
+                  dbFlags: Number(a.dbFlags ?? 0) || 0,
+                } satisfies LiveFlight;
+              });
+            return {
+              flights,
+              status: {provider: 'adsb.fi-global', ok: true, count: flights.length, latencyMs: Date.now() - start},
+            };
+          } catch (err) {
+            return {
+              flights: [],
+              status: {provider: 'adsb.fi-global', ok: false, count: 0, latencyMs: Date.now() - start, note: err instanceof Error ? err.message : 'Timeout'},
+            };
+          }
+        })()
+      : Promise.resolve({flights: [], status: {provider: 'adsb.fi-global', ok: false, count: 0, latencyMs: 0, note: 'Regional sector'}});
+
+    const [fr24Res, adsbRes, adsbMilRes, adsbLaddRes, adsbFiRes, openSkyRes, airNavRes, variFlightRes, globalAdsbLolRes, globalAdsbFiRes] = await Promise.all([
       fetchFr24Web(lamin, lomin, lamax, lomax),
       fetchAdsbLol(centerLat, centerLon, radiusNm),
       fetchAdsbMil(lamin, lomin, lamax, lomax),
@@ -1600,6 +1725,8 @@ export function createApiRouter(): express.Router {
       fetchOpenSky(lamin, lomin, lamax, lomax),
       fetchAirNavWeb(lamin, lomin, lamax, lomax),
       fetchVariFlightWeb(lamin, lomin, lamax, lomax),
+      globalAdsbLolPromise,
+      globalAdsbFiPromise,
     ]);
 
     const mergedMap = new Map<string, LiveFlight>();
@@ -1607,6 +1734,8 @@ export function createApiRouter(): express.Router {
       variFlightRes.flights,
       airNavRes.flights,
       fr24Res.flights,
+      globalAdsbLolRes.flights,
+      globalAdsbFiRes.flights,
       adsbLaddRes.flights,
       adsbMilRes.flights,
       adsbRes.flights,
@@ -1652,7 +1781,7 @@ export function createApiRouter(): express.Router {
         if (a.onGround !== b.onGround) return a.onGround ? 1 : -1;
         return 0;
       })
-      .slice(0, 2200);
+      .slice(0, isGlobal ? 50000 : 10000);
 
     for (const f of flights) {
       recordFlightBreadcrumb(f);
@@ -1671,6 +1800,7 @@ export function createApiRouter(): express.Router {
       variFlightRes.status,
       airNavRes.status,
       openSkyRes.status,
+      ...(isGlobal ? [globalAdsbLolRes.status, globalAdsbFiRes.status] : []),
     ];
 
     const payload: FlightsResponse = {
@@ -1953,6 +2083,59 @@ export function createApiRouter(): express.Router {
       trail: bestTrail,
       source: playbackTrail.length > 0 ? 'fr24-playback' : cachedFlight?.source ?? 'adsb',
     } satisfies FlightDetail);
+  });
+
+  // 2a1. Aviation Safety Network registration history
+  router.get('/safety-record', async (req, res) => {
+    const registration = String(req.query.registration ?? '').trim().toUpperCase();
+    if (!registration) {
+      res.status(400).json({error: 'Missing registration'});
+      return;
+    }
+    const safeReg = registration.replace(/[^A-Z0-9-]/g, '');
+    const searchUrl = `https://aviation-safety.net/database/registration/regsearch.php?regi=${encodeURIComponent(safeReg)}`;
+    try {
+      const response = await fetch(searchUrl, {
+        headers: {'User-Agent': API_USER_AGENT, Accept: 'text/html'},
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const items: Array<{date: string; type: string; registration: string; operator: string; location: string; damage: string; url: string}> = [];
+      const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      let rowMatch;
+      while ((rowMatch = rowPattern.exec(html)) !== null && items.length < 40) {
+        const row = rowMatch[1];
+        const hrefMatch = row.match(/href="([^"]*asndb[^"]+)"/i);
+        const cells = Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi))
+          .map((cell) => String(cell[1]).replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim());
+        if (cells.length < 5) continue;
+        items.push({
+          date: cells[0] || '',
+          type: cells[1] || '',
+          registration: cells[2] || safeReg,
+          operator: cells[3] || '',
+          location: cells[4] || '',
+          damage: cells[5] || '',
+          url: hrefMatch ? new URL(hrefMatch[1].replace(/&amp;/g, '&'), 'https://aviation-safety.net').toString() : searchUrl,
+        });
+      }
+      res.json({
+        registration: safeReg,
+        items,
+        searchUrl,
+        source: 'aviation-safety.net',
+        fetchedAt: Date.now(),
+      });
+    } catch (err) {
+      res.status(502).json({
+        registration: safeReg,
+        items: [],
+        searchUrl,
+        source: 'aviation-safety.net',
+        error: err instanceof Error ? err.message : 'ASN unavailable',
+      });
+    }
   });
 
   // 2b. Live Airport Arrivals, Departures & Delay Index Board

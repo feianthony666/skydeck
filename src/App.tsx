@@ -240,7 +240,7 @@ export default function App() {
   useEffect(() => {
     const id = window.setInterval(() => {
       setNowEpochSec(Math.floor(Date.now() / 1000));
-    }, 2000);
+    }, 5000);
     return () => clearInterval(id);
   }, []);
 
@@ -359,13 +359,13 @@ export default function App() {
               if (pa !== pb) return pb - pa;
               return b.seenAtMs - a.seenAtMs;
             })
-            .slice(0, 2600)
+            .slice(0, 50000)
             .map((e) => e.flight);
 
           setRawFlights(mergedList);
           setLastFetchedAt(data.fetchedAt);
           setFlightsError(null);
-          await saveFlightSnapshot(regionKey, mergedList.slice(0, 900), data.fetchedAt);
+          await saveFlightSnapshot(regionKey, mergedList.slice(0, 5000), data.fetchedAt);
         } else {
           const cached = await loadFlightSnapshot(regionKey);
           if (cached && rawFlightsCountRef.current === 0) {
@@ -432,11 +432,7 @@ export default function App() {
 
   const applyUserLocation = useCallback(
     (lat: number, lon: number, label: string | undefined, source: 'gps' | 'ip') => {
-      const preset = buildLocalRegion(lat, lon, label);
       setUserLocation({lat, lon, label, source});
-      setLocalRegion(preset);
-      setActiveRegion(preset);
-      setBounds(preset.bounds);
       setFlyToLocation((prev) => ({lat, lon, zoom: 8, seq: (prev?.seq ?? 0) + 1}));
     },
     [],
@@ -485,24 +481,23 @@ export default function App() {
   useEffect(() => {
     if (initialLocateAttemptedRef.current) return;
     initialLocateAttemptedRef.current = true;
-    if (radarSettings.locateMeEnabled) {
-      void syncToUserLocation();
-    }
+    // No region auto-switching: SkyDeck always stays in global coverage.
   }, [radarSettings.locateMeEnabled, syncToUserLocation]);
 
   const fetchingFlightsRef = useRef(false);
 
   useEffect(() => {
+    const shouldPoll = () => !document.hidden && navigator.onLine;
     setFlightsLoading(true);
     fetchLiveFlights(activeRegion.bounds, activeRegion.id);
     fetchAirportsInView(activeRegion.bounds, activeRegion.zoom);
     const id = window.setInterval(() => {
-      if (fetchingFlightsRef.current) return;
+      if (!shouldPoll() || fetchingFlightsRef.current) return;
       fetchingFlightsRef.current = true;
       void fetchLiveFlights(boundsRef.current, activeRegion.id).finally(() => {
         fetchingFlightsRef.current = false;
       });
-    }, 6000);
+    }, 15000);
     return () => clearInterval(id);
   }, [activeRegion, fetchLiveFlights, fetchAirportsInView]);
 
@@ -845,19 +840,6 @@ export default function App() {
             </span>
           </button>
 
-          <select
-            value={activeRegion.id}
-            onChange={(e) => handleSelectRegion(e.target.value)}
-            aria-label="Select radar coverage region"
-            className="h-9 min-w-0 flex-1 max-w-[165px] rounded-xl bg-background border border-input px-2 text-xs font-medium text-foreground truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {localRegion && <option value={localRegion.id}>{localRegion.label}</option>}
-            {REGION_PRESETS.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.label}
-              </option>
-            ))}
-          </select>
 
           <div className="flex items-center gap-1 shrink-0">
             <Popover>
@@ -1241,6 +1223,7 @@ export default function App() {
             <div className="h-[calc(100%-64px)] min-h-[380px]">
               <FlightDeck3D
                 flight={selectedFlight}
+                detail={selectedDetail}
                 allFlights={flights}
                 groundTraffic={groundTraffic}
                 nearestWeather={nearestWeather}
@@ -1342,7 +1325,7 @@ export default function App() {
                           </TableCell>
                         </TableRow>
                       ) : (
-                        filteredFlights.slice(0, 120).map((f) => {
+                        filteredFlights.map((f) => {
                           const db = getDbFlagMeta(f);
                           return (
                             <TableRow
@@ -1528,20 +1511,6 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Region Selector */}
-              <select
-                value={activeRegion.id}
-                onChange={(e) => handleSelectRegion(e.target.value)}
-                aria-label="Select radar coverage region"
-                className="h-8 max-w-[140px] sm:max-w-[175px] rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
-              >
-                {localRegion && <option value={localRegion.id}>{localRegion.label}</option>}
-                {REGION_PRESETS.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
 
               {/* Optional Near Me Button (Controlled by Locate Me setting) */}
               {radarSettings.locateMeEnabled && (
