@@ -91,9 +91,15 @@ function loadSavedRadarSettings(): RadarSettings {
     const raw = window.localStorage.getItem(RADAR_SETTINGS_KEY);
     if (!raw) return DEFAULT_RADAR_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<RadarSettings>;
+    const hasNavOverlays = 'showDayNightLine' in parsed;
+    const migratedBasemap =
+      !hasNavOverlays && (parsed.basemapStyle === 'osm' || parsed.basemapStyle === 'dark' || parsed.basemapStyle === 'light')
+        ? 'auto'
+        : parsed.basemapStyle ?? DEFAULT_RADAR_SETTINGS.basemapStyle;
     return {
       ...DEFAULT_RADAR_SETTINGS,
       ...parsed,
+      basemapStyle: migratedBasemap,
       cfWorkerUrl: parsed.cfWorkerUrl?.trim() ? parsed.cfWorkerUrl : DEFAULT_CF_WORKER_URL,
     };
   } catch {
@@ -672,27 +678,32 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    setDetailLoading(true);
-    const qs = new URLSearchParams({
-      fr24Id: selectedFlight.fr24Id ?? '',
-      icao24: selectedFlight.icao24,
-      callsign: selectedFlight.callsign,
-      reg: selectedFlight.registration ?? '',
-      fnum: selectedFlight.flightNumber ?? '',
-      orig: selectedFlight.origin ?? '',
-    });
-    apiFetchJson<FlightDetail>(`/api/flight-detail?${qs.toString()}`)
-      .then((d) => {
-        if (!cancelled) setSelectedDetail(d);
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedDetail(null);
-      })
-      .finally(() => {
-        if (!cancelled) setDetailLoading(false);
+    const fetchDetail = (initial: boolean) => {
+      if (initial) setDetailLoading(true);
+      const qs = new URLSearchParams({
+        fr24Id: selectedFlight.fr24Id ?? '',
+        icao24: selectedFlight.icao24,
+        callsign: selectedFlight.callsign,
+        reg: selectedFlight.registration ?? '',
+        fnum: selectedFlight.flightNumber ?? '',
+        orig: selectedFlight.origin ?? '',
       });
+      apiFetchJson<FlightDetail>(`/api/flight-detail?${qs.toString()}`)
+        .then((d) => {
+          if (!cancelled) setSelectedDetail(d);
+        })
+        .catch(() => {
+          if (!cancelled && initial) setSelectedDetail(null);
+        })
+        .finally(() => {
+          if (!cancelled && initial) setDetailLoading(false);
+        });
+    };
+    fetchDetail(true);
+    const timer = window.setInterval(() => fetchDetail(false), 18000);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFlight?.id, isOnline]);
@@ -806,12 +817,15 @@ export default function App() {
     setBounds(preset.bounds);
   };
 
-  const handleSelectFlight = useCallback((f: LiveFlight) => {
+  const handleSelectFlight = useCallback((f: LiveFlight, opts?: {in3DMode?: boolean}) => {
     setSelectedFlightId(f.id);
     setSidebarMode('flight');
     setMobileSheetDetent('peek');
     setActiveView('radar');
     setShowTrafficSheet(false);
+    if (opts?.in3DMode) {
+      setFollowSelected(true);
+    }
     if (f.onGround) {
       setThreeViewMode('taxi');
     }

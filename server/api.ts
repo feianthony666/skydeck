@@ -17,6 +17,7 @@ import type {
   FlightDetail,
   FlightsResponse,
   HazardCategory,
+  LiveAtcStation,
   LiveFlight,
   PastFlightRecord,
   ProviderStatus,
@@ -27,14 +28,45 @@ import type {
   SigmetHazard,
   TaxiwaySegment,
   TrailPoint,
+  WeatherHazardMarker,
+  WeatherLayersResponse,
+  WeatherWindPoint,
 } from '../src/types/aviation';
 import {
+  applyDisplacedThresholds,
+  buildCuratedSeedSurface,
   buildOverpassAirfieldQuery,
   GLOBAL_OVERPASS_MIRRORS,
   mergeAndAlignRunways,
   parseOverpassAirfieldElements,
   type OverpassElement,
 } from '../src/utils/airfieldGeometry';
+import {resolveTimezoneByCoordsAndCode} from '../src/utils/timezone';
+import {
+  getAtcBoundaries,
+  getEnrouteChartForBounds,
+  getOceanicTracks,
+  getTimeZones,
+} from './navData';
+
+function isSurfaceVehicleAdsb(a: Record<string, unknown>, callsign: string): boolean {
+  const cat = String(a.category ?? '').toUpperCase();
+  if (/^C[0-9]$/.test(cat)) return true;
+  const typ = String(a.t ?? '').toUpperCase();
+  if (typ === 'GRND' || typ === 'GND' || typ === 'TWR' || typ === 'SERV') return true;
+  return /^(GND|TUG|OPS|FIRE|FOLLOW|SERV|VEH|TOW|CAR|TRUCK)/.test(callsign);
+}
+
+function isFlaggedOrEmergency(f: LiveFlight): boolean {
+  return Boolean(
+    f.isLadd ||
+    f.isMilitary ||
+    f.isPia ||
+    f.squawk === '7700' ||
+    f.squawk === '7600' ||
+    f.squawk === '7500',
+  );
+}
 
 const BROWSER_HEADERS = {
   'User-Agent':
@@ -579,9 +611,23 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
     const iata = String(codeObj.iata ?? catalog?.iata ?? cleanCode).toUpperCase();
     const icao = String(codeObj.icao ?? catalog?.icao ?? icaoHint ?? cleanCode).toUpperCase();
     const name = String(details.name ?? catalog?.name ?? `${iata} Airport`);
-    const timezoneName = tzObj.name ? String(tzObj.name) : undefined;
-    const utcOffsetSec = Number.isFinite(Number(tzObj.offset)) ? Number(tzObj.offset) : undefined;
-    const timezoneAbbr = tzObj.abbr ? String(tzObj.abbr) : undefined;
+    const resolvedLat = Number(posObj.latitude ?? catalog?.lat ?? 0);
+    const resolvedLon = Number(posObj.longitude ?? catalog?.lon ?? 0);
+    const rawTzName = tzObj.name ? String(tzObj.name) : undefined;
+    const rawOffsetSec = Number.isFinite(Number(tzObj.offset)) ? Number(tzObj.offset) : undefined;
+    const rawTzAbbr = tzObj.abbr ? String(tzObj.abbr) : undefined;
+    const resolvedTz = resolveTimezoneByCoordsAndCode({
+      icao,
+      iata,
+      lat: resolvedLat,
+      lon: resolvedLon,
+      hintTzName: rawTzName,
+      hintUtcOffsetSec: rawOffsetSec,
+      hintAbbr: rawTzAbbr,
+    });
+    const timezoneName = resolvedTz.timezoneName;
+    const utcOffsetSec = resolvedTz.utcOffsetSec;
+    const timezoneAbbr = resolvedTz.timezoneAbbr;
 
     const arrStats = (stats.arrivals ?? {}) as Record<string, unknown>;
     const arrRecent = (arrStats.recent ?? arrStats) as Record<string, unknown>;
@@ -642,8 +688,8 @@ async function fetchFr24AirportBoard(code: string, icaoHint?: string): Promise<A
         name,
         city: String(regionObj.city ?? catalog?.city ?? ''),
         country: String(countryObj.name ?? catalog?.country ?? ''),
-        lat: Number(posObj.latitude ?? catalog?.lat ?? 0),
-        lon: Number(posObj.longitude ?? catalog?.lon ?? 0),
+        lat: resolvedLat,
+        lon: resolvedLon,
         timezoneName,
         utcOffsetSec,
         timezoneAbbr,
@@ -1134,7 +1180,12 @@ async function fetchAdsbLol(
     }
 
     const flights: LiveFlight[] = acRows
-      .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
+      .filter((a) => {
+        if (!Number.isFinite(Number(a.lat)) || !Number.isFinite(Number(a.lon))) return false;
+        const icao24 = String(a.hex ?? '').toUpperCase();
+        const callsign = String(a.flight ?? icao24).trim().toUpperCase();
+        return !isSurfaceVehicleAdsb(a, callsign);
+      })
       .map((a) => {
         const icao24 = String(a.hex ?? '').toUpperCase();
         const callsign = String(a.flight ?? icao24).trim().toUpperCase();
@@ -1710,40 +1761,48 @@ export function createApiRouter(): express.Router {
     ]);
 
     const mergedMap = new Map<string, LiveFlight>();
-    const orderedLists = [
+    const absorbFlight = (f: LiveFlight, enrichOnly = false) => {
+      const dedupeKey = f.icao24 || f.callsign;
+      const existing = mergedMap.get(dedupeKey);
+      if (!existing) {
+        if (!enrichOnly) mergedMap.set(dedupeKey, f);
+        return;
+      }
+      if (!existing.origin && f.origin) existing.origin = f.origin;
+      if (!existing.destination && f.destination) existing.destination = f.destination;
+      if (!existing.squawk && f.squawk) existing.squawk = f.squawk;
+      if (!existing.airlineIcao && f.airlineIcao) existing.airlineIcao = f.airlineIcao;
+      if (!existing.flightNumber && f.flightNumber) existing.flightNumber = f.flightNumber;
+      if ((!existing.aircraftType || existing.aircraftType === 'A320') && f.aircraftType) {
+        existing.aircraftType = f.aircraftType;
+      }
+      if (!existing.registration && f.registration) existing.registration = f.registration;
+      if (!existing.fr24Id && f.fr24Id) existing.fr24Id = f.fr24Id;
+      if (f.dbFlags) existing.dbFlags = (existing.dbFlags ?? 0) | f.dbFlags;
+      if (f.isLadd) existing.isLadd = true;
+      if (f.isMilitary) existing.isMilitary = true;
+      if (f.isPia) existing.isPia = true;
+      if (!existing.ownerOperator && f.ownerOperator) existing.ownerOperator = f.ownerOperator;
+    };
+
+    // 1. Primary live radar sources (FR24 + regional adapters) + LADD / MIL feeders
+    for (const list of [
       variFlightRes.flights,
       airNavRes.flights,
       fr24Res.flights,
       adsbLaddRes.flights,
       adsbMilRes.flights,
-      adsbRes.flights,
-      adsbFiRes.flights,
-      openSkyRes.flights,
-    ];
+    ]) {
+      for (const f of list) absorbFlight(f, false);
+    }
 
-    for (const list of orderedLists) {
+    // 2. General ADS-B / OpenSky: keep flagged LADD / MIL / PIA / Emergency targets;
+    //    unflagged general ADS-B only enriches existing FR24 flights (or acts as backup if FR24 is empty).
+    const fr24HasCoverage = fr24Res.flights.length > 0;
+    for (const list of [adsbRes.flights, adsbFiRes.flights, openSkyRes.flights]) {
       for (const f of list) {
-        const dedupeKey = f.icao24 || f.callsign;
-        const existing = mergedMap.get(dedupeKey);
-        if (!existing) {
-          mergedMap.set(dedupeKey, f);
-        } else {
-          if (!existing.origin && f.origin) existing.origin = f.origin;
-          if (!existing.destination && f.destination) existing.destination = f.destination;
-          if (!existing.squawk && f.squawk) existing.squawk = f.squawk;
-          if (!existing.airlineIcao && f.airlineIcao) existing.airlineIcao = f.airlineIcao;
-          if (!existing.flightNumber && f.flightNumber) existing.flightNumber = f.flightNumber;
-          if ((!existing.aircraftType || existing.aircraftType === 'A320') && f.aircraftType) {
-            existing.aircraftType = f.aircraftType;
-          }
-          if (!existing.registration && f.registration) existing.registration = f.registration;
-          if (!existing.fr24Id && f.fr24Id) existing.fr24Id = f.fr24Id;
-          if (f.dbFlags) existing.dbFlags = (existing.dbFlags ?? 0) | f.dbFlags;
-          if (f.isLadd) existing.isLadd = true;
-          if (f.isMilitary) existing.isMilitary = true;
-          if (f.isPia) existing.isPia = true;
-          if (!existing.ownerOperator && f.ownerOperator) existing.ownerOperator = f.ownerOperator;
-        }
+        const allowStandalone = !fr24HasCoverage || isFlaggedOrEmergency(f);
+        absorbFlight(f, !allowStandalone);
       }
     }
 
@@ -2140,14 +2199,26 @@ export function createApiRouter(): express.Router {
         isLive: true,
       }));
 
+    const fallbackLat = catalog?.lat ?? dirMatch?.lat ?? 0;
+    const fallbackLon = catalog?.lon ?? dirMatch?.lon ?? 0;
+    const resolvedTz = resolveTimezoneByCoordsAndCode({
+      icao: resolvedIcao,
+      iata,
+      lat: fallbackLat,
+      lon: fallbackLon,
+    });
+
     res.json({
       icao: resolvedIcao,
       iata,
       name: catalog?.name ?? dirMatch?.name ?? `${iata || resolvedIcao} Airport`,
       city: catalog?.city ?? dirMatch?.city ?? '',
       country: catalog?.country ?? dirMatch?.country ?? '',
-      lat: catalog?.lat ?? dirMatch?.lat ?? 0,
-      lon: catalog?.lon ?? dirMatch?.lon ?? 0,
+      lat: fallbackLat,
+      lon: fallbackLon,
+      timezoneName: resolvedTz.timezoneName,
+      utcOffsetSec: resolvedTz.utcOffsetSec,
+      timezoneAbbr: resolvedTz.timezoneAbbr,
       delayIndex: computeDelaySummaryFromRows(departures, arrivals, null),
       arrivals,
       departures,
@@ -2499,9 +2570,22 @@ export function createApiRouter(): express.Router {
       }
     })();
 
-    const aipMapPromise = getGlobalRunwaysByAirport();
-    await Promise.all([osmPromise, aipMapPromise]);
-    const aipMap = await aipMapPromise;
+    // Warm global runways CSV asynchronously; never block OSM response for 4.5s
+    const aipWarmPromise = getGlobalRunwaysByAirport().catch(() => new Map<string, AipRunwayEntry[]>());
+    await osmPromise;
+    let aipMap = globalRunwaysCache?.byAirport;
+    if (!aipMap || aipMap.size === 0) {
+      if (osmRunways.length === 0) {
+        aipMap = await Promise.race([
+          aipWarmPromise,
+          new Promise<Map<string, AipRunwayEntry[]>>((resolve) =>
+            setTimeout(() => resolve(new Map()), 900),
+          ),
+        ]);
+      } else {
+        aipMap = new Map<string, AipRunwayEntry[]>();
+      }
+    }
 
     const lookupIdents = [catalog?.icao, icao].filter(Boolean) as string[];
     let aipRunways: AipRunwayEntry[] = [];
@@ -2513,7 +2597,7 @@ export function createApiRouter(): express.Router {
       }
     }
 
-    const runways = mergeAndAlignRunways(
+    let runways = mergeAndAlignRunways(
       osmRunways,
       aipRunways.map((r) => ({
         ref: r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined,
@@ -2525,25 +2609,32 @@ export function createApiRouter(): express.Router {
       })),
     );
 
-    if (runways.length === 0 && catalog) {
-      catalog.runways.forEach((r, idx) => {
-        const rad = (r.headingDeg * Math.PI) / 180;
-        const halfLenDeg = (r.lengthFt / 6076 / 60) * 0.5;
-        const cosLat = Math.cos((catalog.lat * Math.PI) / 180);
-        const offsetLon = (idx - (catalog.runways.length - 1) / 2) * 0.012;
-        const dLat = Math.cos(rad) * halfLenDeg;
-        const dLon = (Math.sin(rad) * halfLenDeg) / cosLat;
-        const p1: [number, number] = [catalog.lat - dLat, catalog.lon + offsetLon - dLon];
-        const p2: [number, number] = [catalog.lat + dLat, catalog.lon + offsetLon + dLon];
-        runways.push({
-          id: `cat-rwy-${r.ident}`,
-          kind: 'runway',
-          ref: r.ident,
-          widthM: 45,
-          coords: [p1, p2],
+    if (runways.length === 0) {
+      const curated = buildCuratedSeedSurface(catalog?.icao ?? icao);
+      if (curated.length > 0) {
+        runways = curated;
+      } else if (catalog) {
+        catalog.runways.forEach((r, idx) => {
+          const rad = (r.headingDeg * Math.PI) / 180;
+          const halfLenDeg = (r.lengthFt / 6076 / 60) * 0.5;
+          const cosLat = Math.cos((catalog.lat * Math.PI) / 180);
+          const offsetLon = (idx - (catalog.runways.length - 1) / 2) * 0.0024;
+          const dLat = Math.cos(rad) * halfLenDeg;
+          const dLon = (Math.sin(rad) * halfLenDeg) / cosLat;
+          const p1: [number, number] = [catalog.lat - dLat, catalog.lon + offsetLon - dLon];
+          const p2: [number, number] = [catalog.lat + dLat, catalog.lon + offsetLon + dLon];
+          runways.push({
+            id: `cat-rwy-${r.ident}`,
+            kind: 'runway',
+            ref: r.ident,
+            widthM: 45,
+            coords: [p1, p2],
+          });
         });
-      });
+      }
     }
+
+    runways = applyDisplacedThresholds(catalog?.icao ?? icao, runways);
 
     if (taxiways.length === 0 && runways.length > 0) {
       runways.forEach((rw, idx) => {
@@ -3171,6 +3262,683 @@ export function createApiRouter(): express.Router {
       segments,
       providers: [fr24Res.status, adsbRes.status],
     });
+  });
+
+  // 8. Global Vector Street Tile Relay (/api/vtile/:z/:x/:y) -> OpenFreeMap OpenMapTiles MVT
+  let openFreeMapTemplate: {ts: number; tpl: string} | null = null;
+  const vtileCache = new Map<string, {ts: number; buf: Buffer}>();
+
+  async function resolveOpenFreeMapTemplate(): Promise<string> {
+    if (openFreeMapTemplate && Date.now() - openFreeMapTemplate.ts < 6 * 3600_000) {
+      return openFreeMapTemplate.tpl;
+    }
+    try {
+      const r = await fetch('https://tiles.openfreemap.org/planet', {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(3500),
+      });
+      if (r.ok) {
+        const json = (await r.json()) as {tiles?: string[]};
+        const tpl = json.tiles?.[0];
+        if (tpl && tpl.includes('{z}')) {
+          openFreeMapTemplate = {ts: Date.now(), tpl};
+          return tpl;
+        }
+      }
+    } catch {
+      // fall through to known live snapshot
+    }
+    return openFreeMapTemplate?.tpl ?? 'https://tiles.openfreemap.org/planet/20261115_080022_pt/{z}/{x}/{y}.pbf';
+  }
+
+  router.get('/vtile/:z/:x/:y', async (req, res) => {
+    const z = Math.max(0, Math.min(14, Number.parseInt(req.params.z, 10) || 0));
+    const n = 1 << z;
+    const xRaw = Number.parseInt(req.params.x, 10) || 0;
+    const x = ((xRaw % n) + n) % n;
+    const y = Math.max(0, Math.min(n - 1, Number.parseInt(req.params.y, 10) || 0));
+    const key = `${z}/${x}/${y}`;
+
+    const cached = vtileCache.get(key);
+    if (cached && Date.now() - cached.ts < 1800_000) {
+      res.setHeader('Content-Type', 'application/vnd.mapbox-vector-tile');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(cached.buf);
+      return;
+    }
+
+    try {
+      const tpl = await resolveOpenFreeMapTemplate();
+      const url = tpl
+        .replace('{z}', String(z))
+        .replace('{x}', String(x))
+        .replace('{y}', String(y));
+      const upstream = await fetch(url, {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(5500),
+      });
+      if (!upstream.ok) {
+        res.status(upstream.status === 204 ? 204 : 502).end();
+        return;
+      }
+      const arr = await upstream.arrayBuffer();
+      const buf = Buffer.from(arr);
+      if (vtileCache.size >= 600) {
+        const oldestKey = vtileCache.keys().next().value;
+        if (oldestKey) vtileCache.delete(oldestKey);
+      }
+      vtileCache.set(key, {ts: Date.now(), buf});
+      res.setHeader('Content-Type', 'application/vnd.mapbox-vector-tile');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(buf);
+    } catch {
+      res.status(502).end();
+    }
+  });
+
+  // 9. Google Terrain / Hybrid Tile Relay (/api/gtile/:lyrs/:z/:x/:y)
+  const gtileCache = new Map<string, {ts: number; ct: string; buf: Buffer}>();
+  const ALLOWED_GTILE_LYRS = new Set(['p', 'm', 's', 'y', 't', 'h']);
+  router.get('/gtile/:lyrs/:z/:x/:y', async (req, res) => {
+    const lyrs = ALLOWED_GTILE_LYRS.has(req.params.lyrs) ? req.params.lyrs : 'p';
+    const z = Math.max(0, Math.min(20, Number.parseInt(req.params.z, 10) || 0));
+    const n = 1 << z;
+    const xRaw = Number.parseInt(req.params.x, 10) || 0;
+    const x = ((xRaw % n) + n) % n;
+    const y = Math.max(0, Math.min(n - 1, Number.parseInt(req.params.y, 10) || 0));
+    const key = `${lyrs}/${z}/${x}/${y}`;
+
+    const cached = gtileCache.get(key);
+    if (cached && Date.now() - cached.ts < 1800_000) {
+      res.setHeader('Content-Type', cached.ct);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(cached.buf);
+      return;
+    }
+
+    const mtHost = `mt${(x + y) & 3}.google.com`;
+    const url = `https://${mtHost}/vt/lyrs=${lyrs}&x=${x}&y=${y}&z=${z}`;
+    try {
+      const upstream = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+          Referer: 'https://maps.google.com/',
+        },
+        signal: AbortSignal.timeout(5500),
+      });
+      if (!upstream.ok) {
+        res.status(upstream.status === 404 ? 404 : 502).end();
+        return;
+      }
+      const ct = upstream.headers.get('content-type') || 'image/jpeg';
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      if (gtileCache.size >= 700) {
+        const oldestKey = gtileCache.keys().next().value;
+        if (oldestKey) gtileCache.delete(oldestKey);
+      }
+      gtileCache.set(key, {ts: Date.now(), ct, buf});
+      res.setHeader('Content-Type', ct);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(buf);
+    } catch {
+      res.status(502).end();
+    }
+  });
+
+  // 10. Aviation Overlays: ATC/FIR Boundaries, Live NAT/PACOT Oceanic Tracks, Enroute High/Low Airways & Waypoints
+  router.get('/nav/atc-boundaries', async (_req, res) => {
+    try {
+      const boundaries = await getAtcBoundaries();
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.json({boundaries});
+    } catch {
+      res.status(502).json({boundaries: []});
+    }
+  });
+
+  router.get('/nav/oceanic-tracks', async (_req, res) => {
+    try {
+      const tracks = await getOceanicTracks();
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.json({tracks});
+    } catch {
+      res.status(502).json({tracks: []});
+    }
+  });
+
+  router.get('/nav/enroute', async (req, res) => {
+    const lamin = Number.parseFloat(String(req.query.lamin ?? '20'));
+    const lamax = Number.parseFloat(String(req.query.lamax ?? '55'));
+    const lomin = Number.parseFloat(String(req.query.lomin ?? '-135'));
+    const lomax = Number.parseFloat(String(req.query.lomax ?? '-60'));
+    const zoom = Number.parseFloat(String(req.query.zoom ?? '5'));
+    if (!Number.isFinite(lamin) || !Number.isFinite(lamax) || !Number.isFinite(lomin) || !Number.isFinite(lomax)) {
+      res.status(400).json({waypoints: [], highAirways: [], lowAirways: []});
+      return;
+    }
+    try {
+      const data = await getEnrouteChartForBounds(lamin, lamax, lomin, lomax, Number.isFinite(zoom) ? zoom : 5);
+      res.setHeader('Cache-Control', 'public, max-age=600');
+      res.json(data);
+    } catch {
+      res.status(502).json({waypoints: [], highAirways: [], lowAirways: []});
+    }
+  });
+
+  // 11. World Time Zones GeoJSON Boundaries
+  router.get('/nav/timezones', async (_req, res) => {
+    try {
+      const timezones = await getTimeZones();
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.json({timezones});
+    } catch {
+      res.status(502).json({timezones: []});
+    }
+  });
+
+  // 12. Weather Raster Tile Proxy (NEXRAD North American Radar & GOES Cloud Coverage)
+  const wtileCache = new Map<string, {ts: number; ct: string; buf: Buffer}>();
+  router.get('/wtile/:layer/:z/:x/:y', async (req, res) => {
+    const layer = req.params.layer;
+    const z = Math.max(0, Math.min(12, Number.parseInt(req.params.z, 10) || 0));
+    const n = 1 << z;
+    const xRaw = Number.parseInt(req.params.x, 10) || 0;
+    const x = ((xRaw % n) + n) % n;
+    const y = Math.max(0, Math.min(n - 1, Number.parseInt(req.params.y, 10) || 0));
+    const key = `${layer}/${z}/${x}/${y}`;
+
+    const cached = wtileCache.get(key);
+    if (cached && Date.now() - cached.ts < 300_000) {
+      res.setHeader('Content-Type', cached.ct);
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.send(cached.buf);
+      return;
+    }
+
+    const upstreamUrl =
+      layer === 'nexrad'
+        ? `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/${z}/${x}/${y}.png`
+        : layer === 'clouds'
+          ? `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-east-ir-4km-900913/${z}/${x}/${y}.png`
+          : null;
+
+    if (!upstreamUrl) {
+      res.status(404).end();
+      return;
+    }
+
+    try {
+      const upstream = await fetch(upstreamUrl, {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(5500),
+      });
+      if (!upstream.ok) {
+        res.status(upstream.status === 404 ? 404 : 502).end();
+        return;
+      }
+      const ct = upstream.headers.get('content-type') || 'image/png';
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      if (wtileCache.size >= 400) {
+        const oldest = wtileCache.keys().next().value;
+        if (oldest) wtileCache.delete(oldest);
+      }
+      wtileCache.set(key, {ts: Date.now(), ct, buf});
+      res.setHeader('Content-Type', ct);
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.send(buf);
+    } catch {
+      res.status(502).end();
+    }
+  });
+
+  // 13. Comprehensive Aviation Weather Layers (Wind Barbs Grid, PIREPs/AIREPs, Volcanic Ash, SIGWX FL250-630, Fog, Lightning)
+  const wxLayersCache = new Map<string, {ts: number; data: WeatherLayersResponse}>();
+  router.get('/weather/layers', async (req, res) => {
+    const lamin = Math.max(-75, Math.min(75, Number.parseFloat(String(req.query.lamin ?? '20'))));
+    const lamax = Math.max(-75, Math.min(75, Number.parseFloat(String(req.query.lamax ?? '55'))));
+    const lomin = Math.max(-180, Math.min(180, Number.parseFloat(String(req.query.lomin ?? '-130'))));
+    const lomax = Math.max(-180, Math.min(180, Number.parseFloat(String(req.query.lomax ?? '-60'))));
+
+    const sLat = Math.min(lamin, lamax);
+    const nLat = Math.max(lamin, lamax);
+    const wLon = Math.min(lomin, lomax);
+    const eLon = Math.max(lomin, lomax);
+
+    const cacheKey = `${Math.round(sLat / 3)}_${Math.round(nLat / 3)}_${Math.round(wLon / 4)}_${Math.round(eLon / 4)}`;
+    const cached = wxLayersCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 120_000) {
+      res.json(cached.data);
+      return;
+    }
+
+    const markers: WeatherHazardMarker[] = [];
+    const sigwxPolygons: SigmetHazard[] = [];
+    const fogZones: SigmetHazard[] = [];
+    const windGrid: WeatherWindPoint[] = [];
+
+    // Sample a 5x4 grid across viewport for global wind barbs, visibility/fog, lightning & cloud data
+    const cols = 5;
+    const rows = 4;
+    const sampleLats: number[] = [];
+    const sampleLons: number[] = [];
+    const latSpan = Math.max(2, nLat - sLat);
+    const lonSpan = Math.max(2, eLon - wLon);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const lat = sLat + ((r + 0.5) / rows) * latSpan;
+        const lon = wLon + ((c + 0.5) / cols) * lonSpan;
+        sampleLats.push(Number(lat.toFixed(2)));
+        sampleLons.push(Number(lon.toFixed(2)));
+      }
+    }
+
+    const clampedBbox = `${Math.max(-85, sLat).toFixed(2)},${Math.max(-180, wLon).toFixed(2)},${Math.min(85, nLat).toFixed(2)},${Math.min(180, eLon).toFixed(2)}`;
+
+    const [openMeteoRes, pirepRes, isigmetRes, airsigmetRes, metarRes] = await Promise.all([
+      fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${sampleLats.join(',')}&longitude=${sampleLons.join(',')}&current=wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,visibility,weather_code&hourly=wind_speed_250hPa,wind_direction_250hPa&wind_speed_unit=kn&forecast_days=1`,
+        {headers: {'User-Agent': API_USER_AGENT}, signal: AbortSignal.timeout(5200)},
+      ).catch(() => null),
+      fetch(`https://aviationweather.gov/api/data/pirep?format=json&bbox=${clampedBbox}`, {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(4800),
+      }).catch(() => null),
+      fetch('https://aviationweather.gov/api/data/isigmet?format=json', {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(4800),
+      }).catch(() => null),
+      fetch('https://aviationweather.gov/api/data/airsigmet?format=json', {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(4800),
+      }).catch(() => null),
+      fetch(`https://aviationweather.gov/api/data/metar?format=json&bbox=${clampedBbox}&hours=1`, {
+        headers: {'User-Agent': API_USER_AGENT},
+        signal: AbortSignal.timeout(4800),
+      }).catch(() => null),
+    ]);
+
+    const [omJson, pirepJson, isigmetJson, airsigmetJson, metarJson] = await Promise.all([
+      safeJson<unknown>(openMeteoRes),
+      safeJson<Array<Record<string, unknown>>>(pirepRes),
+      safeJson<Array<Record<string, unknown>>>(isigmetRes),
+      safeJson<Array<Record<string, unknown>>>(airsigmetRes),
+      safeJson<Array<Record<string, unknown>>>(metarRes),
+    ]);
+
+    // 1) Parse Open-Meteo Wind & Gridded Surface/250hPa Weather
+    const omList = Array.isArray(omJson) ? omJson : omJson ? [omJson] : [];
+    const curHourIdx = Math.min(23, Math.max(0, new Date().getUTCHours()));
+    omList.forEach((itemRaw, idx) => {
+      const item = (itemRaw ?? {}) as Record<string, unknown>;
+      const cur = (item.current ?? {}) as Record<string, unknown>;
+      const hourly = (item.hourly ?? {}) as Record<string, unknown>;
+      const lat = Number(item.latitude ?? sampleLats[idx]);
+      const lon = Number(item.longitude ?? sampleLons[idx]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+      const sSpd = Math.round(Number(cur.wind_speed_10m ?? 0) || 0);
+      const sDir = Math.round(Number(cur.wind_direction_10m ?? 0) || 0);
+      const uSpdArr = Array.isArray(hourly.wind_speed_250hPa) ? hourly.wind_speed_250hPa : [];
+      const uDirArr = Array.isArray(hourly.wind_direction_250hPa) ? hourly.wind_direction_250hPa : [];
+      const uSpd = Math.round(Number(uSpdArr[curHourIdx] ?? sSpd) || sSpd);
+      const uDir = Math.round(Number(uDirArr[curHourIdx] ?? sDir) || sDir);
+      const visM = Number(cur.visibility ?? 24000);
+      const wmo = Number(cur.weather_code ?? 0);
+
+      windGrid.push({
+        lat,
+        lon,
+        speedKts: sSpd,
+        dirDeg: sDir,
+        upperSpeedKts: uSpd,
+        upperDirDeg: uDir,
+        cloudPct: Math.round(Number(cur.cloud_cover ?? 0) || 0),
+        precipMm: Number(cur.precipitation ?? 0) || 0,
+        visibilityM: Number.isFinite(visM) ? visM : 24000,
+        weatherCode: Number.isFinite(wmo) ? wmo : 0,
+      });
+
+      if (wmo === 45 || wmo === 48 || (Number.isFinite(visM) && visM < 1800)) {
+        const dLat = Math.max(0.45, latSpan * 0.1);
+        const dLon = Math.max(0.55, lonSpan * 0.1);
+        fogZones.push({
+          id: `fog-om-${idx}`,
+          hazard: 'FOG / LOW VIS',
+          qualifier: `${Math.round(visM)}m`,
+          category: 'advisory',
+          validFrom: '',
+          validTo: '',
+          baseFt: 0,
+          topFt: 1500,
+          rawText: `Surface Visibility ${Math.round(visM)} m (WMO ${wmo})`,
+          coords: [
+            [lat - dLat, lon - dLon],
+            [lat - dLat, lon + dLon],
+            [lat + dLat, lon + dLon],
+            [lat + dLat, lon - dLon],
+          ],
+          source: 'Open-Meteo Fog',
+        });
+        markers.push({
+          id: `fg-mk-${idx}`,
+          kind: 'fog',
+          lat,
+          lon,
+          title: 'FG / Low Vis',
+          detail: `Vis ${Math.round(visM)}m`,
+          severity: visM < 800 ? 'HIGH' : 'MOD',
+        });
+      }
+
+      if (wmo >= 95 && wmo <= 99) {
+        markers.push({
+          id: `ltg-om-${idx}`,
+          kind: 'lightning',
+          lat,
+          lon,
+          title: wmo >= 96 ? 'Severe TS / Lightning' : 'Thunderstorm / Lightning',
+          detail: `WMO ${wmo} Convective Activity`,
+          severity: wmo >= 96 ? 'HIGH' : 'MOD',
+        });
+      }
+    });
+
+    // 2) PIREPs & AIREPs
+    if (Array.isArray(pirepJson)) {
+      for (let i = 0; i < Math.min(80, pirepJson.length); i++) {
+        const p = pirepJson[i];
+        const lat = Number(p.lat);
+        const lon = Number(p.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const reportType = String(p.airepType ?? p.reportType ?? 'PIREP').toUpperCase();
+        const acType = String(p.acType ?? '').toUpperCase();
+        const fltlvl = Number(p.fltlvl);
+        const altFt = Number.isFinite(fltlvl) ? fltlvl * 100 : undefined;
+        const tb = String(p.tbInt1 ?? p.turbType1 ?? '');
+        const ic = String(p.icgInt1 ?? p.iceType1 ?? '');
+        const rawOb = String(p.rawOb ?? '');
+        const sev = /SEV|EXTRM/i.test(`${tb} ${ic} ${rawOb}`)
+          ? 'HIGH'
+          : /MOD/i.test(`${tb} ${ic} ${rawOb}`)
+            ? 'MOD'
+            : 'LOW';
+        markers.push({
+          id: `pr-${p.pirepId ?? i}`,
+          kind: reportType.includes('AIREP') ? 'airep' : 'pirep',
+          lat,
+          lon,
+          altFt,
+          title: `${reportType}${acType ? ` · ${acType}` : ''}${Number.isFinite(fltlvl) ? ` FL${fltlvl}` : ''}`,
+          detail: rawOb || [tb && `TURB ${tb}`, ic && `ICE ${ic}`].filter(Boolean).join(' · ') || 'Pilot report',
+          rawText: rawOb,
+          severity: sev,
+        });
+      }
+    }
+
+    // 3) International SIGMETs -> Volcanic Eruptions (VA) + High-Level SIGWX (FL250-630)
+    if (Array.isArray(isigmetJson)) {
+      for (let i = 0; i < isigmetJson.length; i++) {
+        const row = isigmetJson[i];
+        const haz = String(row.hazard ?? '').toUpperCase();
+        const rawText = String(row.rawSigmet ?? row.rawText ?? '');
+        const baseFt = Number.isFinite(Number(row.base)) ? Number(row.base) : null;
+        const topFt = Number.isFinite(Number(row.top)) ? Number(row.top) : null;
+        const rawCoords = Array.isArray(row.coords) ? (row.coords as Array<{lat?: number; lon?: number}>) : [];
+        const ring: Array<[number, number]> = rawCoords
+          .map((c) => [Number(c.lat), Number(c.lon)] as [number, number])
+          .filter(([la, lo]) => Number.isFinite(la) && Number.isFinite(lo));
+
+        const isVolcanic = haz === 'VA' || /VOLCAN|ERUPT|VA\b|MT\s+[A-Z]+|ASH/i.test(rawText);
+        if (isVolcanic) {
+          const vLat = ring[0]?.[0] ?? Number(row.lat);
+          const vLon = ring[0]?.[1] ?? Number(row.lon);
+          if (Number.isFinite(vLat) && Number.isFinite(vLon)) {
+            const volcNameMatch = rawText.match(/MT\s+[A-Z0-9-]+/i);
+            markers.push({
+              id: `va-${row.isigmetId ?? i}`,
+              kind: 'volcanic',
+              lat: vLat,
+              lon: vLon,
+              altFt: topFt ?? undefined,
+              title: volcNameMatch ? `VOLCANO ${volcNameMatch[0].toUpperCase()}` : 'Volcanic Ash Advisory',
+              detail: rawText.slice(0, 120) || 'Active Volcanic Ash SIGMET',
+              rawText,
+              severity: 'HIGH',
+            });
+          }
+          if (ring.length >= 3) {
+            sigwxPolygons.push({
+              id: `va-poly-${row.isigmetId ?? i}`,
+              hazard: 'VOLCANIC ASH',
+              qualifier: String(row.qualifier ?? 'VA'),
+              category: 'advisory',
+              validFrom: String(row.validTimeFrom ?? ''),
+              validTo: String(row.validTimeTo ?? ''),
+              baseFt,
+              topFt,
+              rawText,
+              coords: ring,
+              source: 'VAAC / ISIGMET',
+            });
+          }
+        }
+
+        // Significant Weather FL250-630
+        if (ring.length >= 3 && ((topFt !== null && topFt >= 25000) || (baseFt !== null && baseFt >= 24000) || /CB|JET|CAT|TS|SIGWX/i.test(`${haz} ${rawText}`))) {
+          sigwxPolygons.push({
+            id: `sigwx-${row.isigmetId ?? i}`,
+            hazard: `SIGWX FL250-630 (${haz || 'WX'})`,
+            qualifier: String(row.qualifier ?? ''),
+            category: classifyHazardCategory(haz, rawText),
+            validFrom: String(row.validTimeFrom ?? ''),
+            validTo: String(row.validTimeTo ?? ''),
+            baseFt: baseFt ?? 25000,
+            topFt: topFt ?? 63000,
+            rawText,
+            coords: ring,
+            source: 'INTL SIGWX',
+          });
+        }
+      }
+    }
+
+    // 4) Domestic AIRMET/SIGMET -> High-Level SIGWX FL250-630 & IFR Fog
+    if (Array.isArray(airsigmetJson)) {
+      for (let i = 0; i < airsigmetJson.length; i++) {
+        const row = airsigmetJson[i];
+        const haz = String(row.hazard ?? '').toUpperCase();
+        const rawText = String(row.rawAirSigmet ?? row.rawText ?? '');
+        const baseFt = Number.isFinite(Number(row.altitudeLow1)) ? Number(row.altitudeLow1) : null;
+        const topFt = Number.isFinite(Number(row.altitudeHi1)) ? Number(row.altitudeHi1) : null;
+        const rawCoords = Array.isArray(row.coords) ? (row.coords as Array<{lat?: number; lon?: number}>) : [];
+        const ring: Array<[number, number]> = rawCoords
+          .map((c) => [Number(c.lat), Number(c.lon)] as [number, number])
+          .filter(([la, lo]) => Number.isFinite(la) && Number.isFinite(lo));
+        if (ring.length < 3) continue;
+
+        if ((topFt !== null && topFt >= 25000) || /CONVECTIVE|SIGMET/i.test(String(row.airSigmetType ?? ''))) {
+          sigwxPolygons.push({
+            id: `us-sigwx-${row.airSigmetId ?? i}`,
+            hazard: `SIGWX (${haz})`,
+            qualifier: String(row.severity ?? ''),
+            category: classifyHazardCategory(haz, rawText),
+            validFrom: String(row.validTimeFrom ?? ''),
+            validTo: String(row.validTimeTo ?? ''),
+            baseFt: baseFt ?? 25000,
+            topFt: topFt ?? 45000,
+            rawText,
+            coords: ring,
+            source: 'US SIGWX',
+          });
+        }
+        if (/IFR|FOG|FG\b|VIS/i.test(`${haz} ${rawText}`)) {
+          fogZones.push({
+            id: `air-fog-${row.airSigmetId ?? i}`,
+            hazard: 'IFR / FOG',
+            qualifier: String(row.severity ?? ''),
+            category: 'advisory',
+            validFrom: String(row.validTimeFrom ?? ''),
+            validTo: String(row.validTimeTo ?? ''),
+            baseFt: 0,
+            topFt: 2500,
+            rawText,
+            coords: ring,
+            source: 'AIRMET IFR/FOG',
+          });
+        }
+      }
+    }
+
+    // 5) Surface METARs -> Fog & Lightning / Thunderstorms
+    if (Array.isArray(metarJson)) {
+      for (let i = 0; i < Math.min(120, metarJson.length); i++) {
+        const m = metarJson[i];
+        const icao = String(m.icaoId ?? '').toUpperCase();
+        const lat = Number(m.lat);
+        const lon = Number(m.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const wx = String(m.wxString ?? '').toUpperCase();
+        const visStr = String(m.visib ?? '10');
+        const visNum = visStr.includes('+') ? 10 : Number.parseFloat(visStr);
+        const rawOb = String(m.rawOb ?? '');
+        if (/\b(FG|BR|MIFG|FZFG|BCFG)\b/.test(wx) || (Number.isFinite(visNum) && visNum <= 1.5)) {
+          markers.push({
+            id: `metar-fg-${icao}-${i}`,
+            kind: 'fog',
+            lat,
+            lon,
+            title: `${icao} FOG (${wx || `VIS ${visStr}SM`})`,
+            detail: rawOb || `Surface Fog / Vis ${visStr} SM`,
+            rawText: rawOb,
+            severity: /\b(FG|FZFG)\b/.test(wx) || (Number.isFinite(visNum) && visNum < 0.75) ? 'HIGH' : 'MOD',
+          });
+        }
+        if (/\bTS|VCTS|LTG\b/.test(`${wx} ${rawOb}`)) {
+          markers.push({
+            id: `metar-ltg-${icao}-${i}`,
+            kind: 'lightning',
+            lat,
+            lon,
+            title: `${icao} Lightning / TS`,
+            detail: rawOb || `Thunderstorm reported (${wx})`,
+            rawText: rawOb,
+            severity: /\+TS|TSGR/.test(`${wx} ${rawOb}`) ? 'HIGH' : 'MOD',
+          });
+        }
+      }
+    }
+
+    const payload: WeatherLayersResponse = {
+      windGrid,
+      markers: markers.slice(0, 180),
+      sigwxPolygons: sigwxPolygons.slice(0, 60),
+      fogZones: fogZones.slice(0, 40),
+      fetchedAt: Date.now(),
+    };
+    if (wxLayersCache.size > 40) {
+      const oldest = wxLayersCache.keys().next().value;
+      if (oldest) wxLayersCache.delete(oldest);
+    }
+    wxLayersCache.set(cacheKey, {ts: Date.now(), data: payload});
+    res.json(payload);
+  });
+
+  // 14. LiveATC Verified Global ATC Radio Directory & Icecast Audio Stream Relay
+  const LIVEATC_STATIONS: LiveAtcStation[] = [
+    {id: 'ksfo-twr', icao: 'KSFO', iata: 'SFO', name: 'San Francisco Intl', facility: 'SFO Tower', freq: '120.500', mount: 'ksfo_twr', country: 'US', lat: 37.6213, lon: -122.379},
+    {id: 'ksfo-app', icao: 'KSFO', iata: 'SFO', name: 'San Francisco Intl', facility: 'NorCal Approach', freq: '135.650', mount: 'ksfo_app', country: 'US', lat: 37.6213, lon: -122.379},
+    {id: 'klax-twr', icao: 'KLAX', iata: 'LAX', name: 'Los Angeles Intl', facility: 'LAX Tower North', freq: '133.900', mount: 'klax_twr', country: 'US', lat: 33.9416, lon: -118.4085},
+    {id: 'kjfk-twr', icao: 'KJFK', iata: 'JFK', name: 'John F. Kennedy Intl', facility: 'JFK Tower', freq: '119.100', mount: 'kjfk_twr', country: 'US', lat: 40.6413, lon: -73.7781},
+    {id: 'kjfk-gnd', icao: 'KJFK', iata: 'JFK', name: 'John F. Kennedy Intl', facility: 'JFK Ground', freq: '121.900', mount: 'kjfk_gnd', country: 'US', lat: 40.6413, lon: -73.7781},
+    {id: 'kewr-twr', icao: 'KEWR', iata: 'EWR', name: 'Newark Liberty Intl', facility: 'EWR Tower', freq: '118.300', mount: 'kewr_twr', country: 'US', lat: 40.6895, lon: -74.1745},
+    {id: 'kord-twr', icao: 'KORD', iata: 'ORD', name: "Chicago O'Hare Intl", facility: 'ORD Tower', freq: '120.750', mount: 'kord_twr', country: 'US', lat: 41.9742, lon: -87.9073},
+    {id: 'katl-twr', icao: 'KATL', iata: 'ATL', name: 'Hartsfield-Jackson Atlanta', facility: 'ATL Tower', freq: '119.100', mount: 'katl_twr', country: 'US', lat: 33.6407, lon: -84.4277},
+    {id: 'kdfw-twr', icao: 'KDFW', iata: 'DFW', name: 'Dallas/Fort Worth Intl', facility: 'DFW Tower', freq: '126.550', mount: 'kdfw_twr', country: 'US', lat: 32.8998, lon: -97.0403},
+    {id: 'kden-twr', icao: 'KDEN', iata: 'DEN', name: 'Denver Intl', facility: 'DEN Tower', freq: '124.300', mount: 'kden_twr', country: 'US', lat: 39.8561, lon: -104.6737},
+    {id: 'ksea-twr', icao: 'KSEA', iata: 'SEA', name: 'Seattle-Tacoma Intl', facility: 'SEA Tower', freq: '119.900', mount: 'ksea_twr', country: 'US', lat: 47.4502, lon: -122.3088},
+    {id: 'kbos-twr', icao: 'KBOS', iata: 'BOS', name: 'Boston Logan Intl', facility: 'BOS Tower', freq: '128.800', mount: 'kbos_twr', country: 'US', lat: 42.3656, lon: -71.0096},
+    {id: 'kmia-twr', icao: 'KMIA', iata: 'MIA', name: 'Miami Intl', facility: 'MIA Tower', freq: '118.300', mount: 'kmia_twr', country: 'US', lat: 25.7959, lon: -80.287},
+    {id: 'klas-twr', icao: 'KLAS', iata: 'LAS', name: 'Harry Reid Intl', facility: 'LAS Tower', freq: '119.900', mount: 'klas_twr', country: 'US', lat: 36.084, lon: -115.1537},
+    {id: 'kphx-twr', icao: 'KPHX', iata: 'PHX', name: 'Phoenix Sky Harbor', facility: 'PHX Tower', freq: '118.700', mount: 'kphx_twr', country: 'US', lat: 33.4343, lon: -112.0116},
+    {id: 'kiad-twr', icao: 'KIAD', iata: 'IAD', name: 'Washington Dulles Intl', facility: 'IAD Tower', freq: '120.100', mount: 'kiad_twr', country: 'US', lat: 38.9531, lon: -77.4565},
+    {id: 'cyyz-twr', icao: 'CYYZ', iata: 'YYZ', name: 'Toronto Pearson Intl', facility: 'YYZ Tower', freq: '118.700', mount: 'cyyz_twr', country: 'CA', lat: 43.6777, lon: -79.6248},
+    {id: 'cyvr-twr', icao: 'CYVR', iata: 'YVR', name: 'Vancouver Intl', facility: 'YVR Tower', freq: '118.700', mount: 'cyvr_twr', country: 'CA', lat: 49.1967, lon: -123.1815},
+    {id: 'eham-twr', icao: 'EHAM', iata: 'AMS', name: 'Amsterdam Schiphol', facility: 'Schiphol Tower/App', freq: '119.225', mount: 'eham_twr', country: 'NL', lat: 52.3105, lon: 4.7683},
+    {id: 'eddf-app', icao: 'EDDF', iata: 'FRA', name: 'Frankfurt Main', facility: 'Frankfurt Director', freq: '120.800', mount: 'eddf_app', country: 'DE', lat: 50.0379, lon: 8.5622},
+    {id: 'lszh-twr', icao: 'LSZH', iata: 'ZRH', name: 'Zurich Airport', facility: 'Zurich Tower/App', freq: '118.100', mount: 'lszh_twr', country: 'CH', lat: 47.4582, lon: 8.5555},
+    {id: 'eidw-twr', icao: 'EIDW', iata: 'DUB', name: 'Dublin Airport', facility: 'Dublin Tower', freq: '118.600', mount: 'eidw', country: 'IE', lat: 53.4264, lon: -6.2499},
+    {id: 'lemd-twr', icao: 'LEMD', iata: 'MAD', name: 'Madrid Barajas', facility: 'Madrid Tower/App', freq: '118.075', mount: 'lemd', country: 'ES', lat: 40.4983, lon: -3.5676},
+    {id: 'rjtt-twr', icao: 'RJTT', iata: 'HND', name: 'Tokyo Haneda Intl', facility: 'Haneda Tower', freq: '118.100', mount: 'rjtt_twr', country: 'JP', lat: 35.5494, lon: 139.7798},
+    {id: 'rjaa-twr', icao: 'RJAA', iata: 'NRT', name: 'Tokyo Narita Intl', facility: 'Narita Tower', freq: '118.200', mount: 'rjaa_twr', country: 'JP', lat: 35.772, lon: 140.3929},
+    {id: 'yssy-twr', icao: 'YSSY', iata: 'SYD', name: 'Sydney Kingsford Smith', facility: 'Sydney Tower/App', freq: '120.500', mount: 'yssy_twr', country: 'AU', lat: -33.9399, lon: 151.1753},
+    {id: 'ymml-twr', icao: 'YMML', iata: 'MEL', name: 'Melbourne Intl', facility: 'Melbourne Tower/App', freq: '120.500', mount: 'ymml', country: 'AU', lat: -37.669, lon: 144.841},
+    {id: 'nzaa-twr', icao: 'NZAA', iata: 'AKL', name: 'Auckland Intl', facility: 'Auckland Tower/App', freq: '118.700', mount: 'nzaa', country: 'NZ', lat: -37.0082, lon: 174.785},
+    {id: 'rctp-twr', icao: 'RCTP', iata: 'TPE', name: 'Taipei Taoyuan Intl', facility: 'Taoyuan Tower/App', freq: '118.700', mount: 'rctp', country: 'TW', lat: 25.0797, lon: 121.2342},
+    {id: 'sbgr-twr', icao: 'SBGR', iata: 'GRU', name: 'Sao Paulo Guarulhos', facility: 'Guarulhos Tower/App', freq: '132.750', mount: 'sbgr', country: 'BR', lat: -23.4356, lon: -46.4731},
+    {id: 'mmmx-twr', icao: 'MMMX', iata: 'MEX', name: 'Mexico City Intl', facility: 'Mexico Tower/App', freq: '118.550', mount: 'mmmx', country: 'MX', lat: 19.4363, lon: -99.0721},
+  ];
+
+  router.get('/liveatc/stations', (req, res) => {
+    const q = String(req.query.q ?? req.query.icao ?? '').trim().toUpperCase();
+    const filtered = q
+      ? LIVEATC_STATIONS.filter(
+          (s) =>
+            s.icao.includes(q) ||
+            s.iata.includes(q) ||
+            s.name.toUpperCase().includes(q) ||
+            s.facility.toUpperCase().includes(q) ||
+            s.country.includes(q),
+        )
+      : LIVEATC_STATIONS;
+    res.json({stations: filtered});
+  });
+
+  router.get('/liveatc/stream', async (req, res) => {
+    const rawMount = String(req.query.mount ?? 'ksfo_twr').trim().toLowerCase();
+    if (!/^[a-z0-9_-]{2,48}$/.test(rawMount)) {
+      res.status(400).json({error: 'Invalid LiveATC mount'});
+      return;
+    }
+    const ac = new AbortController();
+    req.on('close', () => ac.abort());
+
+    const tryMounts = [rawMount, `${rawMount}_twr`, rawMount.replace(/_twr$/, '')];
+    for (const mnt of Array.from(new Set(tryMounts))) {
+      try {
+        const upstream = await fetch(`https://d.liveatc.net/${encodeURIComponent(mnt)}`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; SkyDeckAudio/1.0)',
+            Accept: 'audio/mpeg, audio/*;q=0.9, */*;q=0.8',
+          },
+          signal: ac.signal,
+        });
+        if (!upstream.ok || !upstream.body) continue;
+        res.setHeader('Content-Type', upstream.headers.get('content-type') || 'audio/mpeg');
+        res.setHeader('Cache-Control', 'no-cache, no-store');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        const reader = upstream.body.getReader();
+        try {
+          while (true) {
+            const {done, value} = await reader.read();
+            if (done || ac.signal.aborted) break;
+            if (value) res.write(Buffer.from(value));
+          }
+        } catch {
+          // client closed or stream ended
+        } finally {
+          res.end();
+        }
+        return;
+      } catch {
+        if (ac.signal.aborted) return;
+      }
+    }
+    if (!res.headersSent) {
+      res.status(502).json({error: 'LiveATC stream mount unavailable'});
+    }
   });
 
   return router;

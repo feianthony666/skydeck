@@ -25,6 +25,7 @@ import type {
   AirportBoardResponse,
   AirportWeather,
 } from '../types/aviation';
+import {formatEpochInTimezone, resolveTimezoneByCoordsAndCode} from '../utils/timezone';
 import {Badge} from './ui/badge';
 import {Button} from './ui/button';
 import {Card, CardContent, CardHeader, CardTitle} from './ui/card';
@@ -53,46 +54,7 @@ function formatEpochInMode(
   tzName?: string,
   utcOffsetSec?: number,
 ): string {
-  if (!ts) return '—';
-  try {
-    if (mode === 'utc') {
-      return new Intl.DateTimeFormat([], {
-        timeZone: 'UTC',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }).format(new Date(ts * 1000));
-    }
-    if (mode === 'airport') {
-      if (tzName) {
-        return new Intl.DateTimeFormat([], {
-          timeZone: tzName,
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        }).format(new Date(ts * 1000));
-      }
-      if (typeof utcOffsetSec === 'number') {
-        return new Intl.DateTimeFormat([], {
-          timeZone: 'UTC',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        }).format(new Date((ts + utcOffsetSec) * 1000));
-      }
-    }
-    return new Date(ts * 1000).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
-  } catch {
-    return new Date(ts * 1000).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
-  }
+  return formatEpochInTimezone(ts, mode, tzName, utcOffsetSec);
 }
 
 function formatSynchronizedStatus(
@@ -429,18 +391,32 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
           ? 'Minor schedule delays.'
           : 'Significant airport delays.';
 
+  const effectiveTz = useMemo(
+    () =>
+      resolveTimezoneByCoordsAndCode({
+        icao: airport.icao,
+        iata: airport.iata,
+        lat: surface?.lat || board?.lat || dataSheet.lat,
+        lon: surface?.lon || board?.lon || dataSheet.lon,
+        hintTzName: board?.timezoneName,
+        hintUtcOffsetSec: board?.utcOffsetSec,
+        hintAbbr: board?.timezoneAbbr,
+      }),
+    [airport.icao, airport.iata, surface?.lat, surface?.lon, board?.lat, board?.lon, dataSheet.lat, dataSheet.lon, board?.timezoneName, board?.utcOffsetSec, board?.timezoneAbbr],
+  );
+
   const airportLocalClock = formatEpochInMode(
     Math.floor(Date.now() / 1000),
     'airport',
-    board?.timezoneName,
-    board?.utcOffsetSec,
+    effectiveTz.timezoneName,
+    effectiveTz.utcOffsetSec,
   );
 
   const tzAbbr =
     timeDisplayMode === 'utc'
       ? 'UTC'
       : timeDisplayMode === 'airport'
-        ? board?.timezoneAbbr || 'APT'
+        ? effectiveTz.timezoneAbbr
         : 'LOCAL';
 
   return (
@@ -1423,15 +1399,15 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                 const schedClock = formatEpochInMode(
                   item.scheduledTime || item.estimatedTime || item.actualTime,
                   timeDisplayMode,
-                  board?.timezoneName,
-                  board?.utcOffsetSec,
+                  effectiveTz.timezoneName,
+                  effectiveTz.utcOffsetSec,
                 );
                 const syncStatus = formatSynchronizedStatus(
                   item,
                   boardTab,
                   timeDisplayMode,
-                  board?.timezoneName,
-                  board?.utcOffsetSec,
+                  effectiveTz.timezoneName,
+                  effectiveTz.utcOffsetSec,
                 );
 
                 return (

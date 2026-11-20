@@ -33,6 +33,7 @@ import type {
   SafetyRecordResponse,
   ThreeViewMode,
 } from '../types/aviation';
+import {formatEpochInTimezone, resolveTimezoneByCoordsAndCode} from '../utils/timezone';
 import {
   getDbFlagMeta,
   getEmergencySquawkMeta,
@@ -67,13 +68,13 @@ interface TelemetrySample {
   terrainFt: number;
 }
 
-function formatEpochTime(ts?: number, mode: 'airport' | 'local' | 'utc' = 'local'): string {
-  if (!ts) return '—';
-  const d = new Date(ts * 1000);
-  if (mode === 'utc') {
-    return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}Z`;
-  }
-  return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
+function formatEpochTime(
+  ts?: number,
+  mode: 'airport' | 'local' | 'utc' = 'local',
+  tzName?: string,
+  utcOffsetSec?: number,
+): string {
+  return formatEpochInTimezone(ts, mode, tzName, utcOffsetSec);
 }
 
 function formatDurationMinutes(totalMin: number): string {
@@ -264,6 +265,38 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
   const originIcao = detail?.originIcao || '';
   const destIcao = detail?.destinationIcao || '';
 
+  const originTz = useMemo(() => {
+    const match =
+      AIRPORT_CATALOG.find(
+        (a) => (originIcao && a.icao === originIcao.toUpperCase()) || (originCode !== '—' && a.iata === originCode.toUpperCase()),
+      ) ??
+      mapAirports.find(
+        (a) => (originIcao && a.icao.toUpperCase() === originIcao.toUpperCase()) || (originCode !== '—' && a.iata.toUpperCase() === originCode.toUpperCase()),
+      );
+    return resolveTimezoneByCoordsAndCode({
+      icao: originIcao || originCode,
+      iata: originCode,
+      lat: match?.lat,
+      lon: match?.lon,
+    });
+  }, [originIcao, originCode, mapAirports]);
+
+  const destTz = useMemo(() => {
+    const match =
+      AIRPORT_CATALOG.find(
+        (a) => (destIcao && a.icao === destIcao.toUpperCase()) || (destCode !== '—' && a.iata === destCode.toUpperCase()),
+      ) ??
+      mapAirports.find(
+        (a) => (destIcao && a.icao.toUpperCase() === destIcao.toUpperCase()) || (destCode !== '—' && a.iata.toUpperCase() === destCode.toUpperCase()),
+      );
+    return resolveTimezoneByCoordsAndCode({
+      icao: destIcao || destCode,
+      iata: destCode,
+      lat: match?.lat,
+      lon: match?.lon,
+    });
+  }, [destIcao, destCode, mapAirports]);
+
   // Estimate remaining distance & countdown until landing
   const landingEstimate = useMemo(() => {
     if (flight.onGround) {
@@ -315,7 +348,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
       const mins = Math.max(1, Math.round((detail.estimatedArr - nowEpochSec) / 60));
       return {
         label: `~${formatDurationMinutes(mins)}`,
-        detail: `Schedule ETA (${formatEpochTime(detail.estimatedArr, timeDisplayMode)})`,
+        detail: `Schedule ETA (${formatEpochTime(detail.estimatedArr, timeDisplayMode, destTz.timezoneName, destTz.utcOffsetSec)})`,
         remainingNm: null,
         etaEpoch: detail.estimatedArr,
       };
@@ -325,7 +358,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
       const mins = Math.max(1, Math.round((detail.scheduledArr - nowEpochSec) / 60));
       return {
         label: `Sched ${formatDurationMinutes(mins)}`,
-        detail: `Scheduled arrival ${formatEpochTime(detail.scheduledArr, timeDisplayMode)}`,
+        detail: `Scheduled arrival ${formatEpochTime(detail.scheduledArr, timeDisplayMode, destTz.timezoneName, destTz.utcOffsetSec)}`,
         remainingNm: null,
         etaEpoch: detail.scheduledArr,
       };
@@ -673,7 +706,8 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                 <span className="font-bold text-foreground">{landingEstimate.label}</span>
                 {landingEstimate.etaEpoch && !flight.onGround && (
                   <span className="text-[10.5px] text-muted-foreground ml-1.5">
-                    (ETA {formatEpochTime(landingEstimate.etaEpoch, timeDisplayMode)})
+                    (ETA {formatEpochTime(landingEstimate.etaEpoch, timeDisplayMode, destTz.timezoneName, destTz.utcOffsetSec)}
+                    {timeDisplayMode === 'airport' ? ` ${destTz.timezoneAbbr}` : ''})
                   </span>
                 )}
               </div>
@@ -921,8 +955,9 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                   {detail?.originGate ? `Gate ${detail.originGate}` : 'Gate —'}
                 </div>
                 <div className="text-[10.5px] font-mono text-muted-foreground tabular-nums">
-                  Sch {formatEpochTime(detail?.scheduledDep, timeDisplayMode)} · Act{' '}
-                  {formatEpochTime(detail?.actualDep, timeDisplayMode)}
+                  Sch {formatEpochTime(detail?.scheduledDep, timeDisplayMode, originTz.timezoneName, originTz.utcOffsetSec)} · Act{' '}
+                  {formatEpochTime(detail?.actualDep, timeDisplayMode, originTz.timezoneName, originTz.utcOffsetSec)}
+                  {timeDisplayMode === 'airport' ? ` ${originTz.timezoneAbbr}` : ''}
                 </div>
               </div>
 
@@ -937,8 +972,9 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                   {detail?.destBaggage ? ` · Bag ${detail.destBaggage}` : ''}
                 </div>
                 <div className="text-[10.5px] font-mono text-muted-foreground tabular-nums">
-                  Sch {formatEpochTime(detail?.scheduledArr, timeDisplayMode)} · Est{' '}
-                  {formatEpochTime(landingEstimate.etaEpoch ?? detail?.estimatedArr, timeDisplayMode)}
+                  Sch {formatEpochTime(detail?.scheduledArr, timeDisplayMode, destTz.timezoneName, destTz.utcOffsetSec)} · Est{' '}
+                  {formatEpochTime(landingEstimate.etaEpoch ?? detail?.estimatedArr, timeDisplayMode, destTz.timezoneName, destTz.utcOffsetSec)}
+                  {timeDisplayMode === 'airport' ? ` ${destTz.timezoneAbbr}` : ''}
                 </div>
               </div>
             </div>

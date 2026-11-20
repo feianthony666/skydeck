@@ -1,5 +1,5 @@
-import {ChevronDown, ChevronUp, CloudRain, Eye, Gauge, Plane, Radio} from 'lucide-react';
-import React, {useEffect, useRef, useState} from 'react';
+import {ChevronDown, ChevronUp, CloudRain, Eye, Gauge, Palette, Plane, Radio} from 'lucide-react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
@@ -34,6 +34,11 @@ import {
   type CockpitRefs,
 } from '../three/cockpitBuilder';
 import {buildPanSectorGroup, type PanSectorRefs} from '../three/panWeatherBuilder';
+import {
+  acquireSvgFuselageSkinTexture,
+  getSkinPreviewSvgDataUrl,
+  listGeoFsStyleLiveryPresets,
+} from '../three/svgLiverySkins';
 
 interface FlightDeck3DProps {
   flight: LiveFlight | null;
@@ -49,14 +54,17 @@ interface FlightDeck3DProps {
   reducedMotion?: boolean;
 }
 
+type ExtendedCockpitPreset = CockpitCameraPreset | 'exteriorShell';
+
 const CAMERA_PRESETS: Record<
-  CockpitCameraPreset,
+  ExtendedCockpitPreset,
   {pos: [number, number, number]; target: [number, number, number]; label: string}
 > = {
   captain: {pos: [-0.62, 1.38, -0.05], target: [-0.55, 1.06, -1.35], label: 'Captain Seat'},
   hud: {pos: [-0.62, 1.46, -0.42], target: [-0.62, 1.43, -2.5], label: 'HUD Approach'},
   overhead: {pos: [0.0, 1.25, -0.15], target: [0.0, 2.08, -0.35], label: 'Overhead'},
   pedestal: {pos: [0.0, 1.35, -0.05], target: [0.0, 0.55, -0.58], label: 'Pedestal'},
+  exteriorShell: {pos: [-5.6, 2.35, -5.8], target: [0.0, 0.9, 0.4], label: '3D Nose Shell'},
 };
 
 export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
@@ -72,7 +80,8 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   onViewModeChange,
 }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const [cockpitPreset, setCockpitPreset] = useState<CockpitCameraPreset>('captain');
+  const [cockpitPreset, setCockpitPreset] = useState<ExtendedCockpitPreset>('captain');
+  const [selectedSkinId, setSelectedSkinId] = useState<string>('auto');
   const [dockCollapsed, setDockCollapsed] = useState(false);
   const [contextLost, setContextLost] = useState(false);
   const [panTelemetry, setPanTelemetry] = useState<{
@@ -81,6 +90,12 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     ceilingFt: number;
     hasPrecip: boolean;
   }>({clouds: 0, tfrs: 0, ceilingFt: 8500, hasPrecip: false});
+
+  const liveryPresets = useMemo(() => listGeoFsStyleLiveryPresets(), []);
+  const selectedPreset = useMemo(
+    () => liveryPresets.find((p) => p.id === selectedSkinId) ?? null,
+    [liveryPresets, selectedSkinId],
+  );
 
   // Mutable refs so React state updates never tear down the WebGL context
   const stateRef = useRef({
@@ -94,6 +109,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     disruptions,
     viewMode,
     cockpitPreset,
+    selectedPreset,
     transitionActive: false,
     desiredCamPos: new THREE.Vector3(-0.62, 1.38, -0.05),
     desiredTarget: new THREE.Vector3(-0.55, 1.06, -1.35),
@@ -109,6 +125,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
   stateRef.current.disruptions = disruptions;
   stateRef.current.viewMode = viewMode;
   stateRef.current.cockpitPreset = cockpitPreset;
+  stateRef.current.selectedPreset = selectedPreset;
 
   const sceneRefs = useRef<{
     renderer?: THREE.WebGLRenderer;
@@ -117,6 +134,8 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     controls?: OrbitControls;
     avionics?: AvionicsTextureBundle;
     cockpitRefs?: CockpitRefs;
+    cockpitSkinRelease?: (() => void) | null;
+    lastCockpitKey?: string;
     apronRefs?: ApronRefs;
     exteriorRoot?: THREE.Group;
     extShadow?: THREE.Mesh;
@@ -130,7 +149,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     lastAircraftKey: string;
     lastTaxiHash: string;
     lastPanKey: string;
-  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: '', lastPanKey: ''});
+  }>({maxAnisotropy: 1, lastAircraftKey: '', lastTaxiHash: '', lastPanKey: '', lastCockpitKey: ''});
 
   // Trigger camera glide when viewMode or cockpitPreset changes
   useEffect(() => {
@@ -233,11 +252,25 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     const avionics = createAvionicsTextures(maxAniso);
 
-    // 1. Cockpit Root (dynamically rebuilt only when Airbus vs Boeing layout flips)
-    const initialSpec = stateRef.current.flight
-      ? resolveAircraftSpec(stateRef.current.flight.aircraftType)
-      : resolveAircraftSpec('A320');
-    let cockpitRefs = buildFlightDeckCockpit(avionics, Boolean(initialSpec.isAirbus));
+    // 1. Cockpit Root with 3D Exterior Shell
+    const initialType = stateRef.current.flight?.aircraftType || 'A320';
+    const initialSpec = resolveAircraftSpec(initialType);
+    const initialLivery = resolveAirlineLivery(stateRef.current.flight?.airlineIcao || 'UAL', stateRef.current.flight?.callsign);
+    const initialSpecial = resolveSpecialLivery(stateRef.current.flight?.registration || '', stateRef.current.flight?.callsign);
+    const initSkin = acquireSvgFuselageSkinTexture(
+      initialLivery,
+      stateRef.current.flight?.registration || '',
+      initialSpec,
+      initialSpecial,
+      maxAniso,
+      true,
+    );
+    let cockpitRefs = buildFlightDeckCockpit(avionics, Boolean(initialSpec.isAirbus), {
+      fuselageTex: initSkin.texture,
+      primaryHex: initialSpecial?.primaryHex || initialLivery.fuselageHex,
+      accentHex: initialSpecial?.accentHex || initialLivery.accentHex,
+    });
+    let cockpitSkinRelease: (() => void) | null = initSkin.release;
     scene.add(cockpitRefs.group);
 
     // 2. Exterior Livery Root
@@ -273,6 +306,8 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       controls,
       avionics,
       cockpitRefs,
+      cockpitSkinRelease,
+      lastCockpitKey: `${Boolean(initialSpec.isAirbus)}|${initialLivery.icao}|${initialSpecial?.registration || ''}`,
       apronRefs,
       exteriorRoot,
       extShadow,
@@ -339,7 +374,6 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       const s = stateRef.current;
       const refs = sceneRefs.current;
 
-      // Adapt sky, fog & OrbitControls pan freedom to viewMode + METAR visibility
       const wx = s.nearestWeather;
       controls.enablePan = s.viewMode === 'pan' || s.viewMode === 'taxi';
       controls.maxDistance = s.viewMode === 'pan' ? 280 : 120;
@@ -359,7 +393,6 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           s.viewMode === 'pan' ? 0.0018 : wx?.visibilitySm && wx.visibilitySm < 3 ? 0.022 : 0.006;
       }
 
-      // Smooth damped camera preset glide
       if (s.transitionActive) {
         camera.position.x = THREE.MathUtils.damp(camera.position.x, s.desiredCamPos.x, 7, dt);
         camera.position.y = THREE.MathUtils.damp(camera.position.y, s.desiredCamPos.y, 7, dt);
@@ -377,45 +410,75 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       controls.update();
 
       const activeFlight = s.flight;
-      if (activeFlight) {
-        const regStr = s.detail?.registration || activeFlight.registration || '';
-        const typeStr = s.detail?.aircraftCode || activeFlight.aircraftType || 'A320';
-        const airlineStr = s.detail?.airlineIcao || activeFlight.airlineIcao || '';
-        const spec = resolveAircraftSpec(typeStr);
-        const targetAirbus = Boolean(spec.isAirbus);
+      const preset = s.selectedPreset;
 
-        // Rebuild flight deck architecture if switching Airbus <-> Boeing airframe
-        if (cockpitRefs.isAirbus !== targetAirbus) {
-          scene.remove(cockpitRefs.group);
-          cockpitRefs.dispose();
-          cockpitRefs = buildFlightDeckCockpit(avionics, targetAirbus);
-          scene.add(cockpitRefs.group);
-          refs.cockpitRefs = cockpitRefs;
+      const regStr = preset ? preset.registration : s.detail?.registration || activeFlight?.registration || '';
+      const typeStr = s.detail?.aircraftCode || activeFlight?.aircraftType || 'A320';
+      const airlineStr = preset
+        ? preset.airlineIcao
+        : s.detail?.airlineIcao || activeFlight?.airlineIcao || 'UAL';
+      const spec = resolveAircraftSpec(typeStr);
+      const targetAirbus = Boolean(spec.isAirbus);
+      const activeLivery = resolveAirlineLivery(airlineStr, activeFlight?.callsign);
+      const activeSpecial = preset?.special ?? resolveSpecialLivery(regStr, activeFlight?.callsign);
+
+      // Rebuild Cockpit 3D + Exterior Fuselage/Wings shell if Airbus/Boeing or Skin changes
+      const ckKey = `${targetAirbus}|${activeLivery.icao}|${activeSpecial?.registration || ''}|${regStr}`;
+      if (ckKey !== refs.lastCockpitKey) {
+        scene.remove(cockpitRefs.group);
+        cockpitRefs.dispose();
+        cockpitSkinRelease?.();
+
+        const nextSkin = acquireSvgFuselageSkinTexture(
+          activeLivery,
+          regStr,
+          spec,
+          activeSpecial,
+          refs.maxAnisotropy,
+          true,
+        );
+        cockpitSkinRelease = nextSkin.release;
+        cockpitRefs = buildFlightDeckCockpit(avionics, targetAirbus, {
+          fuselageTex: nextSkin.texture,
+          primaryHex: activeSpecial?.primaryHex || activeLivery.fuselageHex,
+          accentHex: activeSpecial?.accentHex || activeLivery.accentHex,
+        });
+        scene.add(cockpitRefs.group);
+        refs.cockpitRefs = cockpitRefs;
+        refs.cockpitSkinRelease = cockpitSkinRelease;
+        refs.lastCockpitKey = ckKey;
+      }
+
+      // Toggle scene sub-roots cleanly
+      cockpitRefs.group.visible = s.viewMode === 'cockpit';
+      exteriorRoot.visible = s.viewMode === 'exterior';
+      taxiRoot.visible = s.viewMode === 'taxi';
+      panRoot.visible = s.viewMode === 'pan';
+
+      // Spin exterior wing engines attached to Cockpit 3D shell
+      if (s.viewMode === 'cockpit') {
+        const rpm = activeFlight?.onGround ? 6 : 20;
+        for (const fan of cockpitRefs.fanBlades) {
+          fan.rotation.z += dt * rpm;
         }
+      }
 
-        // Toggle scene sub-roots cleanly
-        cockpitRefs.group.visible = s.viewMode === 'cockpit';
-        exteriorRoot.visible = s.viewMode === 'exterior';
-        taxiRoot.visible = s.viewMode === 'taxi';
-        panRoot.visible = s.viewMode === 'pan';
-
-        // Rebuild exterior aircraft when selected flight / livery / gear / reg changes
-        const gearDown = activeFlight.onGround || activeFlight.altitudeFt < 2600;
-        const acKey = `${activeFlight.icao24}-${airlineStr}-${typeStr}-${regStr}-${gearDown}`;
+      if (activeFlight || preset) {
+        // Rebuild exterior aircraft when selected flight / livery / skin override / gear changes
+        const gearDown = activeFlight ? activeFlight.onGround || activeFlight.altitudeFt < 2600 : true;
+        const acKey = `${activeFlight?.icao24 || 'demo'}-${airlineStr}-${typeStr}-${regStr}-${gearDown}-${preset?.id || 'auto'}`;
         if (acKey !== refs.lastAircraftKey) {
           if (refs.aircraftRefs) {
             exteriorRoot.remove(refs.aircraftRefs.group);
             refs.aircraftRefs.dispose();
           }
-          const livery = resolveAirlineLivery(airlineStr, activeFlight.callsign);
-          const specialLivery = resolveSpecialLivery(regStr, activeFlight.callsign);
           const model = buildProceduralAircraft(
             spec,
-            livery,
+            activeLivery,
             regStr,
             refs.maxAnisotropy,
             gearDown,
-            specialLivery,
+            activeSpecial,
           );
           model.group.position.y = gearDown ? -model.groundContactOffsetY : 0.85;
           extShadow.position.y = 0.01;
@@ -425,18 +488,18 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           refs.lastAircraftKey = acKey;
         }
 
-        // Animate exterior aircraft attitude, spinning turbofans & strobes
         if (refs.aircraftRefs) {
-          const pitchTarget = activeFlight.onGround
-            ? 0
-            : THREE.MathUtils.clamp(activeFlight.verticalRateFpm / 4500, -0.22, 0.25);
+          const pitchTarget =
+            !activeFlight || activeFlight.onGround
+              ? 0
+              : THREE.MathUtils.clamp(activeFlight.verticalRateFpm / 4500, -0.22, 0.25);
           refs.aircraftRefs.group.rotation.x = THREE.MathUtils.damp(
             refs.aircraftRefs.group.rotation.x,
             pitchTarget,
             4,
             dt,
           );
-          const rpm = activeFlight.onGround ? 6 : 22;
+          const rpm = !activeFlight || activeFlight.onGround ? 6 : 22;
           for (const fan of refs.aircraftRefs.fanBlades) {
             fan.rotation.z += dt * rpm;
           }
@@ -444,8 +507,9 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           refs.aircraftRefs.strobeLight.visible = now % 1400 < 120;
           refs.aircraftRefs.beaconLight.visible = pulse;
         }
+      }
 
-        // Animate cockpit flight controls, outside horizon/cloud altitude & refresh EFIS textures at ~5Hz
+      if (activeFlight) {
         const throttlePitch = activeFlight.onGround ? 0.2 : -0.35;
         cockpitRefs.throttleLeft.rotation.x = THREE.MathUtils.damp(
           cockpitRefs.throttleLeft.rotation.x,
@@ -501,11 +565,6 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           drawFmcCdu(avionics.fmcLeftCanvas, avionics.fmcLeftTexture, activeFlight, true);
           drawFmcCdu(avionics.fmcRightCanvas, avionics.fmcRightTexture, activeFlight, false);
         }
-      } else {
-        cockpitRefs.group.visible = s.viewMode === 'cockpit';
-        exteriorRoot.visible = s.viewMode === 'exterior';
-        taxiRoot.visible = s.viewMode === 'taxi';
-        panRoot.visible = s.viewMode === 'pan';
       }
 
       // Sync 3D PAN Sector (Real METAR Clouds, Precip & 3D TFR/SIGMET Restriction Outlines)
@@ -513,16 +572,14 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
         const anchorLat = s.flight?.lat ?? s.nearestWeather?.lat ?? 40.08;
         const anchorLon = s.flight?.lon ?? s.nearestWeather?.lon ?? 116.6;
         const pFlight = s.flight;
-        const regStr = s.detail?.registration || pFlight?.registration || '';
-        const typeStr = s.detail?.aircraftCode || pFlight?.aircraftType || 'A320';
-        const airStr = s.detail?.airlineIcao || pFlight?.airlineIcao || '';
         const panKey = [
           pFlight?.icao24 || 'sector',
           anchorLat.toFixed(1),
           anchorLon.toFixed(1),
-          airStr,
+          airlineStr,
           typeStr,
           regStr,
+          preset?.id || 'auto',
           s.sigmets.length,
           s.disruptions.length,
           s.nearestWeather?.rawMetar || '',
@@ -552,16 +609,13 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           refs.panSectorRefs = sector;
 
           if (pFlight) {
-            const pSpec = resolveAircraftSpec(typeStr);
-            const pLiv = resolveAirlineLivery(airStr, pFlight.callsign);
-            const pSpLiv = resolveSpecialLivery(regStr, pFlight.callsign);
             const pAc = buildProceduralAircraft(
-              pSpec,
-              pLiv,
+              spec,
+              activeLivery,
               regStr,
               refs.maxAnisotropy,
               pFlight.onGround,
-              pSpLiv,
+              activeSpecial,
             );
             const flY = THREE.MathUtils.clamp(pFlight.altitudeFt / 1100, 0.8, 42);
             pAc.group.scale.setScalar(1.35);
@@ -608,16 +662,16 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
           const anchorLon = taxiSlice[0]?.lon ?? 116.6;
 
           taxiSlice.forEach((tf, idx) => {
-            const spec = resolveAircraftSpec(tf.aircraftType);
-            const liv = resolveAirlineLivery(tf.airlineIcao, tf.callsign);
-            const spLiv = resolveSpecialLivery(tf.registration, tf.callsign);
+            const tSpec = resolveAircraftSpec(tf.aircraftType);
+            const tLiv = resolveAirlineLivery(tf.airlineIcao, tf.callsign);
+            const tSp = resolveSpecialLivery(tf.registration, tf.callsign);
             const m = buildProceduralAircraft(
-              spec,
-              liv,
+              tSpec,
+              tLiv,
               tf.registration,
               refs.maxAnisotropy,
               true,
-              spLiv,
+              tSp,
             );
             const dz = -(tf.lat - anchorLat) * 9000;
             const dx = (tf.lon - anchorLon) * 9000 * Math.cos(THREE.MathUtils.degToRad(anchorLat));
@@ -653,6 +707,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored);
       controls.dispose();
       cockpitRefs.dispose();
+      cockpitSkinRelease?.();
       apronRefs.dispose();
       sceneRefs.current.panSectorRefs?.dispose();
       sceneRefs.current.panAircraftRefs?.dispose();
@@ -668,74 +723,87 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
     };
   }, []);
 
-  const reg = detail?.registration || flight?.registration || '';
-  const typeDisplay = detail?.aircraftCode || flight?.aircraftType || '';
-  const airlineIcao = detail?.airlineIcao || flight?.airlineIcao || '';
-  const livery = flight ? resolveAirlineLivery(airlineIcao, flight.callsign) : null;
-  const specialLivery = flight ? resolveSpecialLivery(reg, flight.callsign) : null;
-  const spec = flight ? resolveAircraftSpec(typeDisplay) : null;
+  const reg = selectedPreset
+    ? selectedPreset.registration
+    : detail?.registration || flight?.registration || '';
+  const typeDisplay = detail?.aircraftCode || flight?.aircraftType || 'B789';
+  const airlineIcao = selectedPreset
+    ? selectedPreset.airlineIcao
+    : detail?.airlineIcao || flight?.airlineIcao || 'CXA';
+  const livery = resolveAirlineLivery(airlineIcao, flight?.callsign);
+  const specialLivery = selectedPreset?.special ?? resolveSpecialLivery(reg, flight?.callsign);
+  const spec = resolveAircraftSpec(typeDisplay);
+  const previewTailUrl = useMemo(
+    () => getSkinPreviewSvgDataUrl(livery, specialLivery),
+    [livery, specialLivery],
+  );
 
   return (
     <div className="relative w-full h-full min-h-[420px] rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-[#0B1526]">
       {/* Dedicated WebGL Mount Container */}
       <div ref={mountRef} className="w-full h-full" />
 
-      {/* Top-Left Minimal Telemetry Header Overlay (Solid dark surface, no backdrop-blur over WebGL) */}
-      <div className="pointer-events-none absolute top-4 left-4 z-10 flex flex-col gap-1 rounded-lg bg-[#080D16]/90 border border-slate-800 px-3.5 py-2.5 text-xs">
-        {flight ? (
-          <>
-            <div className="flex flex-wrap items-center gap-2 font-mono font-semibold text-slate-100">
-              <span className="text-sky-400">{flight.callsign}</span>
-              <span aria-hidden="true" className="text-slate-500">·</span>
-              <span>{typeDisplay}</span>
-              {reg && (
-                <>
-                  <span aria-hidden="true" className="text-slate-500">·</span>
-                  <span className="text-amber-300">{reg}</span>
-                </>
-              )}
-              {livery && (
-                <>
-                  <span aria-hidden="true" className="text-slate-500">·</span>
-                  <span className="text-slate-300 font-sans font-medium">{livery.name}</span>
-                </>
-              )}
-              {specialLivery && (
-                <span className="rounded bg-sky-500/20 border border-sky-400/50 px-1.5 py-0.5 text-[10px] font-mono text-sky-300">
-                  {specialLivery.badgeText}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400 tabular-nums">
-              <span>{flight.onGround ? 'SURFACE TAXI' : `FL${Math.round(flight.altitudeFt / 100)}`}</span>
-              <span aria-hidden="true">/</span>
-              <span>{flight.groundSpeedKts} KT</span>
-              <span aria-hidden="true">/</span>
-              <span>HDG {String(Math.round(flight.trueTrackDeg)).padStart(3, '0')}°</span>
-              {spec && (
-                <>
-                  <span aria-hidden="true">/</span>
-                  <span>{spec.isAirbus ? 'AIRBUS SIDESTICK' : 'BOEING YOKE'}</span>
-                </>
-              )}
-              {flight.origin && flight.destination && (
-                <>
-                  <span aria-hidden="true">/</span>
-                  <span className="text-slate-200">{flight.origin} → {flight.destination}</span>
-                </>
-              )}
-            </div>
-            {specialLivery && (
-              <div className="text-[10.5px] font-sans text-sky-300/90 mt-0.5">
-                {specialLivery.liveryName}
+      {/* Top-Left Minimal Telemetry & SVG Skin Preview Overlay (Solid dark surface, no backdrop-blur over WebGL) */}
+      <div className="pointer-events-none absolute top-4 left-4 z-10 flex items-center gap-3 rounded-lg bg-[#080D16]/92 border border-slate-800 px-3.5 py-2.5 text-xs">
+        <img
+          src={previewTailUrl}
+          alt="Tail livery SVG skin"
+          className="w-9 h-9 rounded-md border border-slate-700 object-cover shrink-0 bg-slate-900"
+        />
+        <div className="flex flex-col gap-0.5">
+          {flight || selectedPreset ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2 font-mono font-semibold text-slate-100">
+                <span className="text-sky-400">{flight ? flight.callsign : livery.iata}</span>
+                <span aria-hidden="true" className="text-slate-500">·</span>
+                <span>{typeDisplay}</span>
+                {reg && (
+                  <>
+                    <span aria-hidden="true" className="text-slate-500">·</span>
+                    <span className="text-amber-300">{reg}</span>
+                  </>
+                )}
+                <span aria-hidden="true" className="text-slate-500">·</span>
+                <span className="text-slate-300 font-sans font-medium">{livery.name}</span>
+                {specialLivery && (
+                  <span className="rounded bg-sky-500/20 border border-sky-400/50 px-1.5 py-0.5 text-[10px] font-mono text-sky-300">
+                    {specialLivery.badgeText}
+                  </span>
+                )}
               </div>
-            )}
-          </>
-        ) : (
-          <div className="text-slate-300 font-medium">
-            Select an aircraft on the radar to drive 3D EFIS &amp; livery view
-          </div>
-        )}
+              <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400 tabular-nums">
+                {flight ? (
+                  <>
+                    <span>{flight.onGround ? 'SURFACE TAXI' : `FL${Math.round(flight.altitudeFt / 100)}`}</span>
+                    <span aria-hidden="true">/</span>
+                    <span>{flight.groundSpeedKts} KT</span>
+                    <span aria-hidden="true">/</span>
+                    <span>HDG {String(Math.round(flight.trueTrackDeg)).padStart(3, '0')}°</span>
+                  </>
+                ) : (
+                  <span>SKIN PREVIEW</span>
+                )}
+                <span aria-hidden="true">/</span>
+                <span>{spec.isAirbus ? 'AIRBUS SIDESTICK' : 'BOEING YOKE'}</span>
+                {flight?.origin && flight?.destination && (
+                  <>
+                    <span aria-hidden="true">/</span>
+                    <span className="text-slate-200">{flight.origin} → {flight.destination}</span>
+                  </>
+                )}
+              </div>
+              {specialLivery && (
+                <div className="text-[10.5px] font-sans text-sky-300/90 mt-0.5">
+                  {specialLivery.liveryName}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-slate-300 font-medium">
+              Select an aircraft on the radar or pick a GeoFS-style SVG livery skin below
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Top-Right 3D PAN Weather & TFR Legend (Solid dark surface, no backdrop-blur over WebGL) */}
@@ -762,7 +830,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
       )}
 
       {/* Collapsible Bottom Control Dock (Zero Viewport Occlusion) */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center max-w-[94vw]">
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center max-w-[95vw]">
         <button
           type="button"
           onClick={() => setDockCollapsed((v) => !v)}
@@ -779,7 +847,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
               <button
                 type="button"
                 onClick={() => onViewModeChange('cockpit')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'cockpit' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -789,7 +857,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
               <button
                 type="button"
                 onClick={() => onViewModeChange('exterior')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'exterior' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -799,7 +867,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
               <button
                 type="button"
                 onClick={() => onViewModeChange('taxi')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'taxi' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -809,7 +877,7 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
               <button
                 type="button"
                 onClick={() => onViewModeChange('pan')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   viewMode === 'pan' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -820,14 +888,14 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
 
             {/* Cockpit Camera Presets */}
             {viewMode === 'cockpit' && (
-              <div className="flex items-center gap-1 border-l border-slate-800 pl-2">
+              <div className="flex flex-wrap items-center gap-1 border-l border-slate-800 pl-2">
                 <Eye className="w-3.5 h-3.5 text-slate-400 mr-1" />
-                {(Object.keys(CAMERA_PRESETS) as CockpitCameraPreset[]).map((presetKey) => (
+                {(Object.keys(CAMERA_PRESETS) as ExtendedCockpitPreset[]).map((presetKey) => (
                   <button
                     key={presetKey}
                     type="button"
                     onClick={() => setCockpitPreset(presetKey)}
-                    className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       cockpitPreset === presetKey
                         ? 'bg-slate-800 text-sky-400 border border-sky-500/40'
                         : 'text-slate-400 hover:text-slate-200'
@@ -838,6 +906,26 @@ export const FlightDeck3D: React.FC<FlightDeck3DProps> = ({
                 ))}
               </div>
             )}
+
+            {/* GeoFS-Style SVG Livery Skin Selector */}
+            <div className="flex items-center gap-1.5 border-l border-slate-800 pl-2">
+              <Palette className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <select
+                value={selectedSkinId}
+                onChange={(e) => setSelectedSkinId(e.target.value)}
+                aria-label="GeoFS-style SVG aircraft livery skin selector"
+                className="h-8 max-w-[230px] rounded-md bg-slate-900 border border-slate-700 px-2.5 text-xs font-mono text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer"
+              >
+                <option value="auto">
+                  Auto Live Skin ({flight ? `${livery.iata}${reg ? ` · ${reg}` : ''}` : 'B789'})
+                </option>
+                {liveryPresets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         )}
       </div>

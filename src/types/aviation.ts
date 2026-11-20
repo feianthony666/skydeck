@@ -212,6 +212,8 @@ export interface TaxiwaySegment {
   kind: 'runway' | 'taxiway' | 'taxilane' | 'apron';
   ref?: string;
   widthM?: number;
+  dispStartM?: number;
+  dispEndM?: number;
   coords: Array<[number, number]>;
 }
 
@@ -479,13 +481,159 @@ export interface AirportDataSheet {
   approaches: ApproachProcedureSpec[];
 }
 
+export interface AtcBoundaryFeature {
+  id: string;
+  name: string;
+  oceanic: boolean;
+  labelLat: number;
+  labelLon: number;
+  rings: Array<Array<[number, number]>>; // [lat, lon][]
+}
+
+export interface OceanicTrackSpec {
+  id: string;
+  system: 'NAT' | 'PACOT';
+  direction: 'west' | 'east' | 'both';
+  flightLevels: number[];
+  validFrom?: string;
+  validTo?: string;
+  routeString: string;
+  points: Array<{ident: string; lat: number; lon: number}>;
+}
+
+export interface NavWaypointSpec {
+  ident: string;
+  name: string;
+  kind: 'VORTAC' | 'VOR' | 'DME' | 'NDB' | 'TACAN' | 'FIX';
+  freq: string;
+  lat: number;
+  lon: number;
+  usage: 'HI' | 'LO' | 'BOTH';
+  power: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
+export interface AirwaySegmentSpec {
+  id: string;
+  name: string;
+  level: 'HI' | 'LO';
+  fromIdent: string;
+  toIdent: string;
+  fromLat: number;
+  fromLon: number;
+  toLat: number;
+  toLon: number;
+}
+
+export interface EnrouteChartResponse {
+  waypoints: NavWaypointSpec[];
+  highAirways: AirwaySegmentSpec[];
+  lowAirways: AirwaySegmentSpec[];
+}
+
+export interface TimeZoneBoundaryFeature {
+  id: string;
+  name: string;
+  utcOffsetHours: number;
+  utcOffsetSec: number;
+  label: string;
+  labelLat: number;
+  labelLon: number;
+  rings: Array<Array<[number, number]>>; // [lat, lon][]
+}
+
+export interface WeatherWindPoint {
+  lat: number;
+  lon: number;
+  surfaceSpeedKts: number;
+  surfaceDirDeg: number;
+  upperSpeedKts: number; // ~250 hPa (FL340)
+  upperDirDeg: number;
+  cloudCoverPct: number;
+  precipMm: number;
+  visibilityM: number;
+  weatherCode: number;
+}
+
+export interface WeatherHazardMarker {
+  id: string;
+  kind: 'pirep' | 'airep' | 'volcanic' | 'lightning' | 'fog' | 'sigwx';
+  lat: number;
+  lon: number;
+  title: string;
+  detail: string;
+  altFt?: number | null;
+  severity?: 'LOW' | 'MOD' | 'SEV' | 'EXT';
+  acType?: string;
+  obsTime?: number;
+  coords?: Array<[number, number]>;
+}
+
+export interface WeatherLayersResponse {
+  windGrid: WeatherWindPoint[];
+  pireps: WeatherHazardMarker[];
+  volcanic: WeatherHazardMarker[];
+  lightning: WeatherHazardMarker[];
+  fogZones: WeatherHazardMarker[];
+  sigwx: WeatherHazardMarker[];
+  fetchedAt: number;
+}
+
+export interface LiveAtcStation {
+  mount: string;
+  icao: string;
+  airportName: string;
+  facility: string;
+  freqMhz: string;
+  streamUrl: string;
+}
+
+export interface PlaneLabelSettings {
+  showOnGround: boolean;
+  showAirlineLogo: boolean;
+  showFlightNumber: boolean;
+  showRoute: boolean;
+  showModel: boolean;
+  showRegistration: boolean;
+  showModeS: boolean;
+  showAltitude: boolean;
+  showSpeed: boolean;
+  showSquawk: boolean;
+  showHeading: boolean;
+  showPhotoOnHover: boolean;
+  showDepartureTime: boolean;
+  showTakeOffTime: boolean;
+  showEta: boolean;
+  showDistanceToDest: boolean;
+  showRemainingTime: boolean;
+  showLastPositionReport: boolean;
+  allowOverlap: false; // Strictly locked OFF so labels never overlap
+}
+
+export interface WeatherOverlaySettings {
+  cloudCoverage: boolean;
+  totalPrecip: boolean;
+  intensePrecip: boolean;
+  naRadar: boolean;
+  windBarbs: boolean;
+  sigwx: boolean;
+  airmetsSigmets: boolean;
+  airepsPireps: boolean;
+  volcanic: boolean;
+  turbulence: boolean;
+  icing: boolean;
+  lightning: boolean;
+  fog: boolean;
+}
+
 export interface RadarSettings {
   planeSize: number;
-  basemapStyle: 'auto' | 'light' | 'dark' | 'osm' | 'satellite';
+  basemapStyle: 'auto' | 'terrain' | 'terrain-night' | 'light' | 'dark' | 'osm' | 'satellite';
   flightPathMode: 'all' | 'selected' | 'off';
   locateMeEnabled: boolean;
   timeDisplayMode: 'airport' | 'local' | 'utc';
   showPlaneLabels: boolean;
+  planeLabels: PlaneLabelSettings;
+  wxLayers: WeatherOverlaySettings;
   showMetarDots: boolean;
   showSigmets: boolean;
   showTurbHazards: boolean;
@@ -495,6 +643,14 @@ export interface RadarSettings {
   radarOpacity: number;
   showGroundTraffic: boolean;
   showDrRings: boolean;
+  show3DBuildings?: boolean;
+  showDayNightLine: boolean;
+  showTimeZones: boolean;
+  showAtcBoundaries: boolean;
+  showOceanicTracks: boolean;
+  showHighAirways: boolean;
+  showLowAirways: boolean;
+  showWaypoints: boolean;
   preferNoWorkerMode?: boolean;
   cfWorkerUrl?: string;
   apiBaseUrl?: string;
@@ -504,3 +660,4 @@ export type AppView = 'radar' | 'deck' | 'taxi' | 'planner';
 export type LayoutMode = 'split' | 'radar' | 'deck';
 export type ThreeViewMode = 'cockpit' | 'exterior' | 'taxi' | 'pan';
 export type CockpitCameraPreset = 'captain' | 'hud' | 'overhead' | 'pedestal';
+

@@ -121,6 +121,14 @@ export const REGION_PRESETS: RegionPreset[] = [
     bounds: {lamin: 25.0, lomin: -95.0, lamax: 46.0, lomax: -68.0},
   },
   {
+    id: 'sfo-bay',
+    label: 'San Francisco (KSFO)',
+    subtitle: 'Bay Area · Green Runway Overlay & Parallel 28L/28R',
+    center: [37.6213, -122.379],
+    zoom: 12,
+    bounds: {lamin: 37.25, lomin: -122.75, lamax: 37.98, lomax: -121.95},
+  },
+  {
     id: 'europe',
     label: 'Europe Core',
     subtitle: 'London · Frankfurt · Paris · Amsterdam',
@@ -333,6 +341,22 @@ export const AIRPORT_CATALOG: AirportSpec[] = [
     runways: [
       {ident: '24R/06L', headingDeg: 251, lengthFt: 8926},
       {ident: '25L/07R', headingDeg: 251, lengthFt: 11095},
+    ],
+  },
+  {
+    icao: 'KSFO',
+    iata: 'SFO',
+    name: 'San Francisco International',
+    city: 'San Francisco',
+    country: 'US',
+    lat: 37.6213,
+    lon: -122.379,
+    elevationFt: 13,
+    runways: [
+      {ident: '28R/10L', headingDeg: 298, lengthFt: 11870},
+      {ident: '28L/10R', headingDeg: 298, lengthFt: 11381},
+      {ident: '19L/01R', headingDeg: 194, lengthFt: 8650},
+      {ident: '19R/01L', headingDeg: 194, lengthFt: 7650},
     ],
   },
   {
@@ -1494,6 +1518,7 @@ const KNOWN_COM_FREQS: Record<
   RKSI: {atis: '128.200', cld: '121.000', gnd: '121.400', twr: '118.200', app: '119.750', transAlt: 14000, magVar: -8.6},
   KJFK: {atis: '128.725', cld: '135.050', gnd: '121.900', twr: '119.100', app: '125.700', transAlt: 18000, magVar: -12.8},
   KLAX: {atis: '133.800', cld: '121.400', gnd: '121.650', twr: '133.900', app: '124.500', transAlt: 18000, magVar: 11.4},
+  KSFO: {atis: '118.850', cld: '121.400', gnd: '121.800', twr: '120.500', app: '135.650', transAlt: 18000, magVar: 13.0},
   KORD: {atis: '135.400', cld: '121.600', gnd: '121.750', twr: '120.750', app: '125.000', transAlt: 18000, magVar: -4.2},
   EGLL: {atis: '128.080', cld: '121.980', gnd: '121.905', twr: '118.505', app: '119.730', transAlt: 6000, magVar: 0.4},
   EDDF: {atis: '118.030', cld: '121.855', gnd: '121.805', twr: '119.905', app: '120.805', transAlt: 5000, magVar: 3.1},

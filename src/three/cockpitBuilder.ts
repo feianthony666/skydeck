@@ -4,6 +4,13 @@ import {
   type AvionicsTextureBundle,
 } from './avionicsTextures';
 
+export interface CockpitExteriorSkin {
+  fuselageTex: THREE.Texture;
+  primaryHex: string;
+  accentHex: string;
+  titleColor?: string;
+}
+
 export interface CockpitRefs {
   group: THREE.Group;
   isAirbus: boolean;
@@ -14,6 +21,8 @@ export interface CockpitRefs {
   hudGlass: THREE.Mesh;
   outsideWorld: THREE.Group;
   cloudLayer: THREE.Group;
+  fanBlades: THREE.Object3D[];
+  exteriorShell: THREE.Group;
   dispose: () => void;
 }
 
@@ -26,9 +35,11 @@ export interface ApronRefs {
 export function buildFlightDeckCockpit(
   textures: AvionicsTextureBundle,
   isAirbus = false,
+  exteriorSkin?: CockpitExteriorSkin,
 ): CockpitRefs {
   const group = new THREE.Group();
   const disposables: Array<{dispose: () => void}> = [];
+  const fanBlades: THREE.Object3D[] = [];
 
   const panelColor = isAirbus ? '#334155' : '#1E293B';
   const panelMat = new THREE.MeshStandardMaterial({color: panelColor, roughness: 0.62, metalness: 0.35});
@@ -36,7 +47,7 @@ export function buildFlightDeckCockpit(
   const metalMat = new THREE.MeshStandardMaterial({color: '#64748B', roughness: 0.28, metalness: 0.82});
   const yokeMat = new THREE.MeshStandardMaterial({color: '#111827', roughness: 0.68, metalness: 0.16});
   const screenBezelMat = new THREE.MeshStandardMaterial({color: '#090D16', roughness: 0.4, metalness: 0.5});
-  const windowFrameMat = new THREE.MeshStandardMaterial({color: '#1E293B', roughness: 0.55, metalness: 0.45});
+  const windowFrameMat = new THREE.MeshStandardMaterial({color: '#1E293B', roughness: 0.52, metalness: 0.48});
   const sheepskinMat = new THREE.MeshStandardMaterial({color: '#64748B', roughness: 0.94, metalness: 0.02});
   const seatFrameMat = new THREE.MeshStandardMaterial({color: '#1E293B', roughness: 0.5, metalness: 0.35});
   disposables.push(
@@ -263,25 +274,69 @@ export function buildFlightDeckCockpit(
     group.add(sg);
   }
 
-  // Windshield Canopy Pillars & Header Brow
-  const pillarGeo = new THREE.BoxGeometry(0.08, 1.08, 0.12);
+  // Windshield Canopy Pillars, Side Sliding DV Window Frames & Eyebrow Trim
+  const pillarGeo = new THREE.BoxGeometry(0.085, 1.12, 0.14);
   const centerPillar = new THREE.Mesh(pillarGeo, windowFrameMat);
-  centerPillar.position.set(0, 1.72, -1.04);
+  centerPillar.position.set(0, 1.72, -1.06);
   centerPillar.rotation.x = 0.42;
 
   const leftPillar = new THREE.Mesh(pillarGeo, windowFrameMat);
-  leftPillar.position.set(-1.34, 1.66, -0.82);
-  leftPillar.rotation.set(0.36, 0.25, -0.18);
+  leftPillar.position.set(-1.32, 1.66, -0.84);
+  leftPillar.rotation.set(0.36, 0.26, -0.18);
 
   const rightPillar = new THREE.Mesh(pillarGeo, windowFrameMat);
-  rightPillar.position.set(1.34, 1.66, -0.82);
-  rightPillar.rotation.set(0.36, -0.25, 0.18);
+  rightPillar.position.set(1.32, 1.66, -0.84);
+  rightPillar.rotation.set(0.36, -0.26, 0.18);
 
-  const browGeo = new THREE.BoxGeometry(2.85, 0.08, 0.18);
+  const aftPillarL = new THREE.Mesh(pillarGeo, windowFrameMat);
+  aftPillarL.position.set(-1.52, 1.62, 0.28);
+  aftPillarL.rotation.set(0.04, 0, -0.14);
+  const aftPillarR = new THREE.Mesh(pillarGeo, windowFrameMat);
+  aftPillarR.position.set(1.52, 1.62, 0.28);
+  aftPillarR.rotation.set(0.04, 0, 0.14);
+
+  const browGeo = new THREE.BoxGeometry(2.88, 0.09, 0.22);
   const brow = new THREE.Mesh(browGeo, windowFrameMat);
   brow.position.set(0, 2.1, -0.82);
-  group.add(centerPillar, leftPillar, rightPillar, brow);
-  disposables.push(pillarGeo, browGeo);
+
+  const sillGeo = new THREE.BoxGeometry(0.1, 0.08, 1.15);
+  const sillL = new THREE.Mesh(sillGeo, windowFrameMat);
+  sillL.position.set(-1.46, 1.16, -0.28);
+  const sillR = new THREE.Mesh(sillGeo, windowFrameMat);
+  sillR.position.set(1.46, 1.16, -0.28);
+
+  // Subtle Clear-Tinted Optical Windshield Panes (front & DV windows)
+  const windshieldGlassMat = new THREE.MeshPhysicalMaterial({
+    color: '#7DD3FC',
+    transparent: true,
+    opacity: 0.12,
+    roughness: 0.06,
+    metalness: 0.1,
+    clearcoat: 1.0,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const frontPaneGeo = new THREE.PlaneGeometry(1.28, 0.96);
+  const frontPaneL = new THREE.Mesh(frontPaneGeo, windshieldGlassMat);
+  frontPaneL.position.set(-0.68, 1.68, -0.96);
+  frontPaneL.rotation.set(0.42, 0.12, 0);
+  const frontPaneR = new THREE.Mesh(frontPaneGeo, windshieldGlassMat);
+  frontPaneR.position.set(0.68, 1.68, -0.96);
+  frontPaneR.rotation.set(0.42, -0.12, 0);
+
+  group.add(
+    centerPillar,
+    leftPillar,
+    rightPillar,
+    aftPillarL,
+    aftPillarR,
+    brow,
+    sillL,
+    sillR,
+    frontPaneL,
+    frontPaneR,
+  );
+  disposables.push(pillarGeo, browGeo, sillGeo, windshieldGlassMat, frontPaneGeo);
 
   // Textured Overhead Panel
   const ovhGeo = new THREE.BoxGeometry(1.18, 0.08, 0.98);
@@ -311,6 +366,236 @@ export function buildFlightDeckCockpit(
   sideR.position.set(1.34, 0.33, -0.25);
   group.add(sideL, sideR);
   disposables.push(sideGeo);
+
+  // =========================================================================
+  // 3D EXTERIOR COCKPIT AIRFRAME SHELL (Nose Cone, Livery Fuselage Cheeks,
+  // Bulkhead Crown, Visible Left & Right Swept Wings + Spinning Engines!)
+  // =========================================================================
+  const exteriorShell = new THREE.Group();
+  const hullColor = exteriorSkin?.primaryHex || '#F8FAFC';
+  const accentColor = exteriorSkin?.accentHex || '#0284C7';
+  const skinMat = exteriorSkin
+    ? new THREE.MeshStandardMaterial({
+        map: exteriorSkin.fuselageTex,
+        roughness: 0.32,
+        metalness: 0.18,
+        side: THREE.DoubleSide,
+      })
+    : new THREE.MeshStandardMaterial({
+        color: hullColor,
+        roughness: 0.34,
+        metalness: 0.16,
+        side: THREE.DoubleSide,
+      });
+  const noseSkinMat = new THREE.MeshStandardMaterial({
+    color: hullColor,
+    roughness: 0.3,
+    metalness: 0.16,
+    side: THREE.DoubleSide,
+  });
+  const accentTrimMat = new THREE.MeshStandardMaterial({
+    color: accentColor,
+    roughness: 0.35,
+    metalness: 0.25,
+  });
+  const wingOuterMat = new THREE.MeshStandardMaterial({
+    color: '#E2E8F0',
+    roughness: 0.42,
+    metalness: 0.26,
+  });
+  const cowlInnerMat = new THREE.MeshStandardMaterial({
+    color: '#0F172A',
+    roughness: 0.75,
+    metalness: 0.4,
+  });
+  const bladeMetalMat = new THREE.MeshStandardMaterial({
+    color: '#94A3B8',
+    roughness: 0.22,
+    metalness: 0.88,
+  });
+  disposables.push(
+    skinMat,
+    noseSkinMat,
+    accentTrimMat,
+    wingOuterMat,
+    cowlInnerMat,
+    bladeMetalMat,
+  );
+
+  // 1) Forward Sloped Nose Radome Envelope (visible out lower windshield & exterior orbit)
+  const noseProfile: THREE.Vector2[] = [];
+  for (let i = 0; i <= 14; i++) {
+    const t = i / 14; // 0 = radome tip (-3.75m ahead), 1 = windshield base (-1.05m)
+    const r = Math.pow(Math.sin(t * (Math.PI / 2)), 0.72) * 1.62;
+    noseProfile.push(new THREE.Vector2(r, t * 2.68));
+  }
+  const radomeGeo = new THREE.LatheGeometry(noseProfile, 28);
+  radomeGeo.rotateX(-Math.PI / 2);
+  const radome = new THREE.Mesh(radomeGeo, noseSkinMat);
+  radome.position.set(0, 0.38, -1.08);
+  radome.scale.set(1.02, 0.78, 1.0);
+  exteriorShell.add(radome);
+  disposables.push(radomeGeo);
+
+  // Weather Radar Radome Cap Tip + Anti-Glare Coaming Strip ahead of windshield
+  const tipCapGeo = new THREE.SphereGeometry(0.42, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.55);
+  tipCapGeo.rotateX(-Math.PI / 2);
+  const tipCap = new THREE.Mesh(tipCapGeo, windowFrameMat);
+  tipCap.position.set(0, 0.38, -3.56);
+  tipCap.scale.set(1, 0.78, 1.15);
+  exteriorShell.add(tipCap);
+
+  const antiGlareGeo = new THREE.BoxGeometry(1.9, 0.05, 0.88);
+  const antiGlare = new THREE.Mesh(antiGlareGeo, glareMat);
+  antiGlare.position.set(0, 1.21, -1.56);
+  antiGlare.rotation.x = 0.24;
+  exteriorShell.add(antiGlare);
+  disposables.push(tipCapGeo, antiGlareGeo);
+
+  // Pitot Tubes & Static Probes along forward exterior nose cheeks
+  const pitotGeo = new THREE.CylinderGeometry(0.012, 0.014, 0.24, 6);
+  pitotGeo.rotateX(Math.PI / 2);
+  disposables.push(pitotGeo);
+  for (const sgn of [-1, 1]) {
+    const pitot = new THREE.Mesh(pitotGeo, bladeMetalMat);
+    pitot.position.set(sgn * 1.38, 0.52, -2.05);
+    exteriorShell.add(pitot);
+  }
+
+  // 2) Exterior Forward-Mid Fuselage Shell surrounding & behind flight deck with GeoFS SVG Skin!
+  // Aft section wraps full 360° behind z = 0.45 so exterior orbit looks like real cockpit nose+cabin section
+  const aftHullGeo = new THREE.CylinderGeometry(1.78, 1.84, 10.5, 28, 1, true);
+  aftHullGeo.rotateX(Math.PI / 2);
+  const aftHull = new THREE.Mesh(aftHullGeo, skinMat);
+  aftHull.position.set(0, 0.88, 5.75);
+  exteriorShell.add(aftHull);
+  disposables.push(aftHullGeo);
+
+  // Lower belly & exterior side cheeks flanking the cockpit (leaves upper windshield cutout open!)
+  const cheekShellGeo = new THREE.CylinderGeometry(
+    1.76,
+    1.78,
+    1.95,
+    28,
+    1,
+    true,
+    Math.PI * 0.34,
+    Math.PI * 1.32,
+  );
+  cheekShellGeo.rotateX(Math.PI / 2);
+  const cheekShell = new THREE.Mesh(cheekShellGeo, skinMat);
+  cheekShell.position.set(0, 0.88, -0.35);
+  exteriorShell.add(cheekShell);
+  disposables.push(cheekShellGeo);
+
+  // Upper Cockpit Crown Canopy fairing above windshield eyebrow (z = -0.82 to +0.62)
+  const crownGeo = new THREE.CylinderGeometry(
+    1.72,
+    1.78,
+    1.55,
+    24,
+    1,
+    true,
+    -Math.PI * 0.32,
+    Math.PI * 0.64,
+  );
+  crownGeo.rotateX(Math.PI / 2);
+  const crownMesh = new THREE.Mesh(crownGeo, noseSkinMat);
+  crownMesh.position.set(0, 0.94, -0.05);
+  exteriorShell.add(crownMesh);
+  disposables.push(crownGeo);
+
+  // Exterior Cockpit Aft Pressure Bulkhead + Door
+  const bulkheadGeo = new THREE.CircleGeometry(1.78, 24);
+  const bulkhead = new THREE.Mesh(bulkheadGeo, panelMat);
+  bulkhead.position.set(0, 0.88, 0.65);
+  const cockpitDoorGeo = new THREE.BoxGeometry(0.68, 1.68, 0.06);
+  const cockpitDoor = new THREE.Mesh(cockpitDoorGeo, metalMat);
+  cockpitDoor.position.set(0, 0.84, 0.63);
+  exteriorShell.add(bulkhead, cockpitDoor);
+  disposables.push(bulkheadGeo, cockpitDoorGeo);
+
+  // 3) Visible Exterior Swept Wings + Winglets + Spinning Turbofan Engines outside side windows!
+  const wingShape = new THREE.Shape();
+  wingShape.moveTo(0, 0);
+  wingShape.lineTo(13.2, 4.9);
+  wingShape.lineTo(13.2, 6.2);
+  wingShape.lineTo(0, 4.1);
+  wingShape.closePath();
+  const extWingGeo = new THREE.ExtrudeGeometry(wingShape, {
+    depth: 0.28,
+    bevelEnabled: true,
+    bevelSize: 0.04,
+    bevelThickness: 0.04,
+  });
+  extWingGeo.rotateX(Math.PI / 2);
+
+  const wingletShape = new THREE.Shape();
+  wingletShape.moveTo(0, 0);
+  wingletShape.lineTo(0.85, 1.45);
+  wingletShape.lineTo(1.45, 1.45);
+  wingletShape.lineTo(1.25, 0);
+  wingletShape.closePath();
+  const wingletGeo = new THREE.ExtrudeGeometry(wingletShape, {depth: 0.07, bevelEnabled: false});
+  wingletGeo.rotateY(-Math.PI / 2);
+
+  const cowlExtGeo = new THREE.CylinderGeometry(0.95, 0.84, 2.5, 22, 1, true);
+  cowlExtGeo.rotateX(Math.PI / 2);
+  const intakeLipGeo = new THREE.TorusGeometry(0.92, 0.08, 10, 22);
+  const fanDiscGeo = new THREE.CylinderGeometry(0.84, 0.84, 0.12, 18);
+  fanDiscGeo.rotateX(Math.PI / 2);
+  const fanBladeGeo = new THREE.BoxGeometry(0.11, 1.56, 0.03);
+  const spinnerGeo = new THREE.ConeGeometry(0.24, 0.56, 14);
+  spinnerGeo.rotateX(-Math.PI / 2);
+
+  disposables.push(
+    extWingGeo,
+    wingletGeo,
+    cowlExtGeo,
+    intakeLipGeo,
+    fanDiscGeo,
+    fanBladeGeo,
+    spinnerGeo,
+  );
+
+  for (const side of [-1, 1] as const) {
+    const wing = new THREE.Mesh(extWingGeo, wingOuterMat);
+    wing.position.set(side * 1.48, 0.08, 3.8);
+    if (side === -1) wing.scale.x = -1;
+    wing.rotation.z = side * 0.055;
+    exteriorShell.add(wing);
+
+    const wlet = new THREE.Mesh(wingletGeo, accentTrimMat);
+    wlet.position.set(side * 14.6, 0.82, 8.75);
+    wlet.rotation.z = -side * 0.16;
+    exteriorShell.add(wlet);
+
+    // Underwing Turbofan Nacelle with spinning fan assembly visible from exterior / wide seat glance
+    const nacX = side * 5.2;
+    const nacY = -0.35;
+    const nacZ = 4.4;
+    const cowl = new THREE.Mesh(cowlExtGeo, noseSkinMat);
+    cowl.position.set(nacX, nacY, nacZ);
+    const lip = new THREE.Mesh(intakeLipGeo, bladeMetalMat);
+    lip.position.set(nacX, nacY, nacZ - 1.24);
+    const coreDark = new THREE.Mesh(fanDiscGeo, cowlInnerMat);
+    coreDark.position.set(nacX, nacY, nacZ - 0.6);
+
+    const spinnerGroup = new THREE.Group();
+    spinnerGroup.position.set(nacX, nacY, nacZ - 0.92);
+    const cone = new THREE.Mesh(spinnerGeo, bladeMetalMat);
+    cone.position.z = -0.22;
+    spinnerGroup.add(cone);
+    for (let b = 0; b < 6; b++) {
+      const blade = new THREE.Mesh(fanBladeGeo, bladeMetalMat);
+      blade.rotation.z = (b * Math.PI) / 6;
+      spinnerGroup.add(blade);
+    }
+    fanBlades.push(spinnerGroup);
+    exteriorShell.add(cowl, lip, coreDark, spinnerGroup);
+  }
+
+  group.add(exteriorShell);
 
   // Outside Horizon Terrain Grid & Altitude Cloud Deck visible through windshield
   const outsideWorld = new THREE.Group();
@@ -357,6 +642,8 @@ export function buildFlightDeckCockpit(
     hudGlass,
     outsideWorld,
     cloudLayer,
+    fanBlades,
+    exteriorShell,
     dispose: () => {
       for (const d of disposables) d.dispose();
     },

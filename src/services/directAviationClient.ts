@@ -23,14 +23,37 @@ import type {
   SigmetHazard,
   TaxiwaySegment,
   TrailPoint,
+  WeatherLayersResponse,
 } from '../types/aviation';
 import {
+  applyDisplacedThresholds,
+  buildCuratedSeedSurface,
   buildOverpassAirfieldQuery,
   GLOBAL_OVERPASS_MIRRORS,
   mergeAndAlignRunways,
   parseOverpassAirfieldElements,
   type OverpassElement,
 } from '../utils/airfieldGeometry';
+import {resolveTimezoneByCoordsAndCode} from '../utils/timezone';
+
+function isDirectSurfaceVehicle(a: Record<string, unknown>, callsign: string): boolean {
+  const cat = String(a.category ?? '').toUpperCase();
+  if (/^C[0-9]$/.test(cat)) return true;
+  const typ = String(a.t ?? '').toUpperCase();
+  if (typ === 'GRND' || typ === 'GND' || typ === 'TWR' || typ === 'SERV') return true;
+  return /^(GND|TUG|OPS|FIRE|FOLLOW|SERV|VEH|TOW|CAR|TRUCK)/.test(callsign);
+}
+
+function isDirectFlaggedOrEmergency(f: LiveFlight): boolean {
+  return Boolean(
+    f.isLadd ||
+    f.isMilitary ||
+    f.isPia ||
+    f.squawk === '7700' ||
+    f.squawk === '7600' ||
+    f.squawk === '7500',
+  );
+}
 
 let staticHostingDetected = false;
 let globalAirportsPromise: Promise<AirportMarker[]> | null = null;
@@ -440,7 +463,12 @@ function parseAdsbExchangeList(
   forceFlagBits = 0,
 ): LiveFlight[] {
   return rows
-    .filter((a) => Number.isFinite(Number(a.lat)) && Number.isFinite(Number(a.lon)))
+    .filter((a) => {
+      if (!Number.isFinite(Number(a.lat)) || !Number.isFinite(Number(a.lon))) return false;
+      const icao24 = String(a.hex ?? '').toUpperCase();
+      const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
+      return !isDirectSurfaceVehicle(a, callsign);
+    })
     .map((a) => {
       const icao24 = String(a.hex ?? '').toUpperCase();
       const callsign = String(a.flight ?? a.r ?? icao24).trim().toUpperCase();
@@ -1014,29 +1042,36 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
     ]);
 
     const mergedMap = new Map<string, LiveFlight>();
-    for (const list of [fr24Flights, directAdsbFlights, openSkyFlights]) {
+    const absorb = (f: LiveFlight, enrichOnly = false) => {
+      const key = f.icao24 || f.callsign || f.id;
+      const existing = mergedMap.get(key);
+      if (!existing) {
+        if (!enrichOnly) mergedMap.set(key, f);
+        return;
+      }
+      if (!existing.origin && f.origin) existing.origin = f.origin;
+      if (!existing.destination && f.destination) existing.destination = f.destination;
+      if (!existing.squawk && f.squawk) existing.squawk = f.squawk;
+      if (!existing.registration && f.registration) existing.registration = f.registration;
+      if (!existing.flightNumber && f.flightNumber) existing.flightNumber = f.flightNumber;
+      if (!existing.airlineIcao && f.airlineIcao) existing.airlineIcao = f.airlineIcao;
+      if ((!existing.aircraftType || existing.aircraftType === 'A320') && f.aircraftType) {
+        existing.aircraftType = f.aircraftType;
+      }
+      if (!existing.fr24Id && f.fr24Id) existing.fr24Id = f.fr24Id;
+      if (f.dbFlags) existing.dbFlags = (existing.dbFlags ?? 0) | f.dbFlags;
+      if (f.isLadd) existing.isLadd = true;
+      if (f.isMilitary) existing.isMilitary = true;
+      if (f.isPia) existing.isPia = true;
+      if (!existing.ownerOperator && f.ownerOperator) existing.ownerOperator = f.ownerOperator;
+    };
+
+    for (const f of fr24Flights) absorb(f, false);
+    const fr24HasCoverage = fr24Flights.length > 0;
+    for (const list of [directAdsbFlights, openSkyFlights]) {
       for (const f of list) {
-        const key = f.icao24 || f.callsign || f.id;
-        const existing = mergedMap.get(key);
-        if (!existing) {
-          mergedMap.set(key, f);
-        } else {
-          if (!existing.origin && f.origin) existing.origin = f.origin;
-          if (!existing.destination && f.destination) existing.destination = f.destination;
-          if (!existing.squawk && f.squawk) existing.squawk = f.squawk;
-          if (!existing.registration && f.registration) existing.registration = f.registration;
-          if (!existing.flightNumber && f.flightNumber) existing.flightNumber = f.flightNumber;
-          if (!existing.airlineIcao && f.airlineIcao) existing.airlineIcao = f.airlineIcao;
-          if ((!existing.aircraftType || existing.aircraftType === 'A320') && f.aircraftType) {
-            existing.aircraftType = f.aircraftType;
-          }
-          if (!existing.fr24Id && f.fr24Id) existing.fr24Id = f.fr24Id;
-          if (f.dbFlags) existing.dbFlags = (existing.dbFlags ?? 0) | f.dbFlags;
-          if (f.isLadd) existing.isLadd = true;
-          if (f.isMilitary) existing.isMilitary = true;
-          if (f.isPia) existing.isPia = true;
-          if (!existing.ownerOperator && f.ownerOperator) existing.ownerOperator = f.ownerOperator;
-        }
+        const allowStandalone = !fr24HasCoverage || isDirectFlaggedOrEmergency(f);
+        absorb(f, !allowStandalone);
       }
     }
 
@@ -1540,14 +1575,30 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
       const apName = catalog?.name ?? dir?.name ?? `${iata || resolvedIcao} Airport`;
       const departures = (depRows ?? []).filter((r) => r.flight).map((r) => mapFr24BoardRow(r.flight!, 'departures', iata, resolvedIcao, apName));
       const arrivals = (arrRows ?? []).filter((r) => r.flight).map((r) => mapFr24BoardRow(r.flight!, 'arrivals', iata, resolvedIcao, apName));
+      const apLat = catalog?.lat ?? dir?.lat ?? 0;
+      const apLon = catalog?.lon ?? dir?.lon ?? 0;
+      const details = ((pdDep.details ?? pdArr.details) ?? {}) as Record<string, unknown>;
+      const tzObj = (details.timezone ?? {}) as Record<string, unknown>;
+      const tz = resolveTimezoneByCoordsAndCode({
+        icao: resolvedIcao,
+        iata,
+        lat: apLat,
+        lon: apLon,
+        hintTzName: tzObj.name ? String(tzObj.name) : undefined,
+        hintUtcOffsetSec: Number.isFinite(Number(tzObj.offset)) ? Number(tzObj.offset) : undefined,
+        hintAbbr: tzObj.abbr ? String(tzObj.abbr) : undefined,
+      });
       const board: AirportBoardResponse = {
         icao: resolvedIcao,
         iata,
         name: apName,
         city: catalog?.city ?? dir?.city ?? '',
         country: catalog?.country ?? dir?.country ?? '',
-        lat: catalog?.lat ?? dir?.lat ?? 0,
-        lon: catalog?.lon ?? dir?.lon ?? 0,
+        lat: apLat,
+        lon: apLon,
+        timezoneName: tz.timezoneName,
+        utcOffsetSec: tz.utcOffsetSec,
+        timezoneAbbr: tz.timezoneAbbr,
         delayIndex: computeDirectDelaySummary(departures, arrivals, pdDep, pdArr),
         arrivals,
         departures,
@@ -1613,14 +1664,25 @@ async function fetchDirectAirportBoard(params: URLSearchParams): Promise<Airport
       isDelayed: false,
       isLive: true,
     }));
+  const fbLat = catalog?.lat ?? dir?.lat ?? 0;
+  const fbLon = catalog?.lon ?? dir?.lon ?? 0;
+  const fbTz = resolveTimezoneByCoordsAndCode({
+    icao: resolvedIcao,
+    iata,
+    lat: fbLat,
+    lon: fbLon,
+  });
   return {
     icao: resolvedIcao,
     iata,
     name: catalog?.name ?? dir?.name ?? `${iata || resolvedIcao} Airport`,
     city: catalog?.city ?? dir?.city ?? '',
     country: catalog?.country ?? dir?.country ?? '',
-    lat: catalog?.lat ?? dir?.lat ?? 0,
-    lon: catalog?.lon ?? dir?.lon ?? 0,
+    lat: fbLat,
+    lon: fbLon,
+    timezoneName: fbTz.timezoneName,
+    utcOffsetSec: fbTz.utcOffsetSec,
+    timezoneAbbr: fbTz.timezoneAbbr,
     delayIndex: computeDirectDelaySummary(departures, arrivals, null, null),
     arrivals,
     departures,
@@ -1719,9 +1781,17 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     }
   })();
 
-  const aipMapPromise = getBrowserGlobalRunways();
-  await Promise.all([overpassPromise, aipMapPromise]);
-  const aipMap = await aipMapPromise;
+  const aipMapPromise = getBrowserGlobalRunways().catch(() => new Map<string, DirectAipRunwayEntry[]>());
+  await overpassPromise;
+  const aipMap =
+    osmRunways.length > 0
+      ? new Map<string, DirectAipRunwayEntry[]>()
+      : await Promise.race([
+          aipMapPromise,
+          new Promise<Map<string, DirectAipRunwayEntry[]>>((resolve) =>
+            setTimeout(() => resolve(new Map()), 900),
+          ),
+        ]);
 
   const lookupIdents = [catalog?.icao, icao].filter(Boolean) as string[];
   let aipRunways: DirectAipRunwayEntry[] = [];
@@ -1733,7 +1803,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     }
   }
 
-  const runways = mergeAndAlignRunways(
+  let runways = mergeAndAlignRunways(
     osmRunways,
     aipRunways.map((r) => ({
       ref: r.leIdent && r.heIdent ? `${r.leIdent}/${r.heIdent}` : r.leIdent || r.heIdent || undefined,
@@ -1745,25 +1815,32 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     })),
   );
 
-  if (runways.length === 0 && catalog) {
-    catalog.runways.forEach((r, idx) => {
-      const rad = (r.headingDeg * Math.PI) / 180;
-      const halfLenDeg = (r.lengthFt / 6076 / 60) * 0.5;
-      const cosLat = Math.cos((catalog.lat * Math.PI) / 180);
-      const offsetLon = (idx - (catalog.runways.length - 1) / 2) * 0.012;
-      const dLat = Math.cos(rad) * halfLenDeg;
-      const dLon = (Math.sin(rad) * halfLenDeg) / cosLat;
-      const p1: [number, number] = [catalog.lat - dLat, catalog.lon + offsetLon - dLon];
-      const p2: [number, number] = [catalog.lat + dLat, catalog.lon + offsetLon + dLon];
-      runways.push({
-        id: `cat-rwy-${r.ident}`,
-        kind: 'runway',
-        ref: r.ident,
-        widthM: 45,
-        coords: [p1, p2],
+  if (runways.length === 0) {
+    const curated = buildCuratedSeedSurface(catalog?.icao ?? icao);
+    if (curated.length > 0) {
+      runways = curated;
+    } else if (catalog) {
+      catalog.runways.forEach((r, idx) => {
+        const rad = (r.headingDeg * Math.PI) / 180;
+        const halfLenDeg = (r.lengthFt / 6076 / 60) * 0.5;
+        const cosLat = Math.cos((catalog.lat * Math.PI) / 180);
+        const offsetLon = (idx - (catalog.runways.length - 1) / 2) * 0.0024;
+        const dLat = Math.cos(rad) * halfLenDeg;
+        const dLon = (Math.sin(rad) * halfLenDeg) / cosLat;
+        const p1: [number, number] = [catalog.lat - dLat, catalog.lon + offsetLon - dLon];
+        const p2: [number, number] = [catalog.lat + dLat, catalog.lon + offsetLon + dLon];
+        runways.push({
+          id: `cat-rwy-${r.ident}`,
+          kind: 'runway',
+          ref: r.ident,
+          widthM: 45,
+          coords: [p1, p2],
+        });
       });
-    });
+    }
   }
+
+  runways = applyDisplacedThresholds(catalog?.icao ?? icao, runways);
 
   if (taxiways.length === 0 && runways.length > 0) {
     runways.forEach((rw, idx) => {
@@ -2261,6 +2338,13 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
   }
   if (path === '/api/weather') {
     return fetchDirectWeather(params);
+  }
+  if (path === '/api/weather/layers') {
+    const empty: WeatherLayersResponse = {windGrid: [], markers: [], sigwxPolygons: [], fogZones: [], fetchedAt: Date.now()};
+    return empty;
+  }
+  if (path === '/api/nav/timezones') {
+    return {timezones: []};
   }
   if (path === '/api/disruptions') return fetchDirectDisruptions();
   if (path === '/api/acars') return {messages: [], sourceStatus: 'Static CORS Direct Mode', cached: false};

@@ -3,6 +3,7 @@ import {Plane, Radio, RefreshCw, Search} from 'lucide-react';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {AIRPORT_CATALOG, resolveAirlineLivery, type AirportSpec} from '../data/aviationCatalog';
 import {apiFetchJson} from '../services/directAviationClient';
+import {applyDisplacedThresholds} from '../utils/airfieldGeometry';
 import {buildFr24AircraftSvg, resolveFr24ModelClass} from './aircraftIcons';
 import type {
   AcarsMessage,
@@ -388,11 +389,13 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
       }
     }
 
-    // 5. Luminous Runways + Dashed Approach + Upright Threshold Numbers
-    const runways =
+    // 5. Luminous Runways + KSFO Emerald Green Overlay + Displaced Thresholds + Upright Threshold Numbers
+    const rawRunways =
       surfaceData && surfaceData.runways.length > 0
         ? surfaceData.runways
         : segments.filter((s) => s.kind === 'runway');
+    const runways = applyDisplacedThresholds(selectedIcao, rawRunways);
+    const isSfo = selectedIcao.toUpperCase() === 'KSFO';
 
     for (const rwy of runways) {
       if (rwy.coords.length < 2) continue;
@@ -401,36 +404,40 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
       const brg = calcBearing(pA, pB);
       const revBrg = (brg + 180) % 360;
       const [aLbl, bLbl] = deriveEnds(rwy.ref, brg);
+      const dispA = Math.max(0, rwy.dispStartM ?? 0);
+      const dispB = Math.max(0, rwy.dispEndM ?? 0);
+      const threshA: [number, number] = dispA > 15 ? offsetM(pA[0], pA[1], brg, dispA, 0) : pA;
+      const threshB: [number, number] = dispB > 15 ? offsetM(pB[0], pB[1], revBrg, dispB, 0) : pB;
 
       for (const [pt, hdg] of [
-        [pA, brg] as const,
-        [pB, revBrg] as const,
+        [threshA, brg] as const,
+        [threshB, revBrg] as const,
       ]) {
         const outBrg = (hdg + 180) % 360;
         const appEnd = offsetM(pt[0], pt[1], outBrg, 2800, 0);
         const farEnd = offsetM(pt[0], pt[1], outBrg, 8500, 0);
         L.polyline([pt, appEnd], {
-          color: 'rgba(255, 255, 255, 0.34)',
+          color: isSfo ? 'rgba(16, 185, 129, 0.42)' : 'rgba(255, 255, 255, 0.34)',
           weight: 5,
           opacity: 0.9,
           interactive: false,
         }).addTo(layer);
         L.polyline([pt, appEnd], {
-          color: '#FFFFFF',
+          color: isSfo ? '#34D399' : '#FFFFFF',
           weight: 1.8,
           opacity: 0.95,
           interactive: false,
         }).addTo(layer);
         L.polyline([appEnd, farEnd], {
-          color: 'rgba(248, 250, 252, 0.52)',
+          color: isSfo ? 'rgba(110, 231, 183, 0.58)' : 'rgba(248, 250, 252, 0.52)',
           weight: 1.3,
           dashArray: '6 6',
           interactive: false,
         }).addTo(layer);
         L.circleMarker(pt, {
           radius: 3.4,
-          color: '#ef4444',
-          fillColor: '#f87171',
+          color: '#22c55e',
+          fillColor: '#4ade80',
           fillOpacity: 0.95,
           weight: 1,
           interactive: false,
@@ -438,26 +445,49 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
       }
 
       L.polyline(rwy.coords, {
-        color: 'rgba(255,255,255,0.28)',
+        color: isSfo ? 'rgba(16,185,129,0.52)' : 'rgba(255,255,255,0.28)',
         weight: 16,
         opacity: 0.95,
         lineCap: 'butt',
         interactive: false,
       }).addTo(layer);
       L.polyline(rwy.coords, {
-        color: '#060910',
+        color: isSfo ? '#064E3B' : '#060910',
         weight: 11,
         opacity: 1,
         lineCap: 'butt',
         interactive: false,
       }).addTo(layer);
-      L.polyline(rwy.coords, {
-        color: '#FFFFFF',
+      L.polyline([threshA, threshB], {
+        color: isSfo ? '#A7F3D0' : '#FFFFFF',
         weight: 1.8,
         dashArray: '8 8',
         opacity: 0.95,
         interactive: false,
       }).addTo(layer);
+
+      // Displaced threshold yellow lead-in + transverse white threshold bar
+      for (const [endPt, threshPt, hdg, disp] of [
+        [pA, threshA, brg, dispA] as const,
+        [pB, threshB, revBrg, dispB] as const,
+      ]) {
+        if (disp < 15) continue;
+        L.polyline([endPt, threshPt], {
+          color: '#FACC15',
+          weight: 2.2,
+          dashArray: '4 5',
+          opacity: 0.9,
+          interactive: false,
+        }).addTo(layer);
+        const barL = offsetM(threshPt[0], threshPt[1], hdg, 0, -22);
+        const barR = offsetM(threshPt[0], threshPt[1], hdg, 0, 22);
+        L.polyline([barL, barR], {
+          color: isSfo ? '#A7F3D0' : '#FFFFFF',
+          weight: 2.6,
+          opacity: 0.98,
+          interactive: false,
+        }).addTo(layer);
+      }
 
       const drawNum = (pt: [number, number], endBrg: number, numLbl: string) => {
         const numPos = offsetM(pt[0], pt[1], endBrg, 88, 0);
@@ -469,14 +499,16 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
             className: 'skydeck-runway-num',
             iconSize: [34, 16],
             iconAnchor: [17, 8],
-            html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:#FFFFFF;text-shadow:0 0 4px #000,0 1px 4px #000;transform:rotate(${Math.round(uprightDeg)}deg);">${numLbl}</span>`,
+            html: `<span style="display:inline-block;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;color:${
+              isSfo ? '#D1FAE5' : '#FFFFFF'
+            };text-shadow:0 0 4px #000,0 1px 4px #000;transform:rotate(${Math.round(uprightDeg)}deg);">${numLbl}</span>`,
           }),
         }).addTo(layer);
       };
-      drawNum(pA, brg, aLbl);
-      drawNum(pB, revBrg, bLbl);
+      drawNum(threshA, brg, aLbl);
+      drawNum(threshB, revBrg, bLbl);
     }
-  }, [segments, surfaceData, theme]);
+  }, [segments, surfaceData, selectedIcao, theme]);
 
   useEffect(() => {
     const layer = taxiPlaneRef.current;
