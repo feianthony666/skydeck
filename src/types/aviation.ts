@@ -54,7 +54,7 @@ export interface AircraftPhoto {
   thumbUrl?: string;
   photographer: string;
   link: string;
-  source: 'planespotters.net' | 'wikimedia' | 'airport-data';
+  source: 'planespotters.net';
   width?: number;
   height?: number;
 }
@@ -70,6 +70,18 @@ export interface FlightDetail {
   manufacturer?: string;
   registeredOwner?: string;
   aircraftAge?: string;
+  serialNumber?: string;
+  category?: string;
+  countryOfReg?: string;
+  altBaroFt?: number;
+  altGeomFt?: number;
+  verticalRateFpm?: number;
+  trackDeg?: number;
+  groundSpeedKts?: number;
+  tasKts?: number;
+  iasKts?: number;
+  mach?: number;
+  firUir?: string;
   airlineName: string;
   airlineIcao: string;
   airlineLogo?: string;
@@ -579,12 +591,19 @@ export interface WeatherLayersResponse {
 }
 
 export interface LiveAtcStation {
+  id: string;
   mount: string;
   icao: string;
-  airportName: string;
+  iata: string;
+  name: string;
   facility: string;
-  freqMhz: string;
-  streamUrl: string;
+  freq: string;
+  country: string;
+  lat: number;
+  lon: number;
+  airportName?: string;
+  freqMhz?: string;
+  streamUrl?: string;
 }
 
 export interface PlaneLabelSettings {
@@ -627,8 +646,9 @@ export interface WeatherOverlaySettings {
 
 export interface RadarSettings {
   planeSize: number;
-  basemapStyle: 'auto' | 'terrain' | 'terrain-night' | 'light' | 'dark' | 'osm' | 'satellite';
+  basemapStyle: 'auto' | 'maptiler-light' | 'maptiler-dark';
   flightPathMode: 'all' | 'selected' | 'off';
+  aircraft3DStyle?: 'livery' | 'airnav-yellow';
   locateMeEnabled: boolean;
   timeDisplayMode: 'airport' | 'local' | 'utc';
   showPlaneLabels: boolean;
@@ -656,8 +676,6 @@ export interface RadarSettings {
   apiBaseUrl?: string;
 }
 
-export type AppView = 'radar' | 'deck' | 'taxi' | 'planner';
-export type LayoutMode = 'split' | 'radar' | 'deck';
-export type ThreeViewMode = 'cockpit' | 'exterior' | 'taxi' | 'pan';
+export type AppView = 'radar' | 'taxi' | 'planner';
 export type CockpitCameraPreset = 'captain' | 'hud' | 'overhead' | 'pedestal';
 

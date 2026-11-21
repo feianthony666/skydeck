@@ -1,4 +1,5 @@
 import express from 'express';
+import {gunzipSync, inflateRawSync} from 'node:zlib';
 import {XMLParser} from 'fast-xml-parser';
 import {AIRPORT_CATALOG} from '../src/data/aviationCatalog';
 import type {
@@ -96,6 +97,8 @@ let adsbMilFeedCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: n
 let adsbLaddFeedCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let adsbLolAllCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let adsbFiAllCache: {ts: number; aircraft: Array<Record<string, unknown>>; nowSec: number} | null = null;
+const openSkyMetaCache = new Map<string, {ts: number; data: Record<string, unknown> | null}>();
+const hgtCellCache = new Map<string, {ts: number; samples: Int16Array | null}>();
 let globalAirportsCache: {ts: number; airports: AirportMarker[]} | null = null;
 interface AipRunwayEntry {
   airportIdent: string;
@@ -328,55 +331,21 @@ async function safeJson<T>(res: Response | null): Promise<T | null> {
   }
 }
 
+const planespottersMetaCache = new Map<
+  string,
+  {ts: number; msn?: string; age?: string}
+>();
+
 async function fetchPlanespottersPhoto(icao24: string, reg: string): Promise<AircraftPhoto | null> {
   const key = `${icao24.toUpperCase()}-${reg.toUpperCase()}`;
   const cached = photoCache.get(key);
   if (cached && Date.now() - cached.ts < 86400000) return cached.photo;
 
-  const normReg = reg.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-
-  const tryWikimedia = async (): Promise<AircraftPhoto | null> => {
-    if (normReg.length < 4) return null;
-    try {
-      const wmUrl = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(`"${reg}"`)}&gsrlimit=6&prop=imageinfo&iiprop=url|size&iiurlwidth=1280&format=json&origin=*`;
-      const r = await fetch(wmUrl, {
-        headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-        signal: AbortSignal.timeout(2600),
-      });
-      const json = await safeJson<{
-        query?: {pages?: Record<string, {title?: string; imageinfo?: Array<Record<string, unknown>>}>};
-      }>(r);
-      const pages = Object.values(json?.query?.pages ?? {});
-      for (const page of pages) {
-        const title = String(page.title ?? '');
-        if (!/\.(jpe?g|png|webp)$/i.test(title)) continue;
-        const normTitle = title.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-        if (!normTitle.includes(normReg)) continue;
-        const info = page.imageinfo?.[0];
-        const imgUrl = String(info?.thumburl ?? info?.url ?? '');
-        if (imgUrl) {
-          return {
-            url: imgUrl,
-            thumbUrl: imgUrl,
-            photographer: 'Wikimedia Commons contributor',
-            link: String(info?.descriptionurl ?? `https://commons.wikimedia.org/wiki/${encodeURIComponent(title)}`),
-            source: 'wikimedia',
-            width: Number(info?.thumbwidth ?? info?.width ?? 1280),
-            height: Number(info?.thumbheight ?? info?.height ?? 850),
-          };
-        }
-      }
-    } catch {
-      // fallback below
-    }
-    return null;
-  };
-
   const tryPlanespotters = async (url: string): Promise<AircraftPhoto | null> => {
     try {
       const r = await fetch(url, {
         headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-        signal: AbortSignal.timeout(2600),
+        signal: AbortSignal.timeout(2800),
       });
       const json = await safeJson<{
         photos?: Array<{
@@ -406,38 +375,245 @@ async function fetchPlanespottersPhoto(icao24: string, reg: string): Promise<Air
     return null;
   };
 
-  const [wmPhoto, psHexPhoto] = await Promise.all([
-    tryWikimedia(),
-    icao24 ? tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`) : Promise.resolve(null),
-  ]);
+  let photo = icao24
+    ? await tryPlanespotters(`https://api.planespotters.net/pub/photos/hex/${encodeURIComponent(icao24.toUpperCase())}`)
+    : null;
 
-  let photo: AircraftPhoto | null = wmPhoto ?? psHexPhoto;
   if (!photo && reg) {
-    photo = await tryPlanespotters(`https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}`);
-  }
-  if (!photo && icao24) {
-    try {
-      const r = await fetch(`https://airport-data.com/api/ac_thumb.json?m=${encodeURIComponent(icao24.toUpperCase())}&n=1`, {
-        headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
-        signal: AbortSignal.timeout(2200),
-      });
-      const json = await safeJson<{data?: Array<{image?: string; photographer?: string; link?: string}>}>(r);
-      const item = json?.data?.[0];
-      if (item?.image && item.link) {
-        photo = {
-          url: item.image,
-          photographer: item.photographer || 'Airport-Data contributor',
-          link: item.link,
-          source: 'airport-data',
-        };
-      }
-    } catch {
-      // ignore
-    }
+    photo = await tryPlanespotters(
+      `https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg.toUpperCase())}`,
+    );
   }
 
   photoCache.set(key, {ts: Date.now(), photo});
   return photo;
+}
+
+function parsePlanespottersAirframeHtml(html: string): {msn?: string; age?: string} {
+  const clean = html.replace(/\s+/g, ' ');
+  let msn: string | undefined;
+  let age: string | undefined;
+
+  const msnMatches = [
+    clean.match(/MSN<\/t[hd]>\s*<td[^>]*>\s*([A-Z0-9-]{2,16})\s*<\/td>/i),
+    clean.match(/Serial Number\s*(?:\(MSN\))?[^<]{0,40}<[^>]*>\s*([A-Z0-9-]{2,16})/i),
+    clean.match(/\/airframe\/[a-z0-9-]+-([a-z0-9]{3,10})\//i),
+  ];
+  for (const m of msnMatches) {
+    const val = m?.[1]?.trim();
+    if (val && val.length >= 2 && val !== '-' && val.toUpperCase() !== 'UNKNOWN') {
+      msn = val;
+      break;
+    }
+  }
+
+  const ageMatches = [
+    clean.match(/(?:Airframe\s+)?Age<\/t[hd]>\s*<td[^>]*>\s*([^<]{2,32})\s*<\/td>/i),
+    clean.match(/>\s*(\d+(?:\.\d+)?\s*(?:Years?|yrs?))\s*</i),
+  ];
+  for (const m of ageMatches) {
+    const val = m?.[1]?.trim();
+    if (val && /\d/.test(val)) {
+      age = val.replace(/\bYears?\b/i, 'yrs');
+      break;
+    }
+  }
+
+  if (!age) {
+    const dateMatch =
+      clean.match(/(?:First Flight|Delivered|Built|Rollout)[^<]{0,40}<[^>]*>\s*([^<]{4,24})/i) ??
+      clean.match(/\b((?:19|20)\d\d)-\d{2}-\d{2}\b/);
+    const yrMatch = dateMatch?.[1]?.match(/\b((?:19|20)\d\d)\b/);
+    if (yrMatch) {
+      const yrs = Math.max(0, new Date().getUTCFullYear() - Number(yrMatch[1]));
+      age = `${yrs} yrs (${yrMatch[1]})`;
+    }
+  }
+
+  return {msn, age};
+}
+
+interface Tar1090AirframeRow {
+  reg: string;
+  typecode: string;
+  model: string;
+  year: string;
+  owner: string;
+}
+
+let tar1090DbMap = new Map<string, Tar1090AirframeRow>();
+let tar1090DbLoadedAt = 0;
+let tar1090DbLoading: Promise<void> | null = null;
+
+async function ensureTar1090Db(): Promise<void> {
+  if (tar1090DbMap.size > 0 && Date.now() - tar1090DbLoadedAt < 86400_000) return;
+  if (tar1090DbLoading) {
+    await Promise.race([
+      tar1090DbLoading,
+      new Promise<void>((r) => setTimeout(r, 1500)),
+    ]);
+    return;
+  }
+  tar1090DbLoading = (async () => {
+    try {
+      const r = await fetch(
+        'https://raw.githubusercontent.com/wiedehopf/tar1090-db/csv/aircraft.csv.gz',
+        {headers: {'User-Agent': API_USER_AGENT}, signal: AbortSignal.timeout(12000)},
+      );
+      if (!r.ok) return;
+      const txt = gunzipSync(Buffer.from(await r.arrayBuffer())).toString('utf8');
+      const next = new Map<string, Tar1090AirframeRow>();
+      const lines = txt.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        const p = line.split(';');
+        const hex = (p[0] || '').trim().toUpperCase();
+        if (hex.length < 4) continue;
+        next.set(hex, {
+          reg: (p[1] || '').trim(),
+          typecode: (p[2] || '').trim(),
+          model: (p[4] || '').trim(),
+          year: (p[5] || '').trim(),
+          owner: (p[6] || '').trim(),
+        });
+      }
+      if (next.size > 10000) {
+        tar1090DbMap = next;
+        tar1090DbLoadedAt = Date.now();
+      }
+    } catch {
+      // keep existing cache if refresh fails
+    } finally {
+      tar1090DbLoading = null;
+    }
+  })();
+
+  await Promise.race([
+    tar1090DbLoading,
+    new Promise<void>((r) => setTimeout(r, 1500)),
+  ]);
+}
+
+async function fetchPlanespottersAirframeMeta(
+  icao24: string,
+  reg: string,
+): Promise<{msn?: string; age?: string; reg?: string; model?: string; owner?: string}> {
+  const cleanHex = icao24.trim().toUpperCase();
+  const cleanReg = reg.trim().toUpperCase();
+  const key = `${cleanHex}|${cleanReg}`;
+  if (!cleanHex && !cleanReg) return {};
+
+  const cached = planespottersMetaCache.get(key);
+  if (cached && Date.now() - cached.ts < 86400_000 && (cached.msn || cached.age)) {
+    return {msn: cached.msn, age: cached.age};
+  }
+
+  let msn: string | undefined;
+  let age: string | undefined;
+  let dbReg: string | undefined;
+  let dbModel: string | undefined;
+  let dbOwner: string | undefined;
+
+  // 1. Global tar1090-db (647k aircraft, 333k+ with exact build year)
+  await ensureTar1090Db();
+  const dbHit = cleanHex ? tar1090DbMap.get(cleanHex) : undefined;
+  if (dbHit) {
+    dbReg = dbHit.reg || undefined;
+    dbModel = dbHit.model || undefined;
+    dbOwner = dbHit.owner || undefined;
+    if (/^(19|20)\d{2}$/.test(dbHit.year)) {
+      const yr = Number(dbHit.year);
+      const yrs = Math.max(0, new Date().getUTCFullYear() - yr);
+      age = `${yrs} yrs (${yr})`;
+    }
+  }
+
+  const effectiveReg = (cleanReg || dbReg || '').toUpperCase();
+
+  // 2. FAA Registry for N-numbers (fast ~480ms, gives exact MSN Serial Number + Mfr Year)
+  if (/^N[1-9][A-Z0-9]{0,4}$/.test(effectiveReg)) {
+    try {
+      const nNum = effectiveReg.slice(1);
+      const r = await fetch(
+        `https://registry.faa.gov/AircraftInquiry/Search/NNumberResult?nNumberTxt=${encodeURIComponent(nNum)}`,
+        {
+          headers: {
+            ...BROWSER_HEADERS,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(2600),
+        },
+      );
+      if (r.ok) {
+        const html = await r.text();
+        const faaSerial = html
+          .match(/data-label="Serial Number"[^>]*>\s*([^<\s][^<]*?)\s*<\/td>/i)?.[1]
+          ?.trim();
+        const faaYear = html
+          .match(/data-label="Mfr Year"[^>]*>\s*((?:19|20)\d{2})\s*<\/td>/i)?.[1]
+          ?.trim();
+        if (faaSerial && !/^(none|unknown|n\/a|-)$/i.test(faaSerial)) {
+          msn = faaSerial;
+        }
+        if (faaYear) {
+          const yr = Number(faaYear);
+          const yrs = Math.max(0, new Date().getUTCFullYear() - yr);
+          age = `${yrs} yrs (${yr})`;
+        }
+      }
+    } catch {
+      // ignore timeout
+    }
+  }
+
+  // 3. Planespotters HTML fallback when non-US airframe still lacks MSN or Age
+  const tryFetchHtml = async (url: string) => {
+    try {
+      const r = await fetch(url, {
+        headers: {
+          ...BROWSER_HEADERS,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          Referer: 'https://www.planespotters.net/',
+        },
+        signal: AbortSignal.timeout(2200),
+      });
+      if (!r.ok) return '';
+      return await r.text();
+    } catch {
+      return '';
+    }
+  };
+
+  if ((!msn || !age) && cleanHex.length >= 4) {
+    const html = await tryFetchHtml(
+      `https://www.planespotters.net/hex/${encodeURIComponent(cleanHex)}`,
+    );
+    if (html && !/Just a moment|cf-browser-verification/i.test(html)) {
+      const parsed = parsePlanespottersAirframeHtml(html);
+      msn = msn || parsed.msn;
+      age = age || parsed.age;
+
+      if (!msn || !age) {
+        const frameRel = html.match(/href="(\/airframe\/[^"]+)"/i)?.[1];
+        if (frameRel) {
+          const frameHtml = await tryFetchHtml(`https://www.planespotters.net${frameRel}`);
+          if (frameHtml) {
+            const p2 = parsePlanespottersAirframeHtml(frameHtml);
+            msn = msn || p2.msn;
+            age = age || p2.age;
+          }
+        }
+      }
+    }
+  }
+
+  if (planespottersMetaCache.size > 1500) {
+    const oldest = planespottersMetaCache.keys().next().value;
+    if (oldest) planespottersMetaCache.delete(oldest);
+  }
+  planespottersMetaCache.set(key, {ts: Date.now(), msn, age});
+  return {msn, age, reg: dbReg, model: dbModel, owner: dbOwner};
 }
 
 async function fetchHexDbAircraft(icao24: string): Promise<Record<string, string> | null> {
@@ -1490,7 +1666,7 @@ async function fetchOpenSky(
     const nowSec = json.time ?? Math.floor(Date.now() / 1000);
     const flights: LiveFlight[] = (json.states ?? [])
       .filter((s) => Number.isFinite(Number(s[6])) && Number.isFinite(Number(s[5])))
-      .slice(0, 1200)
+      .slice(0, 8000)
       .map((s) => {
         const icao24 = String(s[0] ?? '').toUpperCase();
         const callsign = String(s[1] ?? icao24).trim().toUpperCase();
@@ -1957,7 +2133,28 @@ export function createApiRouter(): express.Router {
           .catch(() => null)
       : Promise.resolve(null);
 
-    const [pbJson, listJson, adsbdbJson, adsbJson, adsbFiJson, photo, hexDb] = await Promise.all([
+    const fetchOpenSkyMeta = async (hex: string): Promise<Record<string, unknown> | null> => {
+      if (!hex || hex.length < 4) return null;
+      const hit = openSkyMetaCache.get(hex);
+      if (hit && Date.now() - hit.ts < 86400_000) return hit.data;
+      try {
+        const r = await fetch(`https://opensky-network.org/api/metadata/aircraft/icao/${encodeURIComponent(hex)}`, {
+          headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'},
+          signal: AbortSignal.timeout(2200),
+        });
+        const j = r.ok ? ((await r.json()) as Record<string, unknown>) : null;
+        if (openSkyMetaCache.size > 2000) {
+          const oldest = openSkyMetaCache.keys().next().value;
+          if (oldest) openSkyMetaCache.delete(oldest);
+        }
+        openSkyMetaCache.set(hex, {ts: Date.now(), data: j});
+        return j;
+      } catch {
+        return null;
+      }
+    };
+
+    const [pbJson, listJson, adsbdbJson, adsbJson, adsbFiJson, photo, hexDb, openSkyMeta, atcBoundaries, psMeta] = await Promise.all([
       playbackPromise,
       flightListPromise,
       adsbdbPromise,
@@ -1965,6 +2162,9 @@ export function createApiRouter(): express.Router {
       adsbFiHexPromise,
       photoPromise,
       hexDbPromise,
+      fetchOpenSkyMeta(icao24),
+      getAtcBoundaries().catch(() => []),
+      fetchPlanespottersAirframeMeta(icao24, knownReg).catch(() => ({})),
     ]);
 
     const pbFlight = pbJson?.result?.response?.data?.flight;
@@ -2079,11 +2279,155 @@ export function createApiRouter(): express.Router {
     const bestTrail = playbackTrail.length >= recordedTrail.length ? playbackTrail : recordedTrail;
     const resolvedReg = String(pbAcIdent.registration ?? listAc.registration ?? adsbMeta?.r ?? hexDb?.Registration ?? knownReg);
     const ageText =
-      listAc.age && typeof listAc.age === 'object' && (listAc.age as Record<string, unknown>).availability === false
+      (psMeta && 'age' in psMeta ? psMeta.age : undefined) ||
+      (listAc.age && typeof listAc.age === 'object' && (listAc.age as Record<string, unknown>).availability === false
         ? undefined
         : typeof listAc.age === 'string' || typeof listAc.age === 'number'
           ? String(listAc.age)
-          : undefined;
+          : openSkyMeta?.built
+            ? `${Math.max(0, new Date().getUTCFullYear() - Number(String(openSkyMeta.built).slice(0, 4)))} yrs`
+            : undefined);
+
+    const acCode = String(
+      pbAcModel.code ?? adsbMeta?.t ?? hexDb?.ICAOTypeCode ?? openSkyMeta?.typecode ?? cachedFlight?.aircraftType ?? '',
+    ).toUpperCase();
+    const serialNumber =
+      String(
+        (psMeta && 'msn' in psMeta ? psMeta.msn : undefined) ??
+          (listAc.msn as string) ??
+          (pbAcIdent.serialNo as string) ??
+          (openSkyMeta?.serialnumber as string) ??
+          (hexDb?.SerialNumber as string) ??
+          '',
+      ).trim() || undefined;
+
+    const adsbCatCode = String(adsbMeta?.category ?? openSkyMeta?.categoryDescription ?? '').toUpperCase();
+    const derivedCategory = (() => {
+      if (adsbCatCode === 'A7' || acCode.startsWith('EC') || acCode.startsWith('H60') || acCode === 'R44' || acCode === 'B06' || acCode === 'S76') {
+        return 'Helicopter';
+      }
+      if (cachedFlight?.isMilitary || /C17|C130|KC135|KC46|F16|F15|F35|F22|P8|E3|B52|TYPH|A400/.test(acCode)) {
+        return 'Military';
+      }
+      if (/F$|FR|74F|77F|76F|MD11|A306/.test(acCode) || /CARGO|FREIGHT|FEDEX|UPS|DHL|ATLAS/.test(String(pbAirline.name ?? cachedFlight?.airlineName ?? '').toUpperCase())) {
+        return 'Cargo';
+      }
+      if (/GLEX|GLF|GL7T|C56X|C680|CL35|CL60|E55P|FA7X|FA8X|PC12|PC24|LJ|HDJT/.test(acCode)) {
+        return 'Business Jet';
+      }
+      if (adsbCatCode === 'A5') return 'Heavy Passenger';
+      if (adsbCatCode === 'A4') return 'High Vortex Large';
+      if (adsbCatCode === 'A3' || acCode) return 'Passenger';
+      if (adsbCatCode === 'A2') return 'Regional / Small';
+      if (adsbCatCode === 'A1') return 'Light Aircraft';
+      return 'Passenger';
+    })();
+
+    const countryFromReg = (reg: string): string | undefined => {
+      const r = reg.toUpperCase();
+      if (/^N[0-9]/.test(r)) return 'United States';
+      if (/^C-/.test(r)) return 'Canada';
+      if (/^G-/.test(r)) return 'United Kingdom';
+      if (/^D-/.test(r)) return 'Germany';
+      if (/^F-/.test(r)) return 'France';
+      if (/^B-/.test(r)) return 'China / Taiwan';
+      if (/^JA/.test(r)) return 'Japan';
+      if (/^HL/.test(r)) return 'South Korea';
+      if (/^VH-/.test(r)) return 'Australia';
+      if (/^ZK-/.test(r)) return 'New Zealand';
+      if (/^VT-/.test(r)) return 'India';
+      if (/^A6-/.test(r)) return 'United Arab Emirates';
+      if (/^A7-/.test(r)) return 'Qatar';
+      if (/^9V-/.test(r)) return 'Singapore';
+      if (/^TC-/.test(r)) return 'Turkey';
+      if (/^PH-/.test(r)) return 'Netherlands';
+      if (/^HB-/.test(r)) return 'Switzerland';
+      if (/^EI-/.test(r)) return 'Ireland';
+      if (/^EC-/.test(r)) return 'Spain';
+      if (/^I-/.test(r)) return 'Italy';
+      if (/^SE-/.test(r)) return 'Sweden';
+      if (/^LN-/.test(r)) return 'Norway';
+      if (/^OY-/.test(r)) return 'Denmark';
+      if (/^OH-/.test(r)) return 'Finland';
+      if (/^SP-/.test(r)) return 'Poland';
+      if (/^PR-|^PP-|^PT-/.test(r)) return 'Brazil';
+      if (/^XA-|^XB-|^XC-/.test(r)) return 'Mexico';
+      if (/^9M-/.test(r)) return 'Malaysia';
+      if (/^HS-/.test(r)) return 'Thailand';
+      if (/^PK-/.test(r)) return 'Indonesia';
+      if (/^ZS-/.test(r)) return 'South Africa';
+      if (/^HZ-/.test(r)) return 'Saudi Arabia';
+      if (/^4X-/.test(r)) return 'Israel';
+      return undefined;
+    };
+
+    const countryOfReg =
+      String((pbAcIdent.country as string) ?? (openSkyMeta?.country as string) ?? '').trim() ||
+      countryFromReg(resolvedReg);
+
+    const rawBaro = adsbMeta?.alt_baro;
+    const altBaroFt =
+      rawBaro === 'ground'
+        ? 0
+        : Number.isFinite(Number(rawBaro))
+          ? Math.round(Number(rawBaro))
+          : cachedFlight?.altitudeFt;
+    const altGeomFt = Number.isFinite(Number(adsbMeta?.alt_geom))
+      ? Math.round(Number(adsbMeta?.alt_geom))
+      : altBaroFt !== undefined && altBaroFt > 0
+        ? Math.round(altBaroFt + 280)
+        : altBaroFt;
+    const verticalRateFpm = Number.isFinite(Number(adsbMeta?.baro_rate ?? adsbMeta?.geom_rate))
+      ? Math.round(Number(adsbMeta?.baro_rate ?? adsbMeta?.geom_rate))
+      : cachedFlight?.verticalRateFpm;
+    const trackDeg = Number.isFinite(Number(adsbMeta?.track))
+      ? Math.round(Number(adsbMeta?.track))
+      : cachedFlight?.trueTrackDeg;
+    const groundSpeedKts = Number.isFinite(Number(adsbMeta?.gs))
+      ? Math.round(Number(adsbMeta?.gs))
+      : cachedFlight?.groundSpeedKts;
+
+    const altM = Math.max(0, (altBaroFt ?? 0) * 0.3048);
+    const tempK = Math.max(216.65, 288.15 - 0.0065 * Math.min(11000, altM));
+    const speedOfSoundKts = 661.47 * Math.sqrt(tempK / 288.15);
+    const densityRatio = Math.pow(tempK / 288.15, 4.256) * (288.15 / tempK);
+
+    const tasKts = Number.isFinite(Number(adsbMeta?.tas))
+      ? Math.round(Number(adsbMeta?.tas))
+      : groundSpeedKts !== undefined
+        ? Math.round(groundSpeedKts)
+        : undefined;
+    const iasKts = Number.isFinite(Number(adsbMeta?.ias))
+      ? Math.round(Number(adsbMeta?.ias))
+      : tasKts !== undefined
+        ? Math.round(tasKts * Math.sqrt(Math.max(0.18, densityRatio)))
+        : undefined;
+    const mach = Number.isFinite(Number(adsbMeta?.mach))
+      ? Number(Number(adsbMeta?.mach).toFixed(3))
+      : tasKts !== undefined && (altBaroFt ?? 0) > 10000
+        ? Number((tasKts / speedOfSoundKts).toFixed(3))
+        : undefined;
+
+    const fLat = Number(adsbMeta?.lat ?? cachedFlight?.lat);
+    const fLon = Number(adsbMeta?.lon ?? cachedFlight?.lon);
+    let firUir: string | undefined;
+    if (Number.isFinite(fLat) && Number.isFinite(fLon) && Array.isArray(atcBoundaries)) {
+      const pointInRing = (lat: number, lon: number, ring: Array<[number, number]>) => {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const yi = ring[i][0], xi = ring[i][1];
+          const yj = ring[j][0], xj = ring[j][1];
+          if (Math.abs(xi - xj) > 180) continue;
+          const intersect = (yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi + 1e-9) + xi;
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      };
+      const hitFir = atcBoundaries.find((fir) => fir.rings.some((ring) => pointInRing(fLat, fLon, ring)));
+      if (hitFir) {
+        firUir = `${hitFir.id} (${hitFir.name})`;
+      }
+    }
 
     res.json({
       id: fr24Id || icaoKey || callsign,
@@ -2091,12 +2435,24 @@ export function createApiRouter(): express.Router {
       flightNumber: String(pbNum.default ?? frRoute.callsign_iata ?? cachedFlight?.flightNumber ?? callsign),
       registration: resolvedReg,
       squawk: resolvedSquawk,
-      aircraftModel: String(pbAcModel.text ?? adsbMeta?.desc ?? hexDb?.Type ?? pbAcModel.code ?? cachedFlight?.aircraftType ?? ''),
-      aircraftCode: String(pbAcModel.code ?? adsbMeta?.t ?? hexDb?.ICAOTypeCode ?? cachedFlight?.aircraftType ?? ''),
-      manufacturer: hexDb?.Manufacturer || undefined,
-      registeredOwner: String(adsbMeta?.ownOp ?? hexDb?.RegisteredOwners ?? '') || undefined,
+      aircraftModel: String(pbAcModel.text ?? adsbMeta?.desc ?? hexDb?.Type ?? openSkyMeta?.model ?? pbAcModel.code ?? cachedFlight?.aircraftType ?? ''),
+      aircraftCode: acCode,
+      manufacturer: String(hexDb?.Manufacturer ?? openSkyMeta?.manufacturerName ?? '') || undefined,
+      registeredOwner: String(adsbMeta?.ownOp ?? hexDb?.RegisteredOwners ?? openSkyMeta?.owner ?? openSkyMeta?.operator ?? '') || undefined,
       aircraftAge: ageText,
-      airlineName: String(pbAirline.name ?? dbAirline.name ?? adsbMeta?.ownOp ?? hexDb?.RegisteredOwners ?? cachedFlight?.airlineName ?? ''),
+      serialNumber,
+      category: derivedCategory,
+      countryOfReg,
+      altBaroFt,
+      altGeomFt,
+      verticalRateFpm,
+      trackDeg,
+      groundSpeedKts,
+      tasKts,
+      iasKts,
+      mach,
+      firUir,
+      airlineName: String(pbAirline.name ?? dbAirline.name ?? adsbMeta?.ownOp ?? hexDb?.RegisteredOwners ?? openSkyMeta?.operator ?? cachedFlight?.airlineName ?? ''),
       airlineIcao: String(pbAirlineCode.icao ?? dbAirline.icao ?? cachedFlight?.airlineIcao ?? airlineIcaoFromCallsign(callsign)),
       airlineLogo: undefined,
       originIata,
@@ -2477,7 +2833,7 @@ export function createApiRouter(): express.Router {
         if (Boolean(a.iata) !== Boolean(b.iata)) return a.iata ? -1 : 1;
         return a.icao.localeCompare(b.icao);
       })
-      .slice(0, 180);
+      .slice(0, 1500);
 
     res.json({airports: inBox, maxTier, totalInViewport: inBox.length});
   });
@@ -2556,7 +2912,7 @@ export function createApiRouter(): express.Router {
 
         const parsed = parseOverpassAirfieldElements(json.elements ?? []);
         osmRunways = parsed.osmRunways;
-        taxiways = parsed.taxiways.slice(0, 2600);
+        taxiways = parsed.taxiways.slice(0, 6500);
         aprons = parsed.aprons;
         labeledAprons = parsed.labeledAprons;
         terminals = parsed.terminals;
@@ -3264,40 +3620,17 @@ export function createApiRouter(): express.Router {
     });
   });
 
-  // 8. Global Vector Street Tile Relay (/api/vtile/:z/:x/:y) -> OpenFreeMap OpenMapTiles MVT
-  let openFreeMapTemplate: {ts: number; tpl: string} | null = null;
+  // 8. Global Vector Street Tile Relay (/api/vtile/:z/:x/:y) -> MapTiler Planet v4 MVT
+  const MAPTILER_KEY = process.env.MAPTILER_API_KEY || 'dpyD4FwxbBpi1ejajPmX';
   const vtileCache = new Map<string, {ts: number; buf: Buffer}>();
 
-  async function resolveOpenFreeMapTemplate(): Promise<string> {
-    if (openFreeMapTemplate && Date.now() - openFreeMapTemplate.ts < 6 * 3600_000) {
-      return openFreeMapTemplate.tpl;
-    }
-    try {
-      const r = await fetch('https://tiles.openfreemap.org/planet', {
-        headers: {'User-Agent': API_USER_AGENT},
-        signal: AbortSignal.timeout(3500),
-      });
-      if (r.ok) {
-        const json = (await r.json()) as {tiles?: string[]};
-        const tpl = json.tiles?.[0];
-        if (tpl && tpl.includes('{z}')) {
-          openFreeMapTemplate = {ts: Date.now(), tpl};
-          return tpl;
-        }
-      }
-    } catch {
-      // fall through to known live snapshot
-    }
-    return openFreeMapTemplate?.tpl ?? 'https://tiles.openfreemap.org/planet/20261115_080022_pt/{z}/{x}/{y}.pbf';
-  }
-
   router.get('/vtile/:z/:x/:y', async (req, res) => {
-    const z = Math.max(0, Math.min(14, Number.parseInt(req.params.z, 10) || 0));
+    const z = Math.max(0, Math.min(15, Number.parseInt(req.params.z, 10) || 0));
     const n = 1 << z;
     const xRaw = Number.parseInt(req.params.x, 10) || 0;
     const x = ((xRaw % n) + n) % n;
     const y = Math.max(0, Math.min(n - 1, Number.parseInt(req.params.y, 10) || 0));
-    const key = `${z}/${x}/${y}`;
+    const key = `mt/${z}/${x}/${y}`;
 
     const cached = vtileCache.get(key);
     if (cached && Date.now() - cached.ts < 1800_000) {
@@ -3308,11 +3641,7 @@ export function createApiRouter(): express.Router {
     }
 
     try {
-      const tpl = await resolveOpenFreeMapTemplate();
-      const url = tpl
-        .replace('{z}', String(z))
-        .replace('{x}', String(x))
-        .replace('{y}', String(y));
+      const url = `https://api.maptiler.com/tiles/v4/${z}/${x}/${y}?key=${encodeURIComponent(MAPTILER_KEY)}`;
       const upstream = await fetch(url, {
         headers: {'User-Agent': API_USER_AGENT},
         signal: AbortSignal.timeout(5500),
@@ -3323,62 +3652,12 @@ export function createApiRouter(): express.Router {
       }
       const arr = await upstream.arrayBuffer();
       const buf = Buffer.from(arr);
-      if (vtileCache.size >= 600) {
+      if (vtileCache.size >= 800) {
         const oldestKey = vtileCache.keys().next().value;
         if (oldestKey) vtileCache.delete(oldestKey);
       }
       vtileCache.set(key, {ts: Date.now(), buf});
       res.setHeader('Content-Type', 'application/vnd.mapbox-vector-tile');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      res.send(buf);
-    } catch {
-      res.status(502).end();
-    }
-  });
-
-  // 9. Google Terrain / Hybrid Tile Relay (/api/gtile/:lyrs/:z/:x/:y)
-  const gtileCache = new Map<string, {ts: number; ct: string; buf: Buffer}>();
-  const ALLOWED_GTILE_LYRS = new Set(['p', 'm', 's', 'y', 't', 'h']);
-  router.get('/gtile/:lyrs/:z/:x/:y', async (req, res) => {
-    const lyrs = ALLOWED_GTILE_LYRS.has(req.params.lyrs) ? req.params.lyrs : 'p';
-    const z = Math.max(0, Math.min(20, Number.parseInt(req.params.z, 10) || 0));
-    const n = 1 << z;
-    const xRaw = Number.parseInt(req.params.x, 10) || 0;
-    const x = ((xRaw % n) + n) % n;
-    const y = Math.max(0, Math.min(n - 1, Number.parseInt(req.params.y, 10) || 0));
-    const key = `${lyrs}/${z}/${x}/${y}`;
-
-    const cached = gtileCache.get(key);
-    if (cached && Date.now() - cached.ts < 1800_000) {
-      res.setHeader('Content-Type', cached.ct);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      res.send(cached.buf);
-      return;
-    }
-
-    const mtHost = `mt${(x + y) & 3}.google.com`;
-    const url = `https://${mtHost}/vt/lyrs=${lyrs}&x=${x}&y=${y}&z=${z}`;
-    try {
-      const upstream = await fetch(url, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-          Referer: 'https://maps.google.com/',
-        },
-        signal: AbortSignal.timeout(5500),
-      });
-      if (!upstream.ok) {
-        res.status(upstream.status === 404 ? 404 : 502).end();
-        return;
-      }
-      const ct = upstream.headers.get('content-type') || 'image/jpeg';
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      if (gtileCache.size >= 700) {
-        const oldestKey = gtileCache.keys().next().value;
-        if (oldestKey) gtileCache.delete(oldestKey);
-      }
-      gtileCache.set(key, {ts: Date.now(), ct, buf});
-      res.setHeader('Content-Type', ct);
       res.setHeader('Cache-Control', 'public, max-age=86400');
       res.send(buf);
     } catch {
@@ -3512,9 +3791,11 @@ export function createApiRouter(): express.Router {
       return;
     }
 
-    const markers: WeatherHazardMarker[] = [];
-    const sigwxPolygons: SigmetHazard[] = [];
-    const fogZones: SigmetHazard[] = [];
+    const pireps: WeatherHazardMarker[] = [];
+    const volcanic: WeatherHazardMarker[] = [];
+    const lightning: WeatherHazardMarker[] = [];
+    const sigwx: WeatherHazardMarker[] = [];
+    const fogZones: WeatherHazardMarker[] = [];
     const windGrid: WeatherWindPoint[] = [];
 
     // Sample a 5x4 grid across viewport for global wind barbs, visibility/fog, lightning & cloud data
@@ -3589,11 +3870,11 @@ export function createApiRouter(): express.Router {
       windGrid.push({
         lat,
         lon,
-        speedKts: sSpd,
-        dirDeg: sDir,
+        surfaceSpeedKts: sSpd,
+        surfaceDirDeg: sDir,
         upperSpeedKts: uSpd,
         upperDirDeg: uDir,
-        cloudPct: Math.round(Number(cur.cloud_cover ?? 0) || 0),
+        cloudCoverPct: Math.round(Number(cur.cloud_cover ?? 0) || 0),
         precipMm: Number(cur.precipitation ?? 0) || 0,
         visibilityM: Number.isFinite(visM) ? visM : 24000,
         weatherCode: Number.isFinite(wmo) ? wmo : 0,
@@ -3604,42 +3885,31 @@ export function createApiRouter(): express.Router {
         const dLon = Math.max(0.55, lonSpan * 0.1);
         fogZones.push({
           id: `fog-om-${idx}`,
-          hazard: 'FOG / LOW VIS',
-          qualifier: `${Math.round(visM)}m`,
-          category: 'advisory',
-          validFrom: '',
-          validTo: '',
-          baseFt: 0,
-          topFt: 1500,
-          rawText: `Surface Visibility ${Math.round(visM)} m (WMO ${wmo})`,
+          kind: 'fog',
+          lat,
+          lon,
+          title: 'FG / Low Vis',
+          detail: `Surface Visibility ${Math.round(visM)} m (WMO ${wmo})`,
+          altFt: 1500,
+          severity: visM < 800 ? 'SEV' : 'MOD',
           coords: [
             [lat - dLat, lon - dLon],
             [lat - dLat, lon + dLon],
             [lat + dLat, lon + dLon],
             [lat + dLat, lon - dLon],
           ],
-          source: 'Open-Meteo Fog',
-        });
-        markers.push({
-          id: `fg-mk-${idx}`,
-          kind: 'fog',
-          lat,
-          lon,
-          title: 'FG / Low Vis',
-          detail: `Vis ${Math.round(visM)}m`,
-          severity: visM < 800 ? 'HIGH' : 'MOD',
         });
       }
 
       if (wmo >= 95 && wmo <= 99) {
-        markers.push({
+        lightning.push({
           id: `ltg-om-${idx}`,
           kind: 'lightning',
           lat,
           lon,
           title: wmo >= 96 ? 'Severe TS / Lightning' : 'Thunderstorm / Lightning',
           detail: `WMO ${wmo} Convective Activity`,
-          severity: wmo >= 96 ? 'HIGH' : 'MOD',
+          severity: wmo >= 96 ? 'SEV' : 'MOD',
         });
       }
     });
@@ -3658,20 +3928,22 @@ export function createApiRouter(): express.Router {
         const tb = String(p.tbInt1 ?? p.turbType1 ?? '');
         const ic = String(p.icgInt1 ?? p.iceType1 ?? '');
         const rawOb = String(p.rawOb ?? '');
-        const sev = /SEV|EXTRM/i.test(`${tb} ${ic} ${rawOb}`)
-          ? 'HIGH'
-          : /MOD/i.test(`${tb} ${ic} ${rawOb}`)
-            ? 'MOD'
-            : 'LOW';
-        markers.push({
+        const sev: WeatherHazardMarker['severity'] = /EXTRM/i.test(`${tb} ${ic} ${rawOb}`)
+          ? 'EXT'
+          : /SEV/i.test(`${tb} ${ic} ${rawOb}`)
+            ? 'SEV'
+            : /MOD/i.test(`${tb} ${ic} ${rawOb}`)
+              ? 'MOD'
+              : 'LOW';
+        pireps.push({
           id: `pr-${p.pirepId ?? i}`,
           kind: reportType.includes('AIREP') ? 'airep' : 'pirep',
           lat,
           lon,
           altFt,
+          acType: acType || undefined,
           title: `${reportType}${acType ? ` · ${acType}` : ''}${Number.isFinite(fltlvl) ? ` FL${fltlvl}` : ''}`,
           detail: rawOb || [tb && `TURB ${tb}`, ic && `ICE ${ic}`].filter(Boolean).join(' · ') || 'Pilot report',
-          rawText: rawOb,
           severity: sev,
         });
       }
@@ -3696,7 +3968,7 @@ export function createApiRouter(): express.Router {
           const vLon = ring[0]?.[1] ?? Number(row.lon);
           if (Number.isFinite(vLat) && Number.isFinite(vLon)) {
             const volcNameMatch = rawText.match(/MT\s+[A-Z0-9-]+/i);
-            markers.push({
+            volcanic.push({
               id: `va-${row.isigmetId ?? i}`,
               kind: 'volcanic',
               lat: vLat,
@@ -3704,41 +3976,37 @@ export function createApiRouter(): express.Router {
               altFt: topFt ?? undefined,
               title: volcNameMatch ? `VOLCANO ${volcNameMatch[0].toUpperCase()}` : 'Volcanic Ash Advisory',
               detail: rawText.slice(0, 120) || 'Active Volcanic Ash SIGMET',
-              rawText,
-              severity: 'HIGH',
+              severity: 'SEV',
+              coords: ring.length >= 3 ? ring : undefined,
             });
           }
           if (ring.length >= 3) {
-            sigwxPolygons.push({
+            sigwx.push({
               id: `va-poly-${row.isigmetId ?? i}`,
-              hazard: 'VOLCANIC ASH',
-              qualifier: String(row.qualifier ?? 'VA'),
-              category: 'advisory',
-              validFrom: String(row.validTimeFrom ?? ''),
-              validTo: String(row.validTimeTo ?? ''),
-              baseFt,
-              topFt,
-              rawText,
+              kind: 'sigwx',
+              lat: ring[0][0],
+              lon: ring[0][1],
+              title: 'VOLCANIC ASH',
+              detail: rawText.slice(0, 140),
+              altFt: topFt ?? 45000,
+              severity: 'SEV',
               coords: ring,
-              source: 'VAAC / ISIGMET',
             });
           }
         }
 
         // Significant Weather FL250-630
         if (ring.length >= 3 && ((topFt !== null && topFt >= 25000) || (baseFt !== null && baseFt >= 24000) || /CB|JET|CAT|TS|SIGWX/i.test(`${haz} ${rawText}`))) {
-          sigwxPolygons.push({
+          sigwx.push({
             id: `sigwx-${row.isigmetId ?? i}`,
-            hazard: `SIGWX FL250-630 (${haz || 'WX'})`,
-            qualifier: String(row.qualifier ?? ''),
-            category: classifyHazardCategory(haz, rawText),
-            validFrom: String(row.validTimeFrom ?? ''),
-            validTo: String(row.validTimeTo ?? ''),
-            baseFt: baseFt ?? 25000,
-            topFt: topFt ?? 63000,
-            rawText,
+            kind: 'sigwx',
+            lat: ring[0][0],
+            lon: ring[0][1],
+            title: `SIGWX FL250-630 (${haz || 'WX'})`,
+            detail: rawText.slice(0, 140) || 'High-level significant weather',
+            altFt: topFt ?? 63000,
+            severity: 'MOD',
             coords: ring,
-            source: 'INTL SIGWX',
           });
         }
       }
@@ -3750,7 +4018,6 @@ export function createApiRouter(): express.Router {
         const row = airsigmetJson[i];
         const haz = String(row.hazard ?? '').toUpperCase();
         const rawText = String(row.rawAirSigmet ?? row.rawText ?? '');
-        const baseFt = Number.isFinite(Number(row.altitudeLow1)) ? Number(row.altitudeLow1) : null;
         const topFt = Number.isFinite(Number(row.altitudeHi1)) ? Number(row.altitudeHi1) : null;
         const rawCoords = Array.isArray(row.coords) ? (row.coords as Array<{lat?: number; lon?: number}>) : [];
         const ring: Array<[number, number]> = rawCoords
@@ -3759,33 +4026,29 @@ export function createApiRouter(): express.Router {
         if (ring.length < 3) continue;
 
         if ((topFt !== null && topFt >= 25000) || /CONVECTIVE|SIGMET/i.test(String(row.airSigmetType ?? ''))) {
-          sigwxPolygons.push({
+          sigwx.push({
             id: `us-sigwx-${row.airSigmetId ?? i}`,
-            hazard: `SIGWX (${haz})`,
-            qualifier: String(row.severity ?? ''),
-            category: classifyHazardCategory(haz, rawText),
-            validFrom: String(row.validTimeFrom ?? ''),
-            validTo: String(row.validTimeTo ?? ''),
-            baseFt: baseFt ?? 25000,
-            topFt: topFt ?? 45000,
-            rawText,
+            kind: 'sigwx',
+            lat: ring[0][0],
+            lon: ring[0][1],
+            title: `SIGWX (${haz || 'CONV'})`,
+            detail: rawText.slice(0, 140),
+            altFt: topFt ?? 45000,
+            severity: 'MOD',
             coords: ring,
-            source: 'US SIGWX',
           });
         }
         if (/IFR|FOG|FG\b|VIS/i.test(`${haz} ${rawText}`)) {
           fogZones.push({
             id: `air-fog-${row.airSigmetId ?? i}`,
-            hazard: 'IFR / FOG',
-            qualifier: String(row.severity ?? ''),
-            category: 'advisory',
-            validFrom: String(row.validTimeFrom ?? ''),
-            validTo: String(row.validTimeTo ?? ''),
-            baseFt: 0,
-            topFt: 2500,
-            rawText,
+            kind: 'fog',
+            lat: ring[0][0],
+            lon: ring[0][1],
+            title: 'IFR / FOG AIRMET',
+            detail: rawText.slice(0, 140),
+            altFt: 2500,
+            severity: 'MOD',
             coords: ring,
-            source: 'AIRMET IFR/FOG',
           });
         }
       }
@@ -3804,27 +4067,25 @@ export function createApiRouter(): express.Router {
         const visNum = visStr.includes('+') ? 10 : Number.parseFloat(visStr);
         const rawOb = String(m.rawOb ?? '');
         if (/\b(FG|BR|MIFG|FZFG|BCFG)\b/.test(wx) || (Number.isFinite(visNum) && visNum <= 1.5)) {
-          markers.push({
+          fogZones.push({
             id: `metar-fg-${icao}-${i}`,
             kind: 'fog',
             lat,
             lon,
             title: `${icao} FOG (${wx || `VIS ${visStr}SM`})`,
             detail: rawOb || `Surface Fog / Vis ${visStr} SM`,
-            rawText: rawOb,
-            severity: /\b(FG|FZFG)\b/.test(wx) || (Number.isFinite(visNum) && visNum < 0.75) ? 'HIGH' : 'MOD',
+            severity: /\b(FG|FZFG)\b/.test(wx) || (Number.isFinite(visNum) && visNum < 0.75) ? 'SEV' : 'MOD',
           });
         }
         if (/\bTS|VCTS|LTG\b/.test(`${wx} ${rawOb}`)) {
-          markers.push({
+          lightning.push({
             id: `metar-ltg-${icao}-${i}`,
             kind: 'lightning',
             lat,
             lon,
             title: `${icao} Lightning / TS`,
             detail: rawOb || `Thunderstorm reported (${wx})`,
-            rawText: rawOb,
-            severity: /\+TS|TSGR/.test(`${wx} ${rawOb}`) ? 'HIGH' : 'MOD',
+            severity: /\+TS|TSGR/.test(`${wx} ${rawOb}`) ? 'SEV' : 'MOD',
           });
         }
       }
@@ -3832,9 +4093,11 @@ export function createApiRouter(): express.Router {
 
     const payload: WeatherLayersResponse = {
       windGrid,
-      markers: markers.slice(0, 180),
-      sigwxPolygons: sigwxPolygons.slice(0, 60),
-      fogZones: fogZones.slice(0, 40),
+      pireps: pireps.slice(0, 90),
+      volcanic: volcanic.slice(0, 40),
+      lightning: lightning.slice(0, 70),
+      fogZones: fogZones.slice(0, 60),
+      sigwx: sigwx.slice(0, 60),
       fetchedAt: Date.now(),
     };
     if (wxLayersCache.size > 40) {
@@ -3939,6 +4202,146 @@ export function createApiRouter(): express.Router {
     if (!res.headersSent) {
       res.status(502).json({error: 'LiveATC stream mount unavailable'});
     }
+  });
+
+  // 15. ViewfinderPanoramas SRTM3 HGT Terrain Elevation Grid (with deterministic topographic relief fallback)
+  const extractZipEntry = (zipBuf: Buffer, entrySuffix: string): Buffer | null => {
+    let offset = 0;
+    while (offset + 30 < zipBuf.length) {
+      const sig = zipBuf.readUInt32LE(offset);
+      if (sig !== 0x04034b50) break;
+      const compression = zipBuf.readUInt16LE(offset + 8);
+      const compSize = zipBuf.readUInt32LE(offset + 18);
+      const fnameLen = zipBuf.readUInt16LE(offset + 26);
+      const extraLen = zipBuf.readUInt16LE(offset + 28);
+      const name = zipBuf.subarray(offset + 30, offset + 30 + fnameLen).toString('utf8');
+      const dataStart = offset + 30 + fnameLen + extraLen;
+      const dataEnd = dataStart + compSize;
+      if (dataEnd > zipBuf.length) break;
+      if (name.toUpperCase().endsWith(entrySuffix.toUpperCase())) {
+        const raw = zipBuf.subarray(dataStart, dataEnd);
+        if (compression === 0) return raw;
+        if (compression === 8) return inflateRawSync(raw);
+        return null;
+      }
+      offset = dataEnd;
+    }
+    return null;
+  };
+
+  const formatSrtmTileName = (latFloor: number, lonFloor: number): string => {
+    const ns = latFloor >= 0 ? 'N' : 'S';
+    const ew = lonFloor >= 0 ? 'E' : 'W';
+    const latStr = String(Math.abs(latFloor)).padStart(2, '0');
+    const lonStr = String(Math.abs(lonFloor)).padStart(3, '0');
+    return `${ns}${latStr}${ew}${lonStr}`;
+  };
+
+  const fetchViewfinderHgtCell = async (latFloor: number, lonFloor: number): Promise<Int16Array | null> => {
+    const tileId = formatSrtmTileName(latFloor, lonFloor);
+    const cached = hgtCellCache.get(tileId);
+    if (cached && Date.now() - cached.ts < 86400_000) return cached.samples;
+
+    // ViewfinderPanoramas 3-arcsec (1201x1201) tiles follow standard 6x4 UTM letter bands or tile IDs
+    const bandIdx = Math.floor((latFloor + 80) / 4);
+    const letters = 'CDEFGHJKLMNPQRSTUVWXX';
+    const bandChar = letters[Math.max(0, Math.min(letters.length - 1, bandIdx))] || 'N';
+    const zone = String(Math.floor((lonFloor + 180) / 6) + 1).padStart(2, '0');
+    const prefix = latFloor >= 60 ? '' : 'S';
+    const archiveName = `${bandChar}${zone}`;
+    const candidateUrls = [
+      `https://viewfinderpanoramas.org/dem3/${archiveName}.zip`,
+      `https://viewfinderpanoramas.org/dem3/${prefix}${archiveName}.zip`,
+    ];
+
+    let samples: Int16Array | null = null;
+    for (const url of candidateUrls) {
+      try {
+        const res = await fetch(url, {
+          headers: {'User-Agent': API_USER_AGENT},
+          signal: AbortSignal.timeout(4500),
+        });
+        if (!res.ok) continue;
+        const zipBuf = Buffer.from(await res.arrayBuffer());
+        const hgtBuf = extractZipEntry(zipBuf, `${tileId}.HGT`);
+        if (hgtBuf && hgtBuf.length >= 1201 * 1201 * 2) {
+          const out = new Int16Array(1201 * 1201);
+          for (let i = 0; i < out.length; i++) {
+            const v = hgtBuf.readInt16BE(i * 2);
+            out[i] = v < -500 ? 0 : v;
+          }
+          samples = out;
+          break;
+        }
+      } catch {
+        // try fallback
+      }
+    }
+
+    if (hgtCellCache.size > 40) {
+      const oldest = hgtCellCache.keys().next().value;
+      if (oldest) hgtCellCache.delete(oldest);
+    }
+    hgtCellCache.set(tileId, {ts: Date.now(), samples});
+    return samples;
+  };
+
+  const sampleTerrainElevationM = async (lat: number, lon: number): Promise<{elevM: number; source: 'viewfinder-srtm3' | 'relief-model'}> => {
+    const latFloor = Math.floor(lat);
+    const lonFloor = Math.floor(lon);
+    const hgt = await fetchViewfinderHgtCell(latFloor, lonFloor);
+    if (hgt) {
+      const row = Math.max(0, Math.min(1200, Math.round((1 - (lat - latFloor)) * 1200)));
+      const col = Math.max(0, Math.min(1200, Math.round((lon - lonFloor) * 1200)));
+      return {elevM: hgt[row * 1201 + col], source: 'viewfinder-srtm3'};
+    }
+    // Lightweight smooth global mountain-belt / coastal relief fallback when remote HGT archive is unreachable
+    const ridge1 = Math.sin(lat * 0.21 + lon * 0.08) * Math.cos(lon * 0.14 - lat * 0.11);
+    const ridge2 = Math.sin(lat * 0.68 - lon * 0.42) * 0.5 + Math.cos(lat * 1.3 + lon * 0.9) * 0.25;
+    const isAlps = lat > 44 && lat < 48 && lon > 5 && lon < 16 ? 1900 : 0;
+    const isRockies = lat > 32 && lat < 55 && lon > -123 && lon < -104 ? 1650 : 0;
+    const isAndes = lat > -50 && lat < 10 && lon > -78 && lon < -66 ? 2400 : 0;
+    const isHimalaya = lat > 26 && lat < 38 && lon > 70 && lon < 102 ? 3200 : 0;
+    const belt = Math.max(isAlps, isRockies, isAndes, isHimalaya);
+    const base = belt > 0 ? belt * Math.max(0.15, ridge1 * 0.5 + 0.5) + Math.max(0, ridge2) * 420 : Math.max(0, (ridge1 + ridge2) * 180);
+    return {elevM: Math.round(base), source: 'relief-model'};
+  };
+
+  router.get('/terrain/grid', async (req, res) => {
+    const lat = Number.parseFloat(String(req.query.lat ?? '37.62'));
+    const lon = Number.parseFloat(String(req.query.lon ?? '-122.38'));
+    const spanDeg = Math.max(0.05, Math.min(4.0, Number.parseFloat(String(req.query.spanDeg ?? '0.45')) || 0.45));
+    const gridN = Math.max(8, Math.min(32, Number.parseInt(String(req.query.n ?? '16'), 10) || 16));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      res.status(400).json({error: 'Invalid coordinates'});
+      return;
+    }
+
+    // Preload center HGT cell once (fast cached)
+    await fetchViewfinderHgtCell(Math.floor(lat), Math.floor(lon));
+
+    const heightsM: number[] = [];
+    let resolvedSource: 'viewfinder-srtm3' | 'relief-model' = 'relief-model';
+    for (let r = 0; r < gridN; r++) {
+      const rLat = lat - spanDeg * 0.5 + (r / Math.max(1, gridN - 1)) * spanDeg;
+      for (let c = 0; c < gridN; c++) {
+        const cLon = lon - spanDeg * 0.5 + (c / Math.max(1, gridN - 1)) * spanDeg;
+        const {elevM, source} = await sampleTerrainElevationM(rLat, cLon);
+        if (source === 'viewfinder-srtm3') resolvedSource = 'viewfinder-srtm3';
+        heightsM.push(elevM);
+      }
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    res.json({
+      lat,
+      lon,
+      spanDeg,
+      gridN,
+      heightsM,
+      source: resolvedSource,
+      attribution: 'ViewfinderPanoramas SRTM DEM (viewfinderpanoramas.org)',
+    });
   });
 
   return router;

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type {WeatherOverlaySettings} from '../types/aviation';
 import {
   createFallbackGridCanvas,
   parseMvtBuffer,
@@ -34,13 +35,7 @@ export function mercatorScaleAtLat(lat: number): number {
   return 1 / Math.max(0.18, Math.cos(rad));
 }
 
-export type BasemapVariant =
-  | 'terrain'
-  | 'terrain-night'
-  | 'light'
-  | 'dark'
-  | 'osm'
-  | 'satellite';
+export type BasemapVariant = 'maptiler-light' | 'maptiler-dark';
 
 interface TileCacheEntry {
   texture: THREE.Texture | null;
@@ -59,8 +54,8 @@ interface MvtCacheEntry {
 const MAX_TEX_CACHE = 460;
 const MAX_MVT_CACHE = 220;
 const MAX_CONCURRENT_MVT_FETCHES = 6;
-const OPENFREEMAP_DIRECT_TPL =
-  'https://tiles.openfreemap.org/planet/20261115_080022_pt/{z}/{x}/{y}.pbf';
+const MAPTILER_V4_DIRECT_TPL =
+  'https://api.maptiler.com/tiles/v4/{z}/{x}/{y}?key=dpyD4FwxbBpi1ejajPmX';
 
 export class GpuTileManager {
   private group = new THREE.Group();
@@ -97,11 +92,10 @@ export class GpuTileManager {
     return this.group;
   }
 
-  private getFallbackTexture(kind: 'terrain' | 'night' | 'osm'): THREE.CanvasTexture {
+  private getFallbackTexture(kind: BasemapVariant): THREE.CanvasTexture {
     let tex = this.fallbackTextures.get(kind);
     if (!tex) {
-      const theme: VectorTheme = kind === 'night' ? 'dark' : kind === 'osm' ? 'osm' : 'light';
-      const canvas = createFallbackGridCanvas(theme, 256);
+      const canvas = createFallbackGridCanvas(kind, 256);
       tex = new THREE.CanvasTexture(canvas);
       tex.colorSpace = THREE.SRGBColorSpace;
       this.fallbackTextures.set(kind, tex);
@@ -151,7 +145,7 @@ export class GpuTileManager {
 
     const tryUrls = [
       `/api/vtile/${z}/${x}/${y}`,
-      OPENFREEMAP_DIRECT_TPL.replace('{z}', String(z))
+      MAPTILER_V4_DIRECT_TPL.replace('{z}', String(z))
         .replace('{x}', String(x))
         .replace('{y}', String(y)),
     ];
@@ -246,7 +240,7 @@ export class GpuTileManager {
       return existing;
     }
 
-    const srcZ = Math.min(14, z);
+    const srcZ = Math.min(15, z);
     const overShift = z - srcZ;
     const srcX = wx >> overShift;
     const srcY = y >> overShift;
@@ -299,72 +293,6 @@ export class GpuTileManager {
     }
 
     return null;
-  }
-
-  private getOrLoadGoogleTile(
-    lyrs: 'p' | 'y',
-    z: number,
-    x: number,
-    y: number,
-    pin = false,
-  ): TileCacheEntry | null {
-    const n = 1 << z;
-    if (y < 0 || y >= n) return null;
-    const wx = ((x % n) + n) % n;
-    const key = `gtile-${lyrs}|${z}|${wx}|${y}`;
-    const existing = this.lookupTexCache(key);
-    if (existing) {
-      existing.lastUsedMs = performance.now();
-      return existing;
-    }
-    const shouldPin = pin || z <= 3;
-    if (!shouldPin && this.texCache.size >= MAX_TEX_CACHE) {
-      this.evictOldestTex(52);
-    }
-
-    const entry: TileCacheEntry = {
-      texture: null,
-      status: 'loading',
-      lastUsedMs: performance.now(),
-      pinned: shouldPin,
-    };
-    if (shouldPin) this.pinnedTexCache.set(key, entry);
-    else this.texCache.set(key, entry);
-
-    const mtHost = `mt${(wx + y) & 3}.google.com`;
-    const primaryUrl = `https://${mtHost}/vt/lyrs=${lyrs}&x=${wx}&y=${y}&z=${z}`;
-    const fallbackUrl = `/api/gtile/${lyrs}/${z}/${wx}/${y}`;
-
-    const loadImg = (url: string, allowFallback: boolean) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        const current = this.lookupTexCache(key);
-        if (!current) return;
-        const tex = new THREE.Texture(img);
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = this.maxAnisotropy;
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = true;
-        tex.needsUpdate = true;
-        current.texture = tex;
-        current.status = 'ready';
-        this.onTileReady();
-      };
-      img.onerror = () => {
-        if (allowFallback) {
-          loadImg(fallbackUrl, false);
-        } else {
-          const current = this.lookupTexCache(key);
-          if (current) current.status = 'error';
-        }
-      };
-      img.src = url;
-    };
-
-    loadImg(primaryUrl, true);
-    return entry;
   }
 
   private getOrLoadRadarTile(
@@ -425,35 +353,21 @@ export class GpuTileManager {
    * Preloads global z=2 + z=3 + initial region tiles immediately on website entry.
    */
   public preloadWorldAndRegion(
-    style: BasemapVariant,
+    _style: BasemapVariant,
     centerMx: number,
     centerMy: number,
     zoom: number,
   ) {
-    const mode = style === 'satellite' ? 'y' : style === 'osm' ? 'osm' : 'p';
-    if (!this.preloadedThemes.has(mode)) {
-      this.preloadedThemes.add(mode);
-      if (mode === 'osm') {
-        for (let ty = 0; ty < 4; ty++) {
-          for (let tx = 0; tx < 4; tx++) {
-            this.ensureMvtLoaded(2, tx, ty, 0.1, true);
-          }
-        }
-      } else {
-        for (let ty = 0; ty < 4; ty++) {
-          for (let tx = 0; tx < 4; tx++) {
-            this.getOrLoadGoogleTile(mode, 2, tx, ty, true);
-          }
-        }
-        for (let ty = 1; ty <= 6; ty++) {
-          for (let tx = 0; tx < 8; tx++) {
-            this.getOrLoadGoogleTile(mode, 3, tx, ty, true);
-          }
+    if (!this.preloadedThemes.has('mvt')) {
+      this.preloadedThemes.add('mvt');
+      for (let ty = 0; ty < 4; ty++) {
+        for (let tx = 0; tx < 4; tx++) {
+          this.ensureMvtLoaded(2, tx, ty, 0.1, true);
         }
       }
     }
 
-    const warmZ = Math.min(16, Math.max(3, Math.round(zoom)));
+    const warmZ = Math.min(15, Math.max(3, Math.round(zoom)));
     const n = 1 << warmZ;
     const cx = Math.floor(centerMx * n);
     const cy = Math.floor(centerMy * n);
@@ -461,11 +375,7 @@ export class GpuTileManager {
       for (let dx = -1; dx <= 1; dx++) {
         const ty = cy + dy;
         if (ty >= 0 && ty < n) {
-          if (mode === 'osm') {
-            this.ensureMvtLoaded(Math.min(14, warmZ), cx + dx, ty, 1.0, false);
-          } else {
-            this.getOrLoadGoogleTile(mode, warmZ, cx + dx, ty, false);
-          }
+          this.ensureMvtLoaded(warmZ, cx + dx, ty, 1.0, false);
         }
       }
     }
@@ -474,7 +384,7 @@ export class GpuTileManager {
   /**
    * Positions all tile meshes relative to `anchorMx, anchorMy` inside `stableAnchorRoot`.
    * Because `stableAnchorRoot` translates basemap tiles + runways + buildings + overlays in ONE GPU matrix,
-   * runways are 100% mathematically GLUED to the Google Terrain map during panning/zooming!
+   * runways are 100% mathematically GLUED to the basemap during panning/zooming!
    */
   public update(params: {
     anchorMx: number;
@@ -486,6 +396,7 @@ export class GpuTileManager {
     showRadar: boolean;
     radarOpacity: number;
     radarUrlTemplate?: string;
+    wxLayers?: WeatherOverlaySettings;
     aspect: number;
     fovDeg: number;
     pitchDeg: number;
@@ -500,6 +411,7 @@ export class GpuTileManager {
       showRadar,
       radarOpacity,
       radarUrlTemplate,
+      wxLayers,
       aspect,
       pitchDeg,
     } = params;
@@ -521,37 +433,67 @@ export class GpuTileManager {
       baseZ--;
     }
 
-    const isNightTerrain = style === 'dark' || style === 'terrain-night';
-
     const layers: Array<{
-      kind: 'gtile-p' | 'gtile-y' | 'osm' | 'radar';
+      kind: 'mvt' | 'radar';
+      vectorTheme?: VectorTheme;
       z: number;
       yOrder: number;
       opacity: number;
       nightTint: number;
+      tpl?: string;
+      intenseOnly?: number;
+      tag?: string;
     }> = [];
 
-    if (style === 'satellite') {
-      layers.push({kind: 'gtile-y', z: Math.min(18, baseZ), yOrder: 0, opacity: 1, nightTint: 0});
-    } else if (style === 'osm') {
-      layers.push({kind: 'osm', z: baseZ, yOrder: 0, opacity: 1, nightTint: 0});
-    } else {
+    layers.push({kind: 'mvt', vectorTheme: style, z: baseZ, yOrder: 0, opacity: 1, nightTint: 0});
+
+    if (wxLayers?.cloudCoverage) {
       layers.push({
-        kind: 'gtile-p',
-        z: Math.min(18, baseZ),
-        yOrder: 0,
-        opacity: 1,
-        nightTint: isNightTerrain ? 0.56 : 0,
+        kind: 'radar',
+        z: Math.min(6, Math.max(2, baseZ)),
+        yOrder: 1,
+        opacity: Math.max(0.45, radarOpacity * 0.85),
+        nightTint: 0,
+        tpl: '/api/wtile/clouds/{z}/{x}/{y}',
+        intenseOnly: 0,
+        tag: 'clouds',
       });
     }
-
-    if (showRadar && radarUrlTemplate) {
+    if ((showRadar || wxLayers?.totalPrecip) && radarUrlTemplate) {
       layers.push({
         kind: 'radar',
         z: Math.min(7, Math.max(2, baseZ)),
-        yOrder: 1,
+        yOrder: 2,
         opacity: radarOpacity,
         nightTint: 0,
+        tpl: radarUrlTemplate,
+        intenseOnly: 0,
+        tag: 'precip',
+      });
+    }
+    if (wxLayers?.intensePrecip && radarUrlTemplate) {
+      const intenseTpl = radarUrlTemplate.replace(/\/2\/1_1\.png$/, '/6/1_1.png');
+      layers.push({
+        kind: 'radar',
+        z: Math.min(7, Math.max(2, baseZ)),
+        yOrder: 3,
+        opacity: Math.min(0.95, radarOpacity + 0.15),
+        nightTint: 0,
+        tpl: intenseTpl,
+        intenseOnly: 1.0,
+        tag: 'intense',
+      });
+    }
+    if (wxLayers?.naRadar) {
+      layers.push({
+        kind: 'radar',
+        z: Math.min(8, Math.max(2, baseZ)),
+        yOrder: 4,
+        opacity: Math.min(0.9, radarOpacity + 0.1),
+        nightTint: 0,
+        tpl: '/api/wtile/nexrad/{z}/{x}/{y}',
+        intenseOnly: 0,
+        tag: 'nexrad',
       });
     }
 
@@ -575,38 +517,9 @@ export class GpuTileManager {
           let uvOffsetX = 0;
           let uvOffsetY = 0;
 
-          if (lyr.kind === 'gtile-p' || lyr.kind === 'gtile-y') {
-            const gCode = lyr.kind === 'gtile-y' ? 'y' : 'p';
-            const entry = this.getOrLoadGoogleTile(gCode, z, wx, ty, z <= 2);
-            chosenTex = entry?.texture ?? null;
-
-            if (!chosenTex) {
-              for (let dz = 1; dz <= z - 2; dz++) {
-                const pz = z - dz;
-                if (pz < 2) break;
-                const div = 1 << dz;
-                const px = Math.floor(tx / div);
-                const py = Math.floor(ty / div);
-                const pn = 1 << pz;
-                const pwx = ((px % pn) + pn) % pn;
-                const parent = this.lookupTexCache(`gtile-${gCode}|${pz}|${pwx}|${py}`);
-                if (parent?.texture) {
-                  chosenTex = parent.texture;
-                  uvScale = 1 / div;
-                  const localX = ((tx % div) + div) % div;
-                  const localY = ty - py * div;
-                  uvOffsetX = localX * uvScale;
-                  uvOffsetY = 1 - (localY + 1) * uvScale;
-                  break;
-                }
-              }
-            }
-
-            if (!chosenTex) {
-              chosenTex = this.getFallbackTexture(isNightTerrain ? 'night' : 'terrain');
-            }
-          } else if (lyr.kind === 'osm') {
-            const entry = this.getOrBuildVectorTile('osm', z, wx, ty, centerMx, centerMy, z <= 2);
+          if (lyr.kind === 'mvt') {
+            const vTheme = lyr.vectorTheme ?? style;
+            const entry = this.getOrBuildVectorTile(vTheme, z, wx, ty, centerMx, centerMy, z <= 2);
             chosenTex = entry?.texture ?? null;
             if (!chosenTex) {
               for (let dz = 1; dz <= z - 2; dz++) {
@@ -617,7 +530,7 @@ export class GpuTileManager {
                 const py = Math.floor(ty / div);
                 const pn = 1 << pz;
                 const pwx = ((px % pn) + pn) % pn;
-                const parent = this.lookupTexCache(`vec|osm|${pz}|${pwx}|${py}`);
+                const parent = this.lookupTexCache(`vec|${vTheme}|${pz}|${pwx}|${py}`);
                 if (parent?.texture) {
                   chosenTex = parent.texture;
                   uvScale = 1 / div;
@@ -630,22 +543,23 @@ export class GpuTileManager {
               }
             }
             if (!chosenTex) {
-              chosenTex = this.getFallbackTexture('osm');
+              chosenTex = this.getFallbackTexture(vTheme);
             }
-          } else if (lyr.kind === 'radar' && radarUrlTemplate) {
-            const entry = this.getOrLoadRadarTile(z, wx, ty, radarUrlTemplate);
+          } else if (lyr.kind === 'radar' && lyr.tpl) {
+            const entry = this.getOrLoadRadarTile(z, wx, ty, lyr.tpl);
             chosenTex = entry?.texture ?? null;
           }
 
           if (!chosenTex) continue;
 
-          const meshKey = `${lyr.kind}|${z}|${tx}|${ty}|${lyr.kind === 'radar' ? radarUrlTemplate || '' : ''}`;
+          const meshKey = `${lyr.kind}|${lyr.vectorTheme ?? lyr.tag ?? ''}|${z}|${tx}|${ty}|${lyr.tpl ?? ''}`;
           neededKeys.add(meshKey);
 
           let mesh = this.activeMeshes.get(meshKey);
           const worldX = ((tx + 0.5) / n - anchorMx) * MERCATOR_WORLD_M;
           const worldZ = ((ty + 0.5) / n - anchorMy) * MERCATOR_WORLD_M;
           const isTransparent = lyr.opacity < 0.99 || lyr.kind === 'radar';
+          const intenseOnlyVal = lyr.intenseOnly ?? 0;
 
           if (!mesh) {
             const mat = new THREE.ShaderMaterial({
@@ -654,6 +568,7 @@ export class GpuTileManager {
                 uUvRect: {value: new THREE.Vector4(uvOffsetX, uvOffsetY, uvScale, uvScale)},
                 uOpacity: {value: lyr.opacity},
                 uNightTint: {value: lyr.nightTint},
+                uIntenseOnly: {value: intenseOnlyVal},
               },
               vertexShader: `
                 varying vec2 vUv;
@@ -667,16 +582,22 @@ export class GpuTileManager {
                 uniform sampler2D uTex;
                 uniform float uOpacity;
                 uniform float uNightTint;
+                uniform float uIntenseOnly;
                 varying vec2 vUv;
                 void main() {
                   vec4 texel = texture2D(uTex, vUv);
                   vec3 col = texel.rgb;
+                  float a = texel.a;
+                  if (uIntenseOnly > 0.5) {
+                    float warmness = col.r + col.g * 0.45 - col.b * 0.9;
+                    if (warmness < 0.38 || a < 0.2) discard;
+                  }
                   if (uNightTint > 0.01) {
                     float lum = dot(col, vec3(0.299, 0.587, 0.114));
                     vec3 nightCol = mix(vec3(0.06, 0.10, 0.17), vec3(0.32, 0.44, 0.58), lum * 0.78);
                     col = mix(col, nightCol, uNightTint);
                   }
-                  gl_FragColor = vec4(col, texel.a * uOpacity);
+                  gl_FragColor = vec4(col, a * uOpacity);
                 }
               `,
               transparent: isTransparent,
@@ -684,7 +605,7 @@ export class GpuTileManager {
               depthWrite: false,
             });
             mesh = new THREE.Mesh(this.unitQuad, mat);
-            mesh.renderOrder = -90 + lyr.yOrder * 25 + Math.min(20, z);
+            mesh.renderOrder = -90 + lyr.yOrder * 6 + Math.min(18, z);
             mesh.frustumCulled = false;
             this.group.add(mesh);
             this.activeMeshes.set(meshKey, mesh);
@@ -696,6 +617,7 @@ export class GpuTileManager {
             mat.uniforms.uUvRect.value.set(uvOffsetX, uvOffsetY, uvScale, uvScale);
             mat.uniforms.uOpacity.value = lyr.opacity;
             mat.uniforms.uNightTint.value = lyr.nightTint;
+            mat.uniforms.uIntenseOnly.value = intenseOnlyVal;
           }
 
           mesh.position.set(worldX, 0, worldZ);

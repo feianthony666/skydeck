@@ -253,7 +253,12 @@ export class AviationOverlaysManager {
     if (this.hudWxLabels.length > 0) {
       out.push(...this.hudWxLabels);
     }
-    return out;
+    const seenIds = new Set<string>();
+    return out.filter((lbl) => {
+      if (seenIds.has(lbl.id)) return false;
+      seenIds.add(lbl.id);
+      return true;
+    });
   }
 
   public rebuildDayNight(anchorMx: number, anchorMy: number, enabled: boolean) {
@@ -265,47 +270,98 @@ export class AviationOverlaysManager {
     const declRad = THREE.MathUtils.degToRad(Math.abs(subLatDeg) < 0.25 ? (subLatDeg >= 0 ? 0.25 : -0.25) : subLatDeg);
     const tanDecl = Math.tan(declRad);
     const nightPoleLat = subLatDeg >= 0 ? -84.5 : 84.5;
+    const nightDir = nightPoleLat < 0 ? -1 : 1; // direction toward night pole in latitude
     const nightPoleMy = latToMy(nightPoleLat);
+
+    // Smooth twilight gradient strips (deg offset from solar terminator toward night)
+    // alpha ramps smoothly 0.0 (day edge) -> 0.07 (civil) -> 0.16 (nautical) -> 0.25 (astro) -> 0.30 (deep night)
+    const bands: Array<{degShift: number; alpha: number}> = [
+      {degShift: -5.5, alpha: 0.0},
+      {degShift: -1.5, alpha: 0.055},
+      {degShift: 2.5, alpha: 0.135},
+      {degShift: 7.0, alpha: 0.225},
+      {degShift: 13.0, alpha: 0.285},
+    ];
 
     const lineVerts: number[] = [];
     const shadowVerts: number[] = [];
+    const shadowAlphas: number[] = [];
 
-    // Generate across world wrap [-1, 0, +1] so horizontal wrapping never splits the terminator!
+    const clampLat = (v: number) => THREE.MathUtils.clamp(v, -84.5, 84.5);
+
     for (const wrapOffset of [-1, 0, 1]) {
-      const curvePts: Array<[number, number]> = [];
+      const bandPts: Array<Array<[number, number]>> = bands.map(() => []);
+      const termPts: Array<[number, number]> = [];
+      const poleZ = (nightPoleMy - anchorMy) * MERCATOR_WORLD_M;
+
       for (let lon = -180; lon <= 180; lon += 3) {
         const dLonRad = THREE.MathUtils.degToRad(lon - subLonDeg);
         const latRad = Math.atan(-Math.cos(dLonRad) / tanDecl);
-        const latDeg = THREE.MathUtils.clamp(THREE.MathUtils.radToDeg(latRad), -84.5, 84.5);
+        const termLat = THREE.MathUtils.radToDeg(latRad);
         const wx = (lonToMx(lon) + wrapOffset - anchorMx) * MERCATOR_WORLD_M;
-        const wz = (latToMy(latDeg) - anchorMy) * MERCATOR_WORLD_M;
-        curvePts.push([wx, wz]);
+
+        termPts.push([wx, (latToMy(clampLat(termLat)) - anchorMy) * MERCATOR_WORLD_M]);
+        for (let b = 0; b < bands.length; b++) {
+          const bLat = clampLat(termLat + nightDir * bands[b].degShift);
+          bandPts[b].push([wx, (latToMy(bLat) - anchorMy) * MERCATOR_WORLD_M]);
+        }
       }
 
-      const poleZ = (nightPoleMy - anchorMy) * MERCATOR_WORLD_M;
-      for (let i = 0; i < curvePts.length - 1; i++) {
-        const a = curvePts[i];
-        const b = curvePts[i + 1];
-        lineVerts.push(a[0], 0.45, a[1], b[0], 0.45, b[1]);
+      for (let i = 0; i < termPts.length - 1; i++) {
+        lineVerts.push(termPts[i][0], 0.45, termPts[i][1], termPts[i + 1][0], 0.45, termPts[i + 1][1]);
 
-        if (nightPoleLat < 0) {
-          // Southern hemisphere is night -> poleZ > a[1]
-          shadowVerts.push(a[0], 0.2, a[1], b[0], 0.2, b[1], b[0], 0.2, poleZ);
-          shadowVerts.push(a[0], 0.2, a[1], b[0], 0.2, poleZ, a[0], 0.2, poleZ);
-        } else {
-          // Northern hemisphere is night -> poleZ < a[1]
-          shadowVerts.push(a[0], 0.2, poleZ, b[0], 0.2, poleZ, b[0], 0.2, b[1]);
-          shadowVerts.push(a[0], 0.2, poleZ, b[0], 0.2, b[1], a[0], 0.2, a[1]);
+        // Smooth twilight gradient strips
+        for (let b = 0; b < bands.length - 1; b++) {
+          const a0 = bandPts[b][i];
+          const b0 = bandPts[b][i + 1];
+          const a1 = bandPts[b + 1][i];
+          const b1 = bandPts[b + 1][i + 1];
+          const al0 = bands[b].alpha;
+          const al1 = bands[b + 1].alpha;
+
+          shadowVerts.push(a0[0], 0.2, a0[1], b0[0], 0.2, b0[1], b1[0], 0.2, b1[1]);
+          shadowAlphas.push(al0, al0, al1);
+
+          shadowVerts.push(a0[0], 0.2, a0[1], b1[0], 0.2, b1[1], a1[0], 0.2, a1[1]);
+          shadowAlphas.push(al0, al1, al1);
         }
+
+        // Solid night umbra from deepest twilight band to night pole
+        const lastPts = bandPts[bands.length - 1];
+        const lastAlpha = bands[bands.length - 1].alpha;
+        const ua = lastPts[i];
+        const ub = lastPts[i + 1];
+        shadowVerts.push(ua[0], 0.2, ua[1], ub[0], 0.2, ub[1], ub[0], 0.2, poleZ);
+        shadowAlphas.push(lastAlpha, lastAlpha, lastAlpha);
+        shadowVerts.push(ua[0], 0.2, ua[1], ub[0], 0.2, poleZ, ua[0], 0.2, poleZ);
+        shadowAlphas.push(lastAlpha, lastAlpha, lastAlpha);
       }
     }
 
     const sGeo = new THREE.BufferGeometry();
     sGeo.setAttribute('position', new THREE.Float32BufferAttribute(shadowVerts, 3));
-    const sMat = new THREE.MeshBasicMaterial({
-      color: '#040B1A',
+    sGeo.setAttribute('aAlpha', new THREE.Float32BufferAttribute(shadowAlphas, 1));
+    const sMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uNightColor: {value: new THREE.Color('#040B1A')},
+      },
+      vertexShader: `
+        attribute float aAlpha;
+        varying float vAlpha;
+        void main() {
+          vAlpha = aAlpha;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uNightColor;
+        varying float vAlpha;
+        void main() {
+          if (vAlpha <= 0.004) discard;
+          gl_FragColor = vec4(uNightColor, vAlpha);
+        }
+      `,
       transparent: true,
-      opacity: 0.26,
       side: THREE.DoubleSide,
       depthTest: false,
       depthWrite: false,
@@ -319,7 +375,7 @@ export class AviationOverlaysManager {
     const lMat = new THREE.LineBasicMaterial({
       color: '#F59E0B',
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.55,
       depthTest: false,
       depthWrite: false,
     });
@@ -674,7 +730,9 @@ export class AviationOverlaysManager {
 
     const verts: number[] = [];
     const seenLabels = new Set<string>();
-    for (const tz of this.timezoneData) {
+    const seenIds = new Set<string>();
+    for (let idx = 0; idx < this.timezoneData.length; idx++) {
+      const tz = this.timezoneData[idx];
       for (const ring of tz.rings) {
         for (let i = 0; i < ring.length - 1; i++) {
           const [lat0, lon0] = ring[i];
@@ -688,10 +746,12 @@ export class AviationOverlaysManager {
         }
       }
       const lblKey = `${tz.name}|${Math.round(tz.labelLat / 12)}`;
-      if (!seenLabels.has(lblKey) && this.hudTimezoneLabels.length < 32) {
+      const uniqueId = `tz-${idx}-${String(tz.id).replace(/^tz-/, '')}`;
+      if (!seenLabels.has(lblKey) && !seenIds.has(uniqueId) && this.hudTimezoneLabels.length < 32) {
         seenLabels.add(lblKey);
+        seenIds.add(uniqueId);
         this.hudTimezoneLabels.push({
-          id: `tz-${tz.id}`,
+          id: uniqueId,
           lat: tz.labelLat,
           lon: tz.labelLon,
           text: tz.name,
@@ -763,44 +823,47 @@ export class AviationOverlaysManager {
     // 1. Fog Zones & Mist Patches
     if (wxLayers.fog && data.fogZones.length > 0) {
       for (const fz of data.fogZones) {
-        drawPolyRing(fz.coords, isNightTerrain ? '#CBD5E1' : '#64748B', 0.72, 0.65);
-        if (fz.coords.length >= 3) {
-          const shapePts = fz.coords.map(
-            ([la, lo]) =>
-              new THREE.Vector2(
-                (lonToMx(lo) - anchorMx) * MERCATOR_WORLD_M,
-                -(latToMy(la) - anchorMy) * MERCATOR_WORLD_M,
-              ),
-          );
-          try {
-            const shape = new THREE.Shape(shapePts);
-            const geo = new THREE.ShapeGeometry(shape);
-            geo.rotateX(-Math.PI / 2);
-            const mat = new THREE.MeshBasicMaterial({
-              color: '#94A3B8',
-              transparent: true,
-              opacity: 0.28,
-              side: THREE.DoubleSide,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.position.y = 0.52;
-            mesh.renderOrder = -9;
-            this.wxGroup.add(mesh);
-          } catch {
-            // ignore degenerate polygon
+        if (fz.coords && fz.coords.length >= 2) {
+          drawPolyRing(fz.coords, isNightTerrain ? '#CBD5E1' : '#64748B', 0.72, 0.65);
+          if (fz.coords.length >= 3) {
+            const shapePts = fz.coords.map(
+              ([la, lo]) =>
+                new THREE.Vector2(
+                  (lonToMx(lo) - anchorMx) * MERCATOR_WORLD_M,
+                  -(latToMy(la) - anchorMy) * MERCATOR_WORLD_M,
+                ),
+            );
+            try {
+              const shape = new THREE.Shape(shapePts);
+              const geo = new THREE.ShapeGeometry(shape);
+              geo.rotateX(-Math.PI / 2);
+              const mat = new THREE.MeshBasicMaterial({
+                color: '#94A3B8',
+                transparent: true,
+                opacity: 0.28,
+                side: THREE.DoubleSide,
+                depthTest: false,
+                depthWrite: false,
+              });
+              const mesh = new THREE.Mesh(geo, mat);
+              mesh.position.y = 0.52;
+              mesh.renderOrder = -9;
+              this.wxGroup.add(mesh);
+            } catch {
+              // ignore degenerate polygon
+            }
           }
         }
       }
     }
 
     // 2. Significant Weather FL250-630 & Volcanic Ash Plumes
-    for (const poly of data.sigwxPolygons) {
-      const isVa = /VOLCAN/i.test(poly.hazard);
+    for (const poly of data.sigwx) {
+      if (!poly.coords || poly.coords.length < 3) continue;
+      const isVa = /VOLCAN/i.test(poly.title + ' ' + poly.detail);
       if (isVa && wxLayers.volcanic) {
         drawPolyRing(poly.coords, '#F97316', 0.92, 0.75);
-      } else if (!isVa && wxLayers.sigwx250_630) {
+      } else if (!isVa && wxLayers.sigwx) {
         drawPolyRing(poly.coords, '#E879F9', 0.78, 0.68);
       }
     }
@@ -813,8 +876,8 @@ export class AviationOverlaysManager {
       const tickLen = 9 * pxToM;
       for (const wp of data.windGrid) {
         const useUpper = zoom < 6.5;
-        const spd = useUpper && wp.upperSpeedKts !== undefined ? wp.upperSpeedKts : wp.speedKts;
-        const dirDeg = useUpper && wp.upperDirDeg !== undefined ? wp.upperDirDeg : wp.dirDeg;
+        const spd = useUpper && wp.upperSpeedKts > 0 ? wp.upperSpeedKts : wp.surfaceSpeedKts;
+        const dirDeg = useUpper && wp.upperSpeedKts > 0 ? wp.upperDirDeg : wp.surfaceDirDeg;
         if (spd <= 2) continue;
 
         const cx = (lonToMx(wp.lon) - anchorMx) * MERCATOR_WORLD_M;
@@ -879,19 +942,23 @@ export class AviationOverlaysManager {
     }
 
     // 4. Hazard Point Markers (Volcanic Eruptions, PIREPs/AIREPs, Lightning, METAR Fog)
-    const ptGroups: Array<{enabled: boolean; kinds: string[]; color: string; size: number; hudKind: AviationHudLabel['kind']}> = [
-      {enabled: wxLayers.volcanic, kinds: ['volcanic'], color: '#F97316', size: 11, hudKind: 'wx-volc'},
-      {enabled: wxLayers.airepsPireps, kinds: ['pirep', 'airep'], color: '#38BDF8', size: 8, hudKind: 'wx-pirep'},
-      {enabled: wxLayers.lightning, kinds: ['lightning'], color: '#FACC15', size: 9, hudKind: 'wx-ltg'},
-      {enabled: wxLayers.fog, kinds: ['fog'], color: '#94A3B8', size: 8, hudKind: 'wx-fog'},
+    const ptGroups: Array<{
+      enabled: boolean;
+      items: WeatherLayersResponse['pireps'];
+      color: string;
+      size: number;
+      hudKind: AviationHudLabel['kind'];
+    }> = [
+      {enabled: wxLayers.volcanic, items: data.volcanic, color: '#F97316', size: 11, hudKind: 'wx-volc'},
+      {enabled: wxLayers.airepsPireps, items: data.pireps, color: '#38BDF8', size: 8, hudKind: 'wx-pirep'},
+      {enabled: wxLayers.lightning, items: data.lightning, color: '#FACC15', size: 9, hudKind: 'wx-ltg'},
+      {enabled: wxLayers.fog, items: data.fogZones, color: '#94A3B8', size: 8, hudKind: 'wx-fog'},
     ];
 
     for (const grp of ptGroups) {
-      if (!grp.enabled) continue;
-      const matched = data.markers.filter((m) => grp.kinds.includes(m.kind));
-      if (matched.length === 0) continue;
+      if (!grp.enabled || grp.items.length === 0) continue;
       const pos: number[] = [];
-      for (const mk of matched) {
+      for (const mk of grp.items) {
         pos.push(
           (lonToMx(mk.lon) - anchorMx) * MERCATOR_WORLD_M,
           1.15,

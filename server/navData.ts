@@ -1017,7 +1017,7 @@ export async function getTimeZones(): Promise<TimeZoneBoundaryFeature[]> {
         const cLon = cnt > 0 ? sumLon / cnt : rings[0][0][1];
 
         out.push({
-          id: `tz-${props.objectid ?? idx}`,
+          id: `tz-${idx}-${props.objectid ?? 'f'}`,
           name: String(props.name || props.places || utcLabel),
           utcOffsetHours: Number.isFinite(zoneHrs) ? zoneHrs : 0,
           utcOffsetSec: Math.round((Number.isFinite(zoneHrs) ? zoneHrs : 0) * 3600),

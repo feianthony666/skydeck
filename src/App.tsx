@@ -1,9 +1,9 @@
 import {
   Activity,
   AlertTriangle,
-  Box,
   ChevronDown,
   ChevronUp,
+  Layers,
   ListFilter,
   LocateFixed,
   Maximize2,
@@ -13,6 +13,7 @@ import {
   Radar,
   Radio,
   RefreshCw,
+  Scale,
   Search,
   ShieldAlert,
   SlidersHorizontal,
@@ -22,12 +23,19 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AirportBoardPanel} from './components/AirportBoardPanel';
-import {BottomOpsDrawer, type BottomOpsTab} from './components/BottomOpsDrawer';
-import {FlightDeck3D} from './components/FlightDeck3D';
+import {BottomOpsDrawer, type BottomOpsTab, type PlaybackState} from './components/BottomOpsDrawer';
+import {CreditsAttributionsModal} from './components/CreditsAttributionsModal';
 import {FlightInspectorPanel} from './components/FlightInspectorPanel';
 import {FlightPlannerView} from './components/FlightPlannerView';
+import {MultiSelectSidebar} from './components/MultiSelectSidebar';
 import {PWAInstallButton} from './components/PWAInstallButton';
-import {DEFAULT_RADAR_SETTINGS, RadarMap, RadarSettingsPopover} from './components/RadarMap';
+import {
+  DEFAULT_PLANE_LABELS,
+  DEFAULT_RADAR_SETTINGS,
+  DEFAULT_WX_LAYERS,
+  RadarMap,
+  RadarSettingsPopover,
+} from './components/RadarMap';
 import {TaxiAcarsView} from './components/TaxiAcarsView';
 import {getDbFlagMeta, getEmergencySquawkMeta} from './components/aircraftIcons';
 import {Badge} from './components/ui/badge';
@@ -46,6 +54,10 @@ import {
 } from './data/aviationCatalog';
 import {useOnlineStatus} from './hooks/useOnlineStatus';
 import {apiFetchJson, DEFAULT_CF_WORKER_URL} from './services/directAviationClient';
+import {
+  loadCachedAirportDirectory,
+  saveCachedAirportDirectory,
+} from './three/gpuAirfieldEngine';
 import {
   deadReckonFlight,
   haversineNm,
@@ -73,11 +85,10 @@ import type {
   RadarSettings,
   RainViewerMeta,
   SigmetHazard,
-  ThreeViewMode,
   TrafficFlagFilter,
 } from './types/aviation';
 
-const RADAR_SETTINGS_KEY = 'skydeck-radar-settings-v1';
+const RADAR_SETTINGS_KEY = 'skydeck-radar-settings-v3';
 
 function detectPortraitMobileViewport(): boolean {
   if (typeof window === 'undefined') return false;
@@ -91,15 +102,26 @@ function loadSavedRadarSettings(): RadarSettings {
     const raw = window.localStorage.getItem(RADAR_SETTINGS_KEY);
     if (!raw) return DEFAULT_RADAR_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<RadarSettings>;
-    const hasNavOverlays = 'showDayNightLine' in parsed;
-    const migratedBasemap =
-      !hasNavOverlays && (parsed.basemapStyle === 'osm' || parsed.basemapStyle === 'dark' || parsed.basemapStyle === 'light')
-        ? 'auto'
-        : parsed.basemapStyle ?? DEFAULT_RADAR_SETTINGS.basemapStyle;
+    const basemapStyle: RadarSettings['basemapStyle'] =
+      parsed.basemapStyle === 'maptiler-light' || parsed.basemapStyle === 'maptiler-dark'
+        ? parsed.basemapStyle
+        : 'auto';
     return {
       ...DEFAULT_RADAR_SETTINGS,
       ...parsed,
-      basemapStyle: migratedBasemap,
+      basemapStyle,
+      showPlaneLabels: parsed.showPlaneLabels ?? true,
+      aircraft3DStyle: parsed.aircraft3DStyle ?? 'livery',
+      showTimeZones: parsed.showTimeZones ?? true,
+      planeLabels: {
+        ...DEFAULT_PLANE_LABELS,
+        ...(parsed.planeLabels ?? {}),
+        allowOverlap: false,
+      },
+      wxLayers: {
+        ...DEFAULT_WX_LAYERS,
+        ...(parsed.wxLayers ?? {}),
+      },
       cfWorkerUrl: parsed.cfWorkerUrl?.trim() ? parsed.cfWorkerUrl : DEFAULT_CF_WORKER_URL,
     };
   } catch {
@@ -130,7 +152,6 @@ export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [radarSettings, setRadarSettings] = useState<RadarSettings>(() => loadSavedRadarSettings());
   const [activeView, setActiveView] = useState<AppView>('radar');
-  const [threeViewMode, setThreeViewMode] = useState<ThreeViewMode>('cockpit');
   const [activeRegion, setActiveRegion] = useState<RegionPreset>(REGION_PRESETS[0]);
   const [localRegion, setLocalRegion] = useState<RegionPreset | null>(null);
   const [userLocation, setUserLocation] = useState<{
@@ -162,10 +183,19 @@ export default function App() {
   const [nowEpochSec, setNowEpochSec] = useState<number>(() => Math.floor(Date.now() / 1000));
 
   const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null);
+  const [selectedFlightIds, setSelectedFlightIds] = useState<string[]>([]);
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [selectedDetail, setSelectedDetail] = useState<FlightDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [followSelected, setFollowSelected] = useState(false);
   const [isolateSelected, setIsolateSelected] = useState(false);
+  const [playbackState, setPlaybackState] = useState<PlaybackState>({
+    enabled: false,
+    playing: false,
+    progress: 1,
+    speed: 5,
+  });
+  const [creditsOpen, setCreditsOpen] = useState(false);
 
   const [selectedAirport, setSelectedAirport] = useState<{
     icao: string;
@@ -180,7 +210,18 @@ export default function App() {
   >('none');
   const [sidebarMode, setSidebarMode] = useState<'flight' | 'airport' | null>(null);
 
-  const [mapAirports, setMapAirports] = useState<AirportMarker[]>([]);
+  const [mapAirports, setMapAirports] = useState<AirportMarker[]>(() =>
+    AIRPORT_CATALOG.map((a) => ({
+      icao: a.icao,
+      iata: a.iata,
+      name: a.name,
+      city: a.city,
+      country: a.country,
+      lat: a.lat,
+      lon: a.lon,
+      tier: 1 as const,
+    })),
+  );
   const [airportsWeather, setAirportsWeather] = useState<AirportWeather[]>([]);
   const [sigmets, setSigmets] = useState<SigmetHazard[]>([]);
   const [rainviewer, setRainviewer] = useState<RainViewerMeta | null>(null);
@@ -192,7 +233,7 @@ export default function App() {
   const [dockHidden, setDockHidden] = useState(false);
   const [showTrafficSheet, setShowTrafficSheet] = useState(false);
   const [opsDrawerOpen, setOpsDrawerOpen] = useState(false);
-  const [opsTab, setOpsTab] = useState<BottomOpsTab>('updates');
+  const [opsTab, setOpsTab] = useState<BottomOpsTab>('fov');
   const [gateChangeUpdates, setGateChangeUpdates] = useState<LiveFlightUpdateItem[]>([]);
   const prevGateMapRef = useRef<Map<string, string>>(new Map());
   const [plannedRoute, setPlannedRoute] = useState<{
@@ -232,7 +273,14 @@ export default function App() {
 
   const updateRadarSettings = useCallback((patch: Partial<RadarSettings>) => {
     setRadarSettings((prev) => {
-      const next = {...prev, ...patch};
+      const next: RadarSettings = {
+        ...prev,
+        ...patch,
+        planeLabels: patch.planeLabels
+          ? {...prev.planeLabels, ...patch.planeLabels, allowOverlap: false}
+          : {...prev.planeLabels, allowOverlap: false},
+        wxLayers: patch.wxLayers ? {...prev.wxLayers, ...patch.wxLayers} : prev.wxLayers,
+      };
       if (patch.locateMeEnabled === false) {
         setUserLocation(null);
         setLocalRegion(null);
@@ -247,6 +295,40 @@ export default function App() {
 
   const resetRadarSettings = useCallback(() => {
     setRadarSettings(DEFAULT_RADAR_SETTINGS);
+  }, []);
+
+  // Preload cached global airport directory immediately on entry, then refresh in background
+  useEffect(() => {
+    let cancelled = false;
+    void loadCachedAirportDirectory().then((cached) => {
+      if (!cancelled && cached && cached.length > 0) {
+        setMapAirports((prev) => {
+          if (prev.length >= cached.length) return prev;
+          const byIcao = new Map(cached.map((a) => [a.icao, a]));
+          for (const a of prev) byIcao.set(a.icao, a);
+          return Array.from(byIcao.values());
+        });
+      }
+    });
+    if (navigator.onLine) {
+      apiFetchJson<{airports?: AirportMarker[]}>(
+        '/api/airports?lamin=-85&lomin=-180&lamax=85&lomax=180&zoom=2',
+      )
+        .then((data) => {
+          if (!cancelled && Array.isArray(data.airports) && data.airports.length > 0) {
+            void saveCachedAirportDirectory(data.airports);
+            setMapAirports((prev) => {
+              const byIcao = new Map(data.airports!.map((a) => [a.icao, a]));
+              for (const a of prev) byIcao.set(a.icao, a);
+              return Array.from(byIcao.values());
+            });
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -287,7 +369,13 @@ export default function App() {
           ac.signal,
         );
         if (!ac.signal.aborted && Array.isArray(data.airports)) {
-          setMapAirports(data.airports);
+          setMapAirports((prev) => {
+            const byIcao = new Map(prev.map((a) => [a.icao, a]));
+            for (const a of data.airports!) byIcao.set(a.icao, a);
+            const merged = Array.from(byIcao.values());
+            void saveCachedAirportDirectory(merged);
+            return merged;
+          });
         }
       } catch {
         // retain previous viewport airports or ignore aborted request
@@ -383,13 +471,13 @@ export default function App() {
               if (pa !== pb) return pb - pa;
               return b.seenAtMs - a.seenAtMs;
             })
-            .slice(0, 2600)
+            .slice(0, 16000)
             .map((e) => e.flight);
 
           setRawFlights(mergedList);
           setLastFetchedAt(data.fetchedAt);
           setFlightsError(null);
-          await saveFlightSnapshot(regionKey, mergedList.slice(0, 900), data.fetchedAt);
+          await saveFlightSnapshot(regionKey, mergedList.slice(0, 2500), data.fetchedAt);
         } else {
           const cached = await loadFlightSnapshot(regionKey);
           if (cached && rawFlightsCountRef.current === 0) {
@@ -541,6 +629,23 @@ export default function App() {
     };
   }, [fetchWeatherAndHazards, fetchAcars]);
 
+  // Smooth Flight Playback timeline advance
+  useEffect(() => {
+    if (!playbackState.enabled || !playbackState.playing) return;
+    const id = window.setInterval(() => {
+      setPlaybackState((prev) => {
+        if (!prev.enabled || !prev.playing) return prev;
+        const step = (0.05 * prev.speed) / 60;
+        const nextProg = prev.progress + step;
+        if (nextProg >= 1) {
+          return {...prev, progress: 1, playing: false};
+        }
+        return {...prev, progress: nextProg};
+      });
+    }, 50);
+    return () => clearInterval(id);
+  }, [playbackState.enabled, playbackState.playing, playbackState.speed]);
+
   const flights = useMemo(() => {
     if (isOnline) return rawFlights;
     return rawFlights.map((f) => deadReckonFlight(f, nowEpochSec, true));
@@ -670,6 +775,26 @@ export default function App() {
   const selectedFlight = useMemo(
     () => flights.find((f) => f.id === selectedFlightId) ?? null,
     [flights, selectedFlightId],
+  );
+
+  const fovFlights = useMemo(
+    () =>
+      filteredFlights.filter(
+        (f) =>
+          f.lat >= bounds.lamin &&
+          f.lat <= bounds.lamax &&
+          f.lon >= bounds.lomin &&
+          f.lon <= bounds.lomax,
+      ),
+    [filteredFlights, bounds],
+  );
+
+  const multiSelectFlights = useMemo(
+    () =>
+      selectedFlightIds
+        .map((id) => flights.find((f) => f.id === id))
+        .filter((f): f is LiveFlight => Boolean(f)),
+    [flights, selectedFlightIds],
   );
 
   useEffect(() => {
@@ -817,19 +942,47 @@ export default function App() {
     setBounds(preset.bounds);
   };
 
-  const handleSelectFlight = useCallback((f: LiveFlight, opts?: {in3DMode?: boolean}) => {
-    setSelectedFlightId(f.id);
-    setSidebarMode('flight');
-    setMobileSheetDetent('peek');
-    setActiveView('radar');
-    setShowTrafficSheet(false);
-    if (opts?.in3DMode) {
-      setFollowSelected(true);
-    }
-    if (f.onGround) {
-      setThreeViewMode('taxi');
-    }
-  }, []);
+  const handleSelectFlight = useCallback(
+    (f: LiveFlight, opts?: {in3DMode?: boolean; multiSelect?: boolean}) => {
+      const useMulti = Boolean(opts?.multiSelect || multiSelectMode);
+      if (useMulti) {
+        setSelectedFlightIds((prev) => {
+          const exists = prev.includes(f.id);
+          const next = exists ? prev.filter((id) => id !== f.id) : [...prev, f.id];
+          if (!exists) {
+            setSelectedFlightId(f.id);
+          } else if (selectedFlightId === f.id) {
+            setSelectedFlightId(next[0] ?? null);
+          }
+          return next;
+        });
+      } else {
+        setSelectedFlightId(f.id);
+      }
+      setSidebarMode('flight');
+      setMobileSheetDetent('peek');
+      setActiveView('radar');
+      setShowTrafficSheet(false);
+      if (opts?.in3DMode) {
+        setFollowSelected(true);
+      }
+    },
+    [multiSelectMode, selectedFlightId],
+  );
+
+  const toggleFlightInMultiSelect = useCallback(
+    (f: LiveFlight) => {
+      setSelectedFlightIds((prev) => {
+        const exists = prev.includes(f.id);
+        const next = exists ? prev.filter((id) => id !== f.id) : [...prev, f.id];
+        if (!exists && !selectedFlightId) {
+          setSelectedFlightId(f.id);
+        }
+        return next;
+      });
+    },
+    [selectedFlightId],
+  );
 
   const handleSelectAirport = useCallback(async (ap: {icao: string; iata: string; name: string}) => {
     setSelectedAirport(ap);
@@ -964,6 +1117,8 @@ export default function App() {
         <RadarMap
           flights={filteredFlights}
           selectedFlight={selectedFlight}
+          selectedFlightIds={selectedFlightIds}
+          multiSelectMode={multiSelectMode}
           selectedDetail={selectedDetail}
           selectedAirportIcao={selectedAirport?.icao}
           mapAirports={mapAirports}
@@ -979,6 +1134,7 @@ export default function App() {
           flyToLocation={flyToLocation}
           followSelected={followSelected}
           isolateSelected={isolateSelected}
+          playbackState={playbackState}
           isMobilePortrait={isPortraitMobile}
           onUserDragBreakFollow={() => setFollowSelected(false)}
           settings={radarSettings}
@@ -1471,16 +1627,12 @@ export default function App() {
                 setIsolateSelected(false);
                 setSidebarMode(selectedAirport ? 'airport' : null);
               }}
-              onOpen3DMode={(mode) => {
-                setThreeViewMode(mode);
-                setActiveView('deck');
-              }}
             />
           ) : null}
         </div>
       </aside>
 
-      {/* Secondary Views Overlay (3D Deck / Taxi & ACARS / Flight Plan / Sector Traffic Sheet) */}
+      {/* Secondary Views Overlay (Taxi & ACARS / Flight Plan / Sector Traffic Sheet) */}
       {(activeView !== 'radar' || showTrafficSheet) && (
         <section
           aria-label="Workspace panel"
@@ -1494,11 +1646,9 @@ export default function App() {
             <div className="font-display text-sm sm:text-base font-semibold text-foreground truncate">
               {showTrafficSheet && activeView === 'radar'
                 ? `Sector Traffic · ${activeRegion.label}`
-                : activeView === 'deck'
-                  ? '3D Flight Deck & Livery Inspector'
-                  : activeView === 'taxi'
-                    ? 'Airport Surface Taxi & ACARS'
-                    : 'Weather-Coupled Flight Planner'}
+                : activeView === 'taxi'
+                  ? 'Airport Surface Taxi & ACARS'
+                  : 'Weather-Coupled Flight Planner'}
             </div>
             <Button
               size="sm"
@@ -1513,23 +1663,6 @@ export default function App() {
               Back to Map
             </Button>
           </div>
-
-          {activeView === 'deck' && (
-            <div className="h-[calc(100%-64px)] min-h-[380px]">
-              <FlightDeck3D
-                flight={selectedFlight}
-                detail={selectedDetail}
-                allFlights={flights}
-                groundTraffic={groundTraffic}
-                nearestWeather={nearestWeather}
-                airportsWeather={airportsWeather}
-                sigmets={sigmets}
-                disruptions={disruptions}
-                viewMode={threeViewMode}
-                onViewModeChange={setThreeViewMode}
-              />
-            </div>
-          )}
 
           {activeView === 'taxi' && (
             <TaxiAcarsView
@@ -1721,7 +1854,35 @@ export default function App() {
         </section>
       )}
 
-      {/* Upgraded Bottom Operations Drawer (Past Flights · Live Updates · WX/Restrictions · ASN Safety) */}
+      {/* Concurrent Multi-Select Aircraft Comparison Sidebar */}
+      {activeView === 'radar' && multiSelectFlights.length > 0 && (
+        <MultiSelectSidebar
+          flights={multiSelectFlights}
+          activeFlightId={selectedFlightId}
+          multiSelectMode={multiSelectMode}
+          onToggleMultiSelectMode={() => setMultiSelectMode((v) => !v)}
+          onFocusFlight={(f) => {
+            setSelectedFlightId(f.id);
+            setSidebarMode('flight');
+            setFlyToLocation((prev) => ({
+              lat: f.lat,
+              lon: f.lon,
+              zoom: 8,
+              seq: (prev?.seq ?? 0) + 1,
+            }));
+          }}
+          onRemoveFlight={(id) => {
+            setSelectedFlightIds((prev) => prev.filter((x) => x !== id));
+            if (selectedFlightId === id) {
+              setSelectedFlightId(null);
+            }
+          }}
+          onClearAll={() => setSelectedFlightIds([])}
+          isPortraitMobile={isPortraitMobile}
+        />
+      )}
+
+      {/* Upgraded Bottom Operations Drawer (FOV List · 13-Layer Weather · LiveATC · Flight Playback · Past · Updates · ASN Safety) */}
       <BottomOpsDrawer
         open={opsDrawerOpen && activeView === 'radar'}
         activeTab={opsTab}
@@ -1729,12 +1890,28 @@ export default function App() {
         onClose={() => setOpsDrawerOpen(false)}
         isPortraitMobile={isPortraitMobile}
         selectedFlight={selectedFlight}
+        fovFlights={fovFlights}
+        selectedFlightIds={selectedFlightIds}
+        multiSelectMode={multiSelectMode}
+        onToggleMultiSelectMode={() => setMultiSelectMode((v) => !v)}
+        onToggleFlightInMultiSelect={toggleFlightInMultiSelect}
+        onFocusFlight={(f) => {
+          handleSelectFlight(f);
+          setFlyToLocation((prev) => ({
+            lat: f.lat,
+            lon: f.lon,
+            zoom: 8.5,
+            seq: (prev?.seq ?? 0) + 1,
+          }));
+        }}
         liveUpdates={liveUpdates}
         sigmets={sigmets}
         disruptions={disruptions}
         acarsMessages={acarsMessages}
         radarSettings={radarSettings}
         onUpdateRadarSettings={updateRadarSettings}
+        playbackState={playbackState}
+        onUpdatePlayback={(patch) => setPlaybackState((prev) => ({...prev, ...patch}))}
         onSelectFlightByHexOrCallsign={(icao24, callsign) => {
           const match = flights.find(
             (f) =>
@@ -1777,13 +1954,16 @@ export default function App() {
           }));
           setOpsDrawerOpen(false);
         }}
+        onOpenCredits={() => setCreditsOpen(true)}
       />
 
-      {/* Navigation Dock: Dedicated Portrait Mobile/Tablet 6-Tab Thumb Bar OR Desktop Floating Island */}
+      <CreditsAttributionsModal open={creditsOpen} onClose={() => setCreditsOpen(false)} />
+
+      {/* Navigation Dock: Dedicated Portrait Mobile/Tablet 5-Tab Thumb Bar OR Compact Desktop Floating Island */}
       {isPortraitMobile ? (
         <nav
           aria-label="SkyDeck mobile navigation"
-          className="fixed bottom-0 left-0 right-0 z-[600] h-16 pb-safe bg-card/95 backdrop-blur-md border-t border-border grid grid-cols-6 items-center shadow-2xl"
+          className="fixed bottom-0 left-0 right-0 z-[600] h-16 pb-safe bg-card/95 backdrop-blur-md border-t border-border grid grid-cols-5 items-center shadow-2xl"
         >
           {(
             [
@@ -1842,17 +2022,6 @@ export default function App() {
                   setActiveView('planner');
                 },
               },
-              {
-                id: 'deck',
-                label: '3D Deck',
-                icon: <Box className="w-5 h-5" />,
-                active: activeView === 'deck',
-                onClick: () => {
-                  setShowTrafficSheet(false);
-                  setOpsDrawerOpen(false);
-                  setActiveView('deck');
-                },
-              },
             ] as const
           ).map((tab) => (
             <button
@@ -1873,7 +2042,7 @@ export default function App() {
       ) : (
         <nav
           aria-label="SkyDeck navigation and radar dock"
-          className={`fixed bottom-3 left-1/2 -translate-x-1/2 z-[600] max-w-[calc(100vw-16px)] transition-all duration-300 ease-out ${
+          className={`fixed bottom-3 left-1/2 -translate-x-1/2 z-[600] max-w-[calc(100vw-20px)] transition-all duration-300 ease-out ${
             dockHidden ? 'translate-y-0' : ''
           }`}
         >
@@ -1906,7 +2075,6 @@ export default function App() {
                     {id: 'radar', label: 'Radar'},
                     {id: 'taxi', label: 'Taxi'},
                     {id: 'planner', label: 'Plan'},
-                    {id: 'deck', label: '3D'},
                   ] as const
                 ).map((item) => (
                   <button
@@ -2162,7 +2330,19 @@ export default function App() {
                 </PopoverContent>
               </Popover>
 
-              {/* Compact Ops Drawer Trigger */}
+              {/* Compact Multi-Select & Ops Drawer Trigger (FOV · Weather · LiveATC · Playback · Updates · Safety) */}
+              <Button
+                size="sm"
+                variant={multiSelectMode || selectedFlightIds.length > 0 ? 'default' : 'outline'}
+                onClick={() => setMultiSelectMode((v) => !v)}
+                aria-label="Toggle multi-select mode"
+                title="Toggle multi-select mode (or Shift+Click any aircraft)"
+                className="shrink-0 h-8 px-2 whitespace-nowrap"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                {selectedFlightIds.length > 0 && <span>{selectedFlightIds.length}</span>}
+              </Button>
+
               <Button
                 size="sm"
                 variant={opsDrawerOpen && activeView === 'radar' ? 'default' : 'outline'}
@@ -2171,11 +2351,13 @@ export default function App() {
                   setActiveView('radar');
                   setOpsDrawerOpen((v) => !v);
                 }}
-                aria-label="Open flight operations drawer"
+                aria-label="Open flight operations drawer (FOV, Weather, LiveATC, Playback)"
                 className="shrink-0 h-8 px-2.5 whitespace-nowrap"
               >
                 <Activity className="w-3.5 h-3.5" />
-                <span>Ops{liveUpdates.length > 0 ? ` (${liveUpdates.length})` : ''}</span>
+                <span>
+                  Ops{playbackState.enabled ? ` · ${Math.round(playbackState.progress * 100)}%` : liveUpdates.length > 0 ? ` (${liveUpdates.length})` : ''}
+                </span>
               </Button>
 
               {/* Settings Inside Compact Dock */}
@@ -2207,6 +2389,18 @@ export default function App() {
                 className="shrink-0 h-8 w-8"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${flightsLoading ? 'animate-spin' : ''}`} />
+              </Button>
+
+              {/* Legal Attributions & Credits */}
+              <Button
+                size="icon"
+                variant="outline"
+                onClick={() => setCreditsOpen(true)}
+                aria-label="Credits and data attributions"
+                title="Credits & Attributions"
+                className="shrink-0 h-8 w-8"
+              >
+                <Scale className="w-3.5 h-3.5" />
               </Button>
 
               <div className="hidden xl:block shrink-0">

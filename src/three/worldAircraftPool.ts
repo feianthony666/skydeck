@@ -5,6 +5,7 @@ import {
   resolveAirlineLivery,
   resolveSpecialLivery,
 } from '../data/aviationCatalog';
+import {resolveAirlineManifest} from '../data/modelsAndAirlines';
 import {resolveFr24ModelClass, type Fr24ModelClass} from '../components/aircraftIcons';
 import type {LiveFlight} from '../types/aviation';
 import {
@@ -14,8 +15,8 @@ import {
   createMultiBladeFanGeometry,
   createSculptedNacelleGeometry,
 } from './airframeGeometry';
+import {acquireCompositedLiveryTexture} from './liveryCompositor';
 import {
-  acquireSvgFuselageSkinTexture,
   acquireSvgTailSkinTexture,
 } from './svgLiverySkins';
 
@@ -510,35 +511,30 @@ function acquireWorldLiveryMaterials(
 ): {entry: LiveryMaterialEntry; release: () => void} {
   const livery = resolveAirlineLivery(flight.airlineIcao, flight.callsign);
   const special = resolveSpecialLivery(flight.registration, flight.callsign);
+  const manifestAirline = resolveAirlineManifest(flight.airlineIcao, flight.callsign);
   const spec = resolveAircraftSpec(flight.aircraftType);
-  const key = `airnav|${spec.subtype || spec.category}`;
+  const acCode = (flight.aircraftType || spec.code || 'A320').toUpperCase();
+  const key = `${acCode}_${manifestAirline.icao}_${special?.theme ?? 'std'}`;
 
   let entry = liveryMatCache.get(key);
   if (!entry) {
-    const fus = acquireSvgFuselageSkinTexture(
-      livery,
-      special ? flight.registration : '',
-      spec,
-      special,
-      maxAnisotropy,
-      false,
-    );
+    const fus = acquireCompositedLiveryTexture(acCode, manifestAirline.icao, flight.callsign, maxAnisotropy);
     const tail = acquireSvgTailSkinTexture(livery, special, maxAnisotropy);
     const fuselageMat = new THREE.MeshStandardMaterial({
       map: fus.texture,
-      roughness: 0.28,
+      roughness: 0.25,
       metalness: 0.16,
     });
     const tailMat = new THREE.MeshStandardMaterial({
       map: tail.texture,
       color: '#FFFFFF',
-      roughness: 0.28,
+      roughness: 0.26,
       metalness: 0.14,
     });
     const noseMat = new THREE.MeshStandardMaterial({
-      color: special?.primaryHex || livery.tailHex || livery.fuselageHex,
-      roughness: 0.28,
-      metalness: 0.14,
+      color: special?.primaryHex || manifestAirline.primaryHex || livery.tailHex,
+      roughness: 0.26,
+      metalness: 0.18,
     });
     entry = {
       fuselageMat,
@@ -556,7 +552,7 @@ function acquireWorldLiveryMaterials(
     entry: captured,
     release: () => {
       captured.refCount--;
-      if (captured.refCount <= 0 && liveryMatCache.size > 110) {
+      if (captured.refCount <= 0 && liveryMatCache.size > 96) {
         captured.fuselageMat.dispose();
         captured.tailMat.dispose();
         captured.noseMat.dispose();
@@ -582,33 +578,47 @@ export function buildWorld3DAircraft(
   maxAnisotropy: number,
   isSelected: boolean,
   isEmergency: boolean,
+  useAirnavYellow = false,
 ): WorldAircraftHandle {
   const cls = resolveFr24ModelClass(flight.aircraftType, flight.callsign);
   const kit = getKit(cls);
-  void acquireWorldLiveryMaterials;
-  void maxAnisotropy;
+  const liv = useAirnavYellow ? null : acquireWorldLiveryMaterials(flight, maxAnisotropy);
 
   const group = new THREE.Group();
   const bodyGroup = new THREE.Group();
   group.add(bodyGroup);
 
-  // Draw Call 1: Multi-Station Lofted Fuselage (AirNav Radar signature glossy golden-yellow)
+  // Draw Call 1: Multi-Station Lofted Fuselage (Live Canvas UV Compositor OR AirNav Golden Yellow)
   const fusMesh = new THREE.Mesh(
     kit.fuselageGeo,
-    isSelected ? sharedAirnavSelectedMat : sharedAirnavYellowMat,
+    useAirnavYellow
+      ? isSelected
+        ? sharedAirnavSelectedMat
+        : sharedAirnavYellowMat
+      : liv!.entry.fuselageMat,
   );
   fusMesh.renderOrder = isSelected ? 26 : 18;
   bodyGroup.add(fusMesh);
 
-  // Draw Call 2: Merged Static Airframe (Golden-Yellow NACA Wings, Sharklets, Flap Canoes, H-Tail, Dark Windshield, Intakes, Nav Lights)
+  // Draw Call 2: Merged Static Airframe (NACA Wings, Sharklets, Flap Canoes, H-Tail, Dark Windshield, Intakes, Nav Lights)
   const staticMesh = new THREE.Mesh(kit.staticAirframeGeo, sharedVertexColorMat);
   staticMesh.renderOrder = isSelected ? 26 : 18;
   bodyGroup.add(staticMesh);
 
-  // Draw Call 3: Merged Vertical Fin, Nacelle Cowls, Belly Fairing, Spinners, SATCOM (AirNav Rich Gold Trim)
-  const trimMesh = new THREE.Mesh(kit.liveryTrimGeo, sharedAirnavTrimMat);
+  // Draw Call 3: Merged Vertical Fin, Nacelle Cowls, Belly Fairing, Spinners, SATCOM
+  const trimMesh = new THREE.Mesh(
+    kit.liveryTrimGeo,
+    useAirnavYellow ? sharedAirnavTrimMat : liv!.entry.noseMat,
+  );
   trimMesh.renderOrder = isSelected ? 26 : 18;
   bodyGroup.add(trimMesh);
+
+  // Draw Call 3b (Live Livery Mode): Fin Airline Tail Emblem
+  if (!useAirnavYellow && kit.finDecalGeo && liv) {
+    const finMesh = new THREE.Mesh(kit.finDecalGeo, liv.entry.tailMat);
+    finMesh.renderOrder = isSelected ? 27 : 19;
+    bodyGroup.add(finMesh);
+  }
 
   // Draw Call 4: Merged Multi-Blade Titanium Fans OR Spinning Heli Rotor
   if (kit.fansGeo) {
@@ -638,14 +648,16 @@ export function buildWorld3DAircraft(
     beaconMesh = halo;
   }
 
+  const styleTag = useAirnavYellow ? 'airnav' : `livery|${flight.airlineIcao || flight.callsign.slice(0, 3)}`;
   return {
     group,
     bodyGroup,
     rotor,
     beaconMesh,
-    modelKey: `airnav|${cls}|${isSelected ? 1 : 0}|${isEmergency ? 1 : 0}`,
+    modelKey: `${styleTag}|${cls}|${isSelected ? 1 : 0}|${isEmergency ? 1 : 0}`,
     dispose: () => {
       if (beaconMesh) beaconMesh.geometry.dispose();
+      liv?.release();
     },
   };
 }

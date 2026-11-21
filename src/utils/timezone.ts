@@ -237,9 +237,12 @@ export function resolveTimezoneByCoordsAndCode(opts: {
   iata?: string;
   lat?: number;
   lon?: number;
+  hintTzName?: string;
+  hintUtcOffsetSec?: number;
+  hintAbbr?: string;
 }): {timezoneName?: string; utcOffsetSec: number; timezoneAbbr: string} {
   const icao = (opts.icao || '').trim().toUpperCase();
-  let tzName = icao ? ICAO_TIMEZONE_OVERRIDES[icao] : undefined;
+  let tzName = opts.hintTzName || (icao ? ICAO_TIMEZONE_OVERRIDES[icao] : undefined);
 
   if (!tzName && icao.length >= 2) {
     const p2 = icao.slice(0, 2);
@@ -302,7 +305,10 @@ export function resolveTimezoneByCoordsAndCode(opts: {
         timeZone: tzName,
         timeZoneName: 'short',
       }).formatToParts(now);
-      const abbr = abbrParts.find((p) => p.type === 'timeZoneName')?.value ?? formatUtcOffsetLabel(offsetSec);
+      const abbr =
+        abbrParts.find((p) => p.type === 'timeZoneName')?.value ??
+        opts.hintAbbr ??
+        formatUtcOffsetLabel(offsetSec);
       return {timezoneName: tzName, utcOffsetSec: offsetSec, timezoneAbbr: abbr};
     } catch {
       // fall through
@@ -311,10 +317,14 @@ export function resolveTimezoneByCoordsAndCode(opts: {
 
   const lon = typeof opts.lon === 'number' && Number.isFinite(opts.lon) ? opts.lon : 0;
   const offsetHours = Math.max(-12, Math.min(14, Math.round(lon / 15)));
-  const offsetSec = offsetHours * 3600;
+  const offsetSec =
+    typeof opts.hintUtcOffsetSec === 'number' && Number.isFinite(opts.hintUtcOffsetSec)
+      ? opts.hintUtcOffsetSec
+      : offsetHours * 3600;
   return {
+    timezoneName: tzName,
     utcOffsetSec: offsetSec,
-    timezoneAbbr: formatUtcOffsetLabel(offsetSec),
+    timezoneAbbr: opts.hintAbbr || formatUtcOffsetLabel(offsetSec),
   };
 }
 

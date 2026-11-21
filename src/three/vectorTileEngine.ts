@@ -5,7 +5,7 @@
  * with zero blurry raster tiles—even at z=15..19 via exact vector sub-quadrant overzooming.
  */
 
-export type VectorTheme = 'dark' | 'light' | 'osm' | 'hybrid';
+export type VectorTheme = 'maptiler-dark' | 'maptiler-light';
 
 export interface MvtFeature {
   type: 1 | 2 | 3; // 1=Point, 2=LineString, 3=Polygon
@@ -279,88 +279,72 @@ interface PaletteSpec {
   borderCountry: string;
   borderState: string;
   labelMain: string;
+  labelCountry?: string;
+  labelCity?: string;
   labelRoad: string;
   labelWater: string;
   labelHalo: string;
+  hideRoadLabels?: boolean;
+  hideNeighborhoodLabels?: boolean;
 }
 
-const PALETTES: Record<Exclude<VectorTheme, 'hybrid'>, PaletteSpec> = {
-  dark: {
-    land: '#0D1422',
-    water: '#061325',
-    waterStroke: '#153459',
-    park: '#0F1F1E',
-    landuse: '#121B2C',
-    buildingFill: '#172236',
-    buildingStroke: '#253652',
-    aerowayApron: '#162033',
-    aerowayRunway: '#223047',
-    roadCasing: '#090E18',
-    motorway: '#D97706',
-    motorwayCasing: '#78350F',
-    trunk: '#B45309',
-    primary: '#64748B',
-    secondary: '#475569',
-    minor: '#2D3C53',
-    service: '#212E42',
-    rail: '#2B3B52',
-    borderCountry: 'rgba(56, 189, 248, 0.55)',
-    borderState: 'rgba(100, 116, 139, 0.35)',
-    labelMain: '#E2E8F0',
-    labelRoad: '#CBD5E1',
-    labelWater: '#7DD3FC',
-    labelHalo: '#070B13',
+const PALETTES: Record<VectorTheme, PaletteSpec> = {
+  // Exact MapTiler style 01a1fd4b-dd4d-7bc2-b7ac-25bc8cab638c (Dataviz Dark)
+  'maptiler-dark': {
+    land: '#333333',
+    water: '#212121',
+    waterStroke: '#0D0D0D',
+    park: '#2B2B2B',
+    landuse: '#2E2E2E',
+    buildingFill: '#2E2E2E',
+    buildingStroke: '#292929',
+    aerowayApron: '#2B2B2B',
+    aerowayRunway: '#363636',
+    roadCasing: '#363636',
+    motorway: '#3D3D3D',
+    motorwayCasing: '#333333',
+    trunk: '#3B3B3B',
+    primary: '#3B3B3B',
+    secondary: '#383838',
+    minor: '#363636',
+    service: '#343434',
+    rail: '#292929',
+    borderCountry: '#575757',
+    borderState: '#525252',
+    labelMain: '#858585',
+    labelCountry: '#9A9A9A',
+    labelCity: '#A6A6A6',
+    labelRoad: '#858585',
+    labelWater: '#5E5E5E',
+    labelHalo: '#0D0D0D',
   },
-  light: {
-    land: '#ECF1F6',
-    water: '#B6DCF2',
-    waterStroke: '#8BC5E8',
-    park: '#D8EED9',
-    landuse: '#E3E9F0',
-    buildingFill: '#D7E0EA',
-    buildingStroke: '#BCC8D6',
-    aerowayApron: '#DFE6EE',
-    aerowayRunway: '#94A3B8',
-    roadCasing: '#BAC6D4',
-    motorway: '#F59E0B',
-    motorwayCasing: '#B45309',
-    trunk: '#FBBF24',
-    primary: '#FDE68A',
+  // Exact MapTiler style 01a1fd4a-9db0-7483-8059-a7bf73fb9c17 (Dataviz Light)
+  'maptiler-light': {
+    land: '#F7F7F7',
+    water: '#E0E0E2',
+    waterStroke: '#C2C2C4',
+    park: '#EFEFEF',
+    landuse: '#F0F0F0',
+    buildingFill: '#EDEDED',
+    buildingStroke: '#DCDCDC',
+    aerowayApron: '#EAEAEA',
+    aerowayRunway: '#DEDEDE',
+    roadCasing: '#D9D9D9',
+    motorway: '#FFFFFF',
+    motorwayCasing: '#CCCCCC',
+    trunk: '#FFFFFF',
+    primary: '#FFFFFF',
     secondary: '#FFFFFF',
     minor: '#FFFFFF',
-    service: '#F8FAFC',
-    rail: '#94A3B8',
-    borderCountry: 'rgba(30, 64, 175, 0.45)',
-    borderState: 'rgba(100, 116, 139, 0.32)',
-    labelMain: '#0F172A',
-    labelRoad: '#334155',
-    labelWater: '#0369A1',
-    labelHalo: '#F8FAFC',
-  },
-  osm: {
-    land: '#F3EFE6',
-    water: '#A6D1E6',
-    waterStroke: '#7EB8D8',
-    park: '#CBE9B8',
-    landuse: '#E7E4DC',
-    buildingFill: '#D8CFC4',
-    buildingStroke: '#C2B6A8',
-    aerowayApron: '#E2DFEC',
-    aerowayRunway: '#9CA3AF',
-    roadCasing: '#B3A89A',
-    motorway: '#E88B68',
-    motorwayCasing: '#C2532B',
-    trunk: '#F3B27A',
-    primary: '#FCD475',
-    secondary: '#FEF3B4',
-    minor: '#FFFFFF',
     service: '#FAFAFA',
-    rail: '#78716C',
-    borderCountry: 'rgba(147, 51, 234, 0.45)',
-    borderState: 'rgba(107, 114, 128, 0.35)',
-    labelMain: '#1E293B',
-    labelRoad: '#1F2937',
-    labelWater: '#0284C7',
+    rail: '#CCCCCC',
+    borderCountry: '#CFCFCF',
+    borderState: '#D4D4D4',
+    labelMain: '#8C8C8C',
+    labelCountry: '#737373',
+    labelCity: '#6B6B6B',
+    labelRoad: '#8C8C8C',
+    labelWater: '#AFB0B2',
     labelHalo: '#FFFFFF',
   },
 };
@@ -421,15 +405,10 @@ export function renderMvtTileToCanvas(
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
-  const isHybrid = theme === 'hybrid';
-  const pal = PALETTES[isHybrid ? 'dark' : theme];
+  const pal = PALETTES[theme];
 
-  if (!isHybrid) {
-    ctx.fillStyle = pal.land;
-    ctx.fillRect(0, 0, size, size);
-  } else {
-    ctx.clearRect(0, 0, size, size);
-  }
+  ctx.fillStyle = pal.land;
+  ctx.fillRect(0, 0, size, size);
 
   const overScale = Math.pow(2, z - srcZ);
   const subX = (x - srcX * overScale) * size;
@@ -438,20 +417,38 @@ export function renderMvtTileToCanvas(
   const mapLayer = (name: string) => mvt.get(name);
   const scaleFactor = (ext: number) => (size * overScale) / ext;
 
-  // 1. Landcover & Parks & Landuse (skip on hybrid overlay)
-  if (!isHybrid) {
-    for (const lname of ['landcover', 'landuse', 'park']) {
+  // 1. Landcover & Parks & Landuse (MapTiler v4 + OpenMapTiles aliases)
+  {
+    for (const lname of [
+      'residential',
+      'industrial',
+      'cemetery',
+      'wood',
+      'grass',
+      'forest',
+      'wetland',
+      'leisure',
+      'landcover',
+      'landuse',
+      'park',
+    ]) {
       const lyr = mapLayer(lname);
       if (!lyr) continue;
       const sf = scaleFactor(lyr.extent);
-      ctx.fillStyle = lname === 'park' ? pal.park : pal.landuse;
+      const isGreen =
+        lname === 'wood' ||
+        lname === 'grass' ||
+        lname === 'forest' ||
+        lname === 'wetland' ||
+        lname === 'park';
+      ctx.fillStyle = isGreen ? pal.park : pal.landuse;
       for (const f of lyr.features) {
         if (f.type !== 3) continue;
         const cls = String(f.props.class ?? '');
         if (lname === 'landcover' && cls !== 'wood' && cls !== 'grass' && cls !== 'wetland') continue;
         if (lname === 'landuse' && cls === 'residential') continue;
         ctx.fillStyle =
-          lname === 'park' || cls === 'wood' || cls === 'grass' ? pal.park : pal.landuse;
+          isGreen || cls === 'wood' || cls === 'grass' ? pal.park : pal.landuse;
         tracePolygons(ctx, f.rings, sf, subX, sf, subY);
         ctx.fill('evenodd');
       }
@@ -487,9 +484,10 @@ export function renderMvtTileToCanvas(
       }
     }
 
-    // 3. Global Aeroway Layer (base footprints visible from z=5..19 everywhere on Earth)
-    const aeroLyr = mapLayer('aeroway');
-    if (aeroLyr && z >= 6) {
+    // 3. Global Aeroway / Aviation Layer
+    for (const aeroName of ['aviation', 'aviation_line', 'aeroway']) {
+      const aeroLyr = mapLayer(aeroName);
+      if (!aeroLyr || z < 6) continue;
       const sf = scaleFactor(aeroLyr.extent);
       for (const f of aeroLyr.features) {
         const cls = String(f.props.class ?? '');
@@ -526,10 +524,11 @@ export function renderMvtTileToCanvas(
     }
   }
 
-  // 5. ALL World Streets & Highways (`transportation`)
-  const transLyr = mapLayer('transportation');
-  if (transLyr) {
-    const sf = scaleFactor(transLyr.extent);
+  // 5. ALL World Streets, Railways & Highways (`road` in MapTiler v4, `transportation` fallback)
+  const transLayers = [mapLayer('road'), mapLayer('railway'), mapLayer('transportation')].filter(
+    (l): l is MvtLayer => Boolean(l),
+  );
+  if (transLayers.length > 0) {
     const zBoost = z >= 14 ? Math.min(3.4, Math.pow(1.42, z - 14)) : Math.max(0.55, (z - 3) / 10);
 
     type RoadBucket = {
@@ -539,7 +538,7 @@ export function renderMvtTileToCanvas(
       color: string;
       casingColor: string;
       dashed?: boolean;
-      lines: Array<Array<[number, number]>>;
+      lines: Array<{rings: Array<Array<[number, number]>>; sf: number}>;
     };
 
     const buckets = new Map<string, RoadBucket>();
@@ -550,6 +549,7 @@ export function renderMvtTileToCanvas(
       color: string,
       casingColor: string,
       rings: Array<Array<[number, number]>>,
+      sf: number,
       dashed = false,
     ) => {
       let b = buckets.get(key);
@@ -557,7 +557,7 @@ export function renderMvtTileToCanvas(
         b = {
           order,
           width,
-          casingWidth: width + (width >= 2.2 ? 1.8 : 0.8),
+          casingWidth: width + (width >= 2.0 ? 1.8 : 0.9),
           color,
           casingColor,
           dashed,
@@ -565,28 +565,34 @@ export function renderMvtTileToCanvas(
         };
         buckets.set(key, b);
       }
-      for (const r of rings) b.lines.push(r);
+      b.lines.push({rings, sf});
     };
 
-    for (const f of transLyr.features) {
-      if (f.type !== 2) continue;
-      const cls = String(f.props.class ?? '');
-      if (cls === 'motorway') {
-        pushRoad('motorway', 7, Math.max(2.0, 3.2 * zBoost), pal.motorway, pal.motorwayCasing, f.rings);
-      } else if (cls === 'trunk') {
-        pushRoad('trunk', 6, Math.max(1.6, 2.7 * zBoost), pal.trunk, pal.roadCasing, f.rings);
-      } else if (cls === 'primary') {
-        pushRoad('primary', 5, Math.max(1.3, 2.3 * zBoost), pal.primary, pal.roadCasing, f.rings);
-      } else if (cls === 'secondary' && z >= 8) {
-        pushRoad('secondary', 4, Math.max(1.1, 1.9 * zBoost), pal.secondary, pal.roadCasing, f.rings);
-      } else if (cls === 'tertiary' && z >= 9) {
-        pushRoad('tertiary', 3, Math.max(1.0, 1.6 * zBoost), pal.secondary, pal.roadCasing, f.rings);
-      } else if ((cls === 'minor' || cls === 'street' || cls === 'residential') && z >= 10) {
-        pushRoad('minor', 2, Math.max(0.85, 1.3 * zBoost), pal.minor, pal.roadCasing, f.rings);
-      } else if ((cls === 'service' || cls === 'track' || cls === 'path') && z >= 12) {
-        pushRoad('service', 1, Math.max(0.7, 0.9 * zBoost), pal.service, pal.roadCasing, f.rings);
-      } else if (cls === 'rail' && z >= 9) {
-        pushRoad('rail', 0, Math.max(0.8, 0.9 * zBoost), pal.rail, pal.roadCasing, f.rings, true);
+    for (const transLyr of transLayers) {
+      const sf = scaleFactor(transLyr.extent);
+      const isRailLayer = transLyr.name === 'railway';
+      for (const f of transLyr.features) {
+        if (f.type !== 2) continue;
+        const cls = String(f.props.class ?? '');
+        if (isRailLayer || cls === 'rail') {
+          if (z >= 9) {
+            pushRoad('rail', 0, Math.max(0.8, 0.9 * zBoost), pal.rail, pal.roadCasing, f.rings, sf, true);
+          }
+        } else if (cls === 'motorway') {
+          pushRoad('motorway', 7, Math.max(2.0, 3.2 * zBoost), pal.motorway, pal.motorwayCasing, f.rings, sf);
+        } else if (cls === 'trunk') {
+          pushRoad('trunk', 6, Math.max(1.6, 2.7 * zBoost), pal.trunk, pal.roadCasing, f.rings, sf);
+        } else if (cls === 'primary') {
+          pushRoad('primary', 5, Math.max(1.3, 2.3 * zBoost), pal.primary, pal.roadCasing, f.rings, sf);
+        } else if (cls === 'secondary' && z >= 8) {
+          pushRoad('secondary', 4, Math.max(1.1, 1.9 * zBoost), pal.secondary, pal.roadCasing, f.rings, sf);
+        } else if (cls === 'tertiary' && z >= 9) {
+          pushRoad('tertiary', 3, Math.max(1.0, 1.6 * zBoost), pal.secondary, pal.roadCasing, f.rings, sf);
+        } else if ((cls === 'minor' || cls === 'street' || cls === 'residential') && z >= 10) {
+          pushRoad('minor', 2, Math.max(0.85, 1.3 * zBoost), pal.minor, pal.roadCasing, f.rings, sf);
+        } else if ((cls === 'service' || cls === 'track' || cls === 'path') && z >= 12) {
+          pushRoad('service', 1, Math.max(0.7, 0.9 * zBoost), pal.service, pal.roadCasing, f.rings, sf);
+        }
       }
     }
 
@@ -594,17 +600,17 @@ export function renderMvtTileToCanvas(
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Pass 1: Casings for crisp intersections & street borders
     for (const b of sortedBuckets) {
       if (b.dashed || b.lines.length === 0) continue;
       if (b.order <= 2 && z < 12) continue;
       ctx.strokeStyle = b.casingColor;
       ctx.lineWidth = b.casingWidth;
-      traceLines(ctx, b.lines, sf, subX, sf, subY);
-      ctx.stroke();
+      for (const item of b.lines) {
+        traceLines(ctx, item.rings, item.sf, subX, item.sf, subY);
+        ctx.stroke();
+      }
     }
 
-    // Pass 2: Road fills
     for (const b of sortedBuckets) {
       if (b.lines.length === 0) continue;
       if (b.dashed) {
@@ -612,32 +618,38 @@ export function renderMvtTileToCanvas(
         ctx.setLineDash([5, 5]);
         ctx.strokeStyle = b.color;
         ctx.lineWidth = b.width;
-        traceLines(ctx, b.lines, sf, subX, sf, subY);
-        ctx.stroke();
+        for (const item of b.lines) {
+          traceLines(ctx, item.rings, item.sf, subX, item.sf, subY);
+          ctx.stroke();
+        }
         ctx.restore();
       } else {
         ctx.strokeStyle = b.color;
         ctx.lineWidth = b.width;
-        traceLines(ctx, b.lines, sf, subX, sf, subY);
-        ctx.stroke();
+        for (const item of b.lines) {
+          traceLines(ctx, item.rings, item.sf, subX, item.sf, subY);
+          ctx.stroke();
+        }
       }
     }
   }
 
-  // 6. Political Boundaries
-  const boundLyr = mapLayer('boundary');
-  if (boundLyr) {
+  // 6. Political Boundaries (`country_border`, `country_border_disputed`, `sub_border`, or `boundary`)
+  for (const bName of ['country_border', 'country_border_disputed', 'sub_border', 'boundary']) {
+    const boundLyr = mapLayer(bName);
+    if (!boundLyr) continue;
     const sf = scaleFactor(boundLyr.extent);
     ctx.save();
     for (const f of boundLyr.features) {
       if (f.type !== 2) continue;
       if (f.props.maritime === 1) continue;
-      const lvl = Number(f.props.admin_level ?? 2);
-      if (lvl <= 2) {
+      const lvl = Number(f.props.admin_level ?? (bName === 'sub_border' ? 40 : 2));
+      const isCountry = bName === 'country_border' || bName === 'country_border_disputed' || lvl <= 2;
+      if (isCountry) {
         ctx.strokeStyle = pal.borderCountry;
         ctx.lineWidth = 1.4;
-        ctx.setLineDash([6, 4]);
-      } else if (lvl <= 4 && z >= 4) {
+        ctx.setLineDash(bName === 'country_border_disputed' ? [3, 4] : [6, 4]);
+      } else if (z >= 4) {
         ctx.strokeStyle = pal.borderState;
         ctx.lineWidth = 0.9;
         ctx.setLineDash([3, 4]);
@@ -679,7 +691,7 @@ export function renderMvtTileToCanvas(
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineJoin = 'round';
-    ctx.lineWidth = 3.2;
+    ctx.lineWidth = 3.0;
     ctx.strokeStyle = pal.labelHalo;
     ctx.strokeText(text, 0, 0);
     ctx.fillStyle = fill;
@@ -687,9 +699,9 @@ export function renderMvtTileToCanvas(
     ctx.restore();
   };
 
-  // Street names (`transportation_name`)
-  const roadNameLyr = mapLayer('transportation_name');
-  if (roadNameLyr && z >= 11) {
+  // Street names (`road_label` in MapTiler v4, `transportation_name` fallback)
+  const roadNameLyr = mapLayer('road_label') ?? mapLayer('transportation_name');
+  if (roadNameLyr && z >= 12 && !pal.hideRoadLabels) {
     const sf = scaleFactor(roadNameLyr.extent);
     for (const f of roadNameLyr.features) {
       if (f.type !== 2 || f.rings.length === 0) continue;
@@ -723,9 +735,44 @@ export function renderMvtTileToCanvas(
     }
   }
 
-  // City / Country / Place names (`place`)
+  // City / Country / State / Town / Place names (MapTiler v4 split symbol layers + OpenMapTiles `place`)
+  const placeSpecs: Array<{
+    layer: string;
+    minZ: number;
+    maxZ: number;
+    font: string;
+    color: string;
+  }> = [
+    {layer: 'continent_label', minZ: 1, maxZ: 4, font: '700 13px "Outfit", system-ui, sans-serif', color: pal.labelCountry ?? pal.labelMain},
+    {layer: 'country_label', minZ: 2, maxZ: 7, font: '700 12px "Outfit", system-ui, sans-serif', color: pal.labelCountry ?? pal.labelMain},
+    {layer: 'state_label', minZ: 4, maxZ: 8, font: '600 11px "Inter", system-ui, sans-serif', color: pal.labelMain},
+    {layer: 'city_label', minZ: 4, maxZ: 15, font: '700 12.5px "Outfit", system-ui, sans-serif', color: pal.labelCity ?? pal.labelMain},
+    {layer: 'town_label', minZ: 7, maxZ: 15, font: '600 11px "Inter", system-ui, sans-serif', color: pal.labelCity ?? pal.labelMain},
+    {layer: 'place_label', minZ: 10, maxZ: 16, font: '600 10.5px "Inter", system-ui, sans-serif', color: pal.labelMain},
+    {layer: 'water_centroid', minZ: 2, maxZ: 8, font: 'italic 600 11px "Inter", system-ui, sans-serif', color: pal.labelWater},
+  ];
+  for (const spec of placeSpecs) {
+    if (z < spec.minZ || z > spec.maxZ) continue;
+    const lyr = mapLayer(spec.layer);
+    if (!lyr) continue;
+    const sf = scaleFactor(lyr.extent);
+    const sorted = [...lyr.features].sort(
+      (a, b) => Number(a.props.rank ?? 99) - Number(b.props.rank ?? 99),
+    );
+    for (const f of sorted) {
+      if (f.type !== 1 || f.rings.length === 0) continue;
+      const name = String(f.props['name:en'] ?? f.props.name ?? '').trim();
+      if (!name) continue;
+      const pt = f.rings[0][0];
+      if (!pt) continue;
+      tryPlaceText(name.slice(0, 24), pt[0] * sf - subX, pt[1] * sf - subY, spec.font, spec.color);
+      if (placedLabels.length >= 34) break;
+    }
+    if (placedLabels.length >= 34) break;
+  }
+
   const placeLyr = mapLayer('place');
-  if (placeLyr) {
+  if (placeLyr && placedLabels.length < 34) {
     const sf = scaleFactor(placeLyr.extent);
     const sortedPlaces = [...placeLyr.features].sort(
       (a, b) => Number(a.props.rank ?? 99) - Number(b.props.rank ?? 99),
@@ -737,20 +784,26 @@ export function renderMvtTileToCanvas(
       if (cls === 'country' && (z < 2 || z > 7)) continue;
       if (cls === 'state' && (z < 4 || z > 8)) continue;
       if ((cls === 'town' || cls === 'village') && z < 8) continue;
-      if ((cls === 'suburb' || cls === 'neighbourhood') && z < 11) continue;
+      if (cls === 'suburb' || cls === 'neighbourhood' || cls === 'quarter') {
+        if (pal.hideNeighborhoodLabels || z < 11) continue;
+      }
       const name = String(f.props['name:en'] ?? f.props.name ?? '').trim();
       if (!name) continue;
       const pt = f.rings[0][0];
       if (!pt) continue;
-      const px = pt[0] * sf - subX;
-      const py = pt[1] * sf - subY;
       const font =
         cls === 'country'
           ? '700 12px "Outfit", system-ui, sans-serif'
           : cls === 'city'
             ? '700 12.5px "Outfit", system-ui, sans-serif'
             : '600 11px "Inter", system-ui, sans-serif';
-      tryPlaceText(name.slice(0, 24), px, py, font, pal.labelMain);
+      const labelFill =
+        cls === 'country'
+          ? (pal.labelCountry ?? pal.labelMain)
+          : cls === 'city' || cls === 'town'
+            ? (pal.labelCity ?? pal.labelMain)
+            : pal.labelMain;
+      tryPlaceText(name.slice(0, 24), pt[0] * sf - subX, pt[1] * sf - subY, font, labelFill);
       if (placedLabels.length >= 34) break;
     }
   }
@@ -766,14 +819,10 @@ export function createFallbackGridCanvas(theme: VectorTheme, size = 256): HTMLCa
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
-  if (theme === 'hybrid') {
-    ctx.clearRect(0, 0, size, size);
-    return canvas;
-  }
   const pal = PALETTES[theme];
   ctx.fillStyle = pal.land;
   ctx.fillRect(0, 0, size, size);
-  ctx.strokeStyle = theme === 'dark' ? 'rgba(56,189,248,0.06)' : 'rgba(15,23,42,0.06)';
+  ctx.strokeStyle = theme === 'maptiler-dark' ? 'rgba(255,255,255,0.05)' : 'rgba(15,23,42,0.06)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let i = 0; i <= 4; i++) {

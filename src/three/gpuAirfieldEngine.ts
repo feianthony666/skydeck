@@ -4,6 +4,7 @@ import {AIRPORT_CATALOG} from '../data/aviationCatalog';
 import {apiFetchJson} from '../services/directAviationClient';
 import type {
   AirfieldSurfaceData,
+  AirportMarker,
   TaxiwaySegment,
 } from '../types/aviation';
 import {
@@ -27,9 +28,17 @@ interface AirfieldCacheDb extends DBSchema {
       data: AirfieldSurfaceData;
     };
   };
+  directory: {
+    key: string;
+    value: {
+      id: string;
+      savedAt: number;
+      airports: AirportMarker[];
+    };
+  };
 }
 
-const DB_NAME = 'skydeck-gpu-airfields-v2';
+const DB_NAME = 'skydeck-gpu-airfields-v3';
 let dbPromise: Promise<IDBPDatabase<AirfieldCacheDb>> | null = null;
 
 function getDb() {
@@ -39,10 +48,39 @@ function getDb() {
         if (!db.objectStoreNames.contains('surfaces')) {
           db.createObjectStore('surfaces', {keyPath: 'icao'});
         }
+        if (!db.objectStoreNames.contains('directory')) {
+          db.createObjectStore('directory', {keyPath: 'id'});
+        }
       },
     });
   }
   return dbPromise;
+}
+
+export async function loadCachedAirportDirectory(): Promise<AirportMarker[] | null> {
+  try {
+    const db = await getDb();
+    if (!db) return null;
+    const row = await db.get('directory', 'world-airports');
+    if (!row || Date.now() - row.savedAt > 7 * 86400_000) return null;
+    return row.airports;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveCachedAirportDirectory(airports: AirportMarker[]): Promise<void> {
+  try {
+    const db = await getDb();
+    if (!db || airports.length === 0) return;
+    await db.put('directory', {
+      id: 'world-airports',
+      savedAt: Date.now(),
+      airports,
+    });
+  } catch {
+    // ignore storage errors
+  }
 }
 
 async function loadCachedSurface(icao: string): Promise<AirfieldSurfaceData | null> {
@@ -398,9 +436,12 @@ const LIGHT_VERTEX_SHADER = `
     vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mvPos;
 
-    float zoomScale = clamp((uZoom - 9.8) * 0.68, 1.8, 5.8);
-    float baseSz = aKind > 2.5 ? 5.6 : 4.2;
-    gl_PointSize = visible > 0.5 ? baseSz * zoomScale * uPixelRatio : 0.0;
+    // Continuous smooth dynamic scaling across both 2D zoom & 3D perspective distance
+    float zoomFactor = pow(1.22, clamp(uZoom - 12.0, -3.5, 5.5));
+    float distM = max(250.0, -mvPos.z);
+    float perspBoost = clamp(4200.0 / distM, 0.42, 2.0);
+    float baseSz = aKind > 2.5 ? 3.2 : 2.2;
+    gl_PointSize = visible > 0.5 ? clamp(baseSz * zoomFactor * (0.42 + 0.50 * perspBoost) * uPixelRatio, 1.2, 10.5) : 0.0;
   }
 `;
 
@@ -413,9 +454,9 @@ const LIGHT_FRAGMENT_SHADER = `
     vec2 d = gl_PointCoord - vec2(0.5);
     float r = length(d);
     if (r > 0.5) discard;
-    float halo = exp(-r * r * 6.5);
-    float core = smoothstep(0.28, 0.05, r);
-    vec3 col = mix(vColor * 1.25, vec3(1.0), core * 0.72);
+    float halo = exp(-r * r * 11.0);
+    float core = smoothstep(0.22, 0.04, r);
+    vec3 col = mix(vColor * 1.15, vec3(1.0), core * 0.78);
     gl_FragColor = vec4(col, vAlpha * max(halo, core));
   }
 `;
@@ -1076,9 +1117,9 @@ export function buildGpuAirfieldGroup(
       group.add(numMesh);
       disposables.push(numTex, numMat, numGeo);
 
-      // Extended Approach Corridor Rails (2800m) + ILS Dash Centerline (8500m)
+      // Extended High-Visibility Approach Ladder (`|----|----|`) + ILS Extended Centerline (9000m)
       const appDist = 2800 * mercScale;
-      const farDist = 8500 * mercScale;
+      const farDist = 9000 * mercScale;
       const outUx = -end.inUx;
       const outUz = -end.inUz;
       const appEndX = threshX + outUx * appDist;
@@ -1086,17 +1127,62 @@ export function buildGpuAirfieldGroup(
       const farEndX = threshX + outUx * farDist;
       const farEndZ = threshZ + outUz * farDist;
 
+      // Dashed / solid centerline stem & thick approach spine (`----|----|`)
       appendSmoothTaxiRibbonXZ(
         [
           [threshX, threshZ],
           [appEndX, appEndZ],
         ],
-        Math.max(3.0 * mercScale, rwyW * 0.08),
+        Math.max(4.5 * mercScale, rwyW * 0.11),
         0,
         rwyApproachRailsVerts,
         false,
       );
-      rwyApproachSegs.push(appEndX, 0, appEndZ, farEndX, 0, farEndZ);
+
+      // Perpendicular `|` crossbar ladder rungs every 180m (wider horizon bars every 540m)
+      for (let dM = 180; dM <= 2700; dM += 180) {
+        const isMajorBar = dM % 540 === 0;
+        const barHalfSpan = (isMajorBar ? rwyW * 0.95 : rwyW * 0.55) * Math.max(1.0, mercScale * 0.88);
+        const barHalfThick = Math.max(4.2 * mercScale, isMajorBar ? 6.8 * mercScale : 4.6 * mercScale);
+        const cx = threshX + outUx * (dM * mercScale);
+        const cz = threshZ + outUz * (dM * mercScale);
+        appendRectXZ(
+          cx,
+          cz,
+          endRx,
+          endRz,
+          outUx,
+          outUz,
+          barHalfSpan,
+          barHalfThick,
+          0,
+          rwyApproachRailsVerts,
+        );
+        rwyApproachSegs.push(
+          cx - endRx * barHalfSpan,
+          0,
+          cz - endRz * barHalfSpan,
+          cx + endRx * barHalfSpan,
+          0,
+          cz + endRz * barHalfSpan,
+        );
+      }
+
+      // Continuous extended approach centerline spine out to 9km (plus ticks every 1000m)
+      rwyApproachSegs.push(threshX, 0, threshZ, farEndX, 0, farEndZ);
+      for (let kmM = 3600; kmM <= 8400; kmM += 1200) {
+        const kx = threshX + outUx * (kmM * mercScale);
+        const kz = threshZ + outUz * (kmM * mercScale);
+        const tickHalf = rwyW * 0.65;
+        rwyApproachSegs.push(
+          kx - endRx * tickHalf,
+          0,
+          kz - endRz * tickHalf,
+          kx + endRx * tickHalf,
+          0,
+          kz + endRz * tickHalf,
+        );
+      }
 
       // Threshold Green Lights + Runway End Red Lights + PAPI 4-Light Left Side + ALSF-II Rabbit Strobes
       for (let tIdx = -4; tIdx <= 4; tIdx++) {
@@ -1363,16 +1449,23 @@ export function buildGpuAirfieldGroup(
     group,
     rwyApproachRailsVerts,
     new THREE.MeshBasicMaterial({
-      color: isSfo ? '#34D399' : '#94A3B8',
+      color: isSfo ? '#10B981' : isDark ? '#F1F5F9' : '#1E293B',
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.92,
       side: THREE.DoubleSide,
       depthTest: false,
       depthWrite: false,
     }),
     -18,
   );
-  makeLines(group, rwyApproachSegs, isSfo ? '#6EE7B7' : '#CBD5E1', 0.5, true, -18);
+  makeLines(
+    group,
+    rwyApproachSegs,
+    isSfo ? '#6EE7B7' : isDark ? '#E2E8F0' : '#334155',
+    0.88,
+    false,
+    -18,
+  );
 
   // Calibrated Realistic Airfield LEDs (NormalBlending = sharp realistic intensity!)
   let lightMat: THREE.ShaderMaterial | null = null;
@@ -1503,14 +1596,14 @@ export class PersistentAirfieldStore {
       );
       this.onUpdated();
 
-      // Priority warm first 18 major hubs politely without flooding Overpass
-      const queue = missing.slice(0, 18);
+      // Persist and warm all catalog airfields cleanly in background without unloading cached surfaces
+      const queue = [...missing];
       const workers = [0, 1].map(async () => {
         while (queue.length > 0) {
           const ap = queue.shift();
           if (!ap) break;
           await this.ensureLoaded(ap.icao, ap.iata, ap.lat, ap.lon);
-          await new Promise((r) => setTimeout(r, 120));
+          await new Promise((r) => setTimeout(r, 90));
         }
       });
       await Promise.all(workers);

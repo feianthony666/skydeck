@@ -3,7 +3,6 @@ import {
   Camera,
   ChevronDown,
   Clock,
-  CloudRain,
   Crosshair,
   DoorOpen,
   ExternalLink,
@@ -21,6 +20,7 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {
   AIRPORT_CATALOG,
   resolveAirlineLivery,
+  resolveCountryFromFlight,
   resolveSpecialLivery,
 } from '../data/aviationCatalog';
 import {apiFetchJson} from '../services/directAviationClient';
@@ -31,7 +31,6 @@ import type {
   FlightDetail,
   LiveFlight,
   SafetyRecordResponse,
-  ThreeViewMode,
 } from '../types/aviation';
 import {formatEpochInTimezone, resolveTimezoneByCoordsAndCode} from '../utils/timezone';
 import {
@@ -57,7 +56,6 @@ interface FlightInspectorPanelProps {
   onToggleFollow?: () => void;
   onToggleIsolate?: () => void;
   onClose: () => void;
-  onOpen3DMode: (mode: ThreeViewMode) => void;
   onSelectAirport?: (airport: {icao: string; iata: string; name: string}) => void;
 }
 
@@ -92,6 +90,55 @@ function estimateTerrainElevationFt(lat: number, lon: number, altFt: number, idx
     Math.abs(Math.sin(idxNorm * Math.PI * 3.1 + lat * 0.35)) * 750;
   const rawTerrain = Math.round(120 + plateauSignal);
   return altFt <= 150 ? Math.max(0, altFt) : Math.min(rawTerrain, Math.max(0, altFt - 400));
+}
+
+const NATO_PHONETIC: Record<string, string> = {
+  A: 'Alfa',
+  B: 'Bravo',
+  C: 'Charlie',
+  D: 'Delta',
+  E: 'Echo',
+  F: 'Foxtrot',
+  G: 'Golf',
+  H: 'Hotel',
+  I: 'India',
+  J: 'Juliett',
+  K: 'Kilo',
+  L: 'Lima',
+  M: 'Mike',
+  N: 'November',
+  O: 'Oscar',
+  P: 'Papa',
+  Q: 'Quebec',
+  R: 'Romeo',
+  S: 'Sierra',
+  T: 'Tango',
+  U: 'Uniform',
+  V: 'Victor',
+  W: 'Whiskey',
+  X: 'X-ray',
+  Y: 'Yankee',
+  Z: 'Zulu',
+  '0': 'Zero',
+  '1': 'One',
+  '2': 'Two',
+  '3': 'Three',
+  '4': 'Four',
+  '5': 'Five',
+  '6': 'Six',
+  '7': 'Seven',
+  '8': 'Eight',
+  '9': 'Niner',
+  '-': 'Dash',
+};
+
+function spellRegistrationPhonetic(reg: string): string {
+  const clean = reg.trim().toUpperCase();
+  if (!clean || clean === '—') return '';
+  return clean
+    .split('')
+    .map((ch) => NATO_PHONETIC[ch] ?? ch)
+    .join(' · ');
 }
 
 const CollapsibleSection: React.FC<{
@@ -146,7 +193,6 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
   onToggleFollow,
   onToggleIsolate,
   onClose,
-  onOpen3DMode,
   onSelectAirport,
 }) => {
   const [photoError, setPhotoError] = useState(false);
@@ -599,51 +645,35 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             </div>
           )}
 
-          {/* Follow (Preserves User Zoom) + Isolate (Full Route) + 3D Quick Action Bar */}
-          <div className="space-y-1.5 pb-0.5">
-            {(onToggleFollow || onToggleIsolate) && (
-              <div className="grid grid-cols-2 gap-1.5">
-                {onToggleFollow && (
-                  <Button
-                    variant={followSelected ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={onToggleFollow}
-                    className="w-full justify-center"
-                    title="Keep aircraft centered at your current map zoom"
-                  >
-                    <Crosshair className="w-3.5 h-3.5 shrink-0" />
-                    <span>{followSelected ? 'Following' : 'Follow'}</span>
-                  </Button>
-                )}
-                {onToggleIsolate && (
-                  <Button
-                    variant={isolateSelected ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={onToggleIsolate}
-                    className="w-full justify-center"
-                    title="Hide all other traffic and show complete flight path"
-                  >
-                    <Eye className="w-3.5 h-3.5 shrink-0" />
-                    <span>{isolateSelected ? 'Isolated' : 'Isolate'}</span>
-                  </Button>
-                )}
-              </div>
-            )}
-            <div className="grid grid-cols-3 gap-1.5">
-              <Button variant="outline" size="sm" onClick={() => onOpen3DMode('cockpit')} className="w-full justify-center">
-                <Gauge className="w-3.5 h-3.5 shrink-0" />
-                <span>3D Deck</span>
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => onOpen3DMode('exterior')} className="w-full justify-center">
-                <Plane className="w-3.5 h-3.5 shrink-0" />
-                <span>Livery</span>
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => onOpen3DMode('pan')} className="w-full justify-center" title="3D PAN view with live clouds, precip & TFR/SIGMET boundaries">
-                <CloudRain className="w-3.5 h-3.5 shrink-0" />
-                <span>3D PAN</span>
-              </Button>
+          {/* Follow (Preserves User Zoom) + Isolate (Full Route) Quick Action Bar */}
+          {(onToggleFollow || onToggleIsolate) && (
+            <div className="grid grid-cols-2 gap-1.5 pb-0.5">
+              {onToggleFollow && (
+                <Button
+                  variant={followSelected ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={onToggleFollow}
+                  className="w-full justify-center"
+                  title="Keep aircraft centered at your current map zoom"
+                >
+                  <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                  <span>{followSelected ? 'Following' : 'Follow'}</span>
+                </Button>
+              )}
+              {onToggleIsolate && (
+                <Button
+                  variant={isolateSelected ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={onToggleIsolate}
+                  className="w-full justify-center"
+                  title="Hide all other traffic and show complete flight path"
+                >
+                  <Eye className="w-3.5 h-3.5 shrink-0" />
+                  <span>{isolateSelected ? 'Isolated' : 'Isolate'}</span>
+                </Button>
+              )}
             </div>
-          </div>
+          )}
 
           {/* Landing ETA & Live Route Header */}
           <div className="rounded-xl border border-border bg-secondary/45 px-3 py-2.5 space-y-2">
@@ -983,9 +1013,9 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
           {/* 4. Altitude, Speed & Transponder Dynamics */}
           <CollapsibleSection
             title="Flight Dynamics & Coordinates"
-            subtitle={`HDG ${String(Math.round(flight.trueTrackDeg)).padStart(3, '0')}° · VS ${
-              flight.verticalRateFpm >= 0 ? '+' : ''
-            }${flight.verticalRateFpm} fpm`}
+            subtitle={`HDG ${String(Math.round(detail?.trackDeg ?? flight.trueTrackDeg)).padStart(3, '0')}° · VS ${
+              (detail?.verticalRateFpm ?? flight.verticalRateFpm) >= 0 ? '+' : ''
+            }${detail?.verticalRateFpm ?? flight.verticalRateFpm} fpm`}
             icon={<Gauge className="w-3.5 h-3.5" />}
             open={openSections.dynamics}
             onToggle={() => toggleSection('dynamics')}
@@ -994,24 +1024,55 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
               <div className="rounded-lg border border-border bg-card p-2">
                 <div className="text-[10.5px] text-muted-foreground">Barometric Altitude</div>
                 <div className="font-mono font-semibold tabular-nums text-foreground">
-                  {flight.onGround ? 'ON GROUND' : `${flight.altitudeFt.toLocaleString()} ft`}
+                  {flight.onGround
+                    ? 'ON GROUND'
+                    : `${(detail?.altBaroFt ?? flight.altitudeFt).toLocaleString()} ft`}
                 </div>
                 <div className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
-                  {flight.onGround ? '0 m' : `FL${String(flightLevel).padStart(3, '0')} · ${altitudeM.toLocaleString()} m`}
+                  {flight.onGround
+                    ? '0 m'
+                    : `FL${String(flightLevel).padStart(3, '0')} · ${altitudeM.toLocaleString()} m`}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border bg-card p-2">
+                <div className="text-[10.5px] text-muted-foreground">GPS Altitude</div>
+                <div className="font-mono font-semibold tabular-nums text-foreground">
+                  {typeof detail?.altGeomFt === 'number'
+                    ? `${Math.round(detail.altGeomFt).toLocaleString()} ft`
+                    : flight.onGround
+                      ? '0 ft'
+                      : `${Math.round(flight.altitudeFt * 1.015).toLocaleString()} ft`}
+                </div>
+                <div className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
+                  Geometric WGS84
                 </div>
               </div>
               <div className="rounded-lg border border-border bg-card p-2">
                 <div className="text-[10.5px] text-muted-foreground">Vertical Speed</div>
                 <div className="font-mono font-semibold tabular-nums text-foreground">
-                  {flight.verticalRateFpm >= 0 ? '+' : ''}
-                  {flight.verticalRateFpm} fpm
+                  {(detail?.verticalRateFpm ?? flight.verticalRateFpm) >= 0 ? '+' : ''}
+                  {detail?.verticalRateFpm ?? flight.verticalRateFpm} fpm
                 </div>
                 <div className="text-[10.5px] text-muted-foreground">{vRateLabel}</div>
               </div>
               <div className="rounded-lg border border-border bg-card p-2">
-                <div className="text-[10.5px] text-muted-foreground">Groundspeed</div>
+                <div className="text-[10.5px] text-muted-foreground">Track &amp; Ground Speed</div>
                 <div className="font-mono font-semibold tabular-nums text-foreground">
-                  {flight.groundSpeedKts} kt · {speedKmh} km/h
+                  {String(Math.round(detail?.trackDeg ?? flight.trueTrackDeg)).padStart(3, '0')}° ·{' '}
+                  {detail?.groundSpeedKts ?? flight.groundSpeedKts} kt
+                </div>
+                <div className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
+                  {speedKmh} km/h
+                </div>
+              </div>
+              <div className="rounded-lg border border-border bg-card p-2">
+                <div className="text-[10.5px] text-muted-foreground">Airspeeds (TAS / IAS)</div>
+                <div className="font-mono font-semibold tabular-nums text-foreground">
+                  {typeof detail?.tasKts === 'number' ? `${detail.tasKts} kt` : '—'} /{' '}
+                  {typeof detail?.iasKts === 'number' ? `${detail.iasKts} kt` : '—'}
+                </div>
+                <div className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
+                  Mach {typeof detail?.mach === 'number' ? detail.mach.toFixed(2) : '—'}
                 </div>
               </div>
               <div className="rounded-lg border border-border bg-card p-2">
@@ -1073,7 +1134,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 text-primary hover:underline shrink-0"
                   >
-                    {photo.source === 'wikimedia' ? 'Wikimedia' : photo.source === 'airport-data' ? 'Airport-Data' : 'Planespotters'}
+                    Planespotters
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
@@ -1083,19 +1144,69 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
               <div>
                 <dt className="text-[10.5px] text-muted-foreground">Registration</dt>
-                <dd className="font-mono font-semibold text-foreground">{registration}</dd>
+                <dd className="font-mono font-semibold text-foreground">
+                  {registration !== '—' ? (
+                    <span
+                      tabIndex={0}
+                      className="group relative inline-block underline decoration-dotted decoration-muted-foreground/70 cursor-help focus:outline-none"
+                    >
+                      {registration}
+                      <span
+                        role="tooltip"
+                        className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity absolute left-0 bottom-full mb-1.5 z-50 w-56 rounded-lg border border-border bg-popover text-popover-foreground p-2 shadow-xl text-[10.5px] font-sans font-normal leading-snug"
+                      >
+                        <span className="block font-mono font-semibold text-primary mb-0.5">
+                          ICAO Phonetic
+                        </span>
+                        {spellRegistrationPhonetic(registration)}
+                      </span>
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10.5px] text-muted-foreground">Country of Reg.</dt>
+                <dd className="font-medium text-foreground truncate">
+                  {detail?.countryOfReg || resolveCountryFromFlight(flight.icao24, registration).name}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10.5px] text-muted-foreground">Serial Number (MSN)</dt>
+                <dd className="font-mono font-semibold text-foreground truncate">
+                  {detail?.serialNumber || '—'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10.5px] text-muted-foreground">Airframe Age</dt>
+                <dd className="font-mono font-semibold text-foreground truncate">
+                  {detail?.aircraftAge || '—'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10.5px] text-muted-foreground">Aircraft Category</dt>
+                <dd className="font-mono font-semibold text-foreground truncate">
+                  {detail?.category || aircraftCode || '—'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10.5px] text-muted-foreground">FIR / UIR</dt>
+                <dd className="font-mono font-semibold text-foreground truncate">
+                  {detail?.firUir || '—'}
+                </dd>
               </div>
               <div>
                 <dt className="text-[10.5px] text-muted-foreground">ICAO24 Hex</dt>
                 <dd className="font-mono font-semibold text-foreground">{flight.icao24}</dd>
               </div>
               <div>
-                <dt className="text-[10.5px] text-muted-foreground">Manufacturer</dt>
-                <dd className="font-medium text-foreground truncate">{detail?.manufacturer || '—'}</dd>
-              </div>
-              <div>
                 <dt className="text-[10.5px] text-muted-foreground">Squawk</dt>
                 <dd className="font-mono font-semibold text-foreground">{squawkCode || '—'}</dd>
+              </div>
+              <div className="col-span-2">
+                <dt className="text-[10.5px] text-muted-foreground">Manufacturer</dt>
+                <dd className="font-medium text-foreground truncate">{detail?.manufacturer || '—'}</dd>
               </div>
             </dl>
           </CollapsibleSection>

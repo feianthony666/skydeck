@@ -85,7 +85,10 @@ export function isNoWorkerModePreferred(): boolean {
   try {
     const qs = new URLSearchParams(window.location.search);
     if (qs.get('noworker') === '1') return true;
-    const raw = window.localStorage.getItem('skydeck-radar-settings-v1');
+    const raw =
+      window.localStorage.getItem('skydeck-radar-settings-v3') ??
+      window.localStorage.getItem('skydeck-radar-settings-v2') ??
+      window.localStorage.getItem('skydeck-radar-settings-v1');
     if (raw) {
       const parsed = JSON.parse(raw) as {preferNoWorkerMode?: boolean};
       if (parsed.preferNoWorkerMode) return true;
@@ -171,7 +174,10 @@ export function getCloudflareWorkerUrl(): string {
     const stored = cleanWorker(window.localStorage.getItem('skydeck-cf-worker') ?? '');
     if (stored && /^https?:\/\//i.test(stored)) return stored;
 
-    const settingsRaw = window.localStorage.getItem('skydeck-radar-settings-v1');
+    const settingsRaw =
+      window.localStorage.getItem('skydeck-radar-settings-v3') ??
+      window.localStorage.getItem('skydeck-radar-settings-v2') ??
+      window.localStorage.getItem('skydeck-radar-settings-v1');
     if (settingsRaw) {
       const parsed = JSON.parse(settingsRaw) as {cfWorkerUrl?: string; apiBaseUrl?: string};
       const w = parsed.cfWorkerUrl ? cleanWorker(parsed.cfWorkerUrl) : '';
@@ -205,7 +211,10 @@ function getCustomApiBase(): string {
     }
     const stored = normalize(window.localStorage.getItem('skydeck-api-base') ?? '');
     if (stored && /^https?:\/\//i.test(stored) && !/\.workers\.dev/i.test(stored)) return stored;
-    const settingsRaw = window.localStorage.getItem('skydeck-radar-settings-v1');
+    const settingsRaw =
+      window.localStorage.getItem('skydeck-radar-settings-v3') ??
+      window.localStorage.getItem('skydeck-radar-settings-v2') ??
+      window.localStorage.getItem('skydeck-radar-settings-v1');
     if (settingsRaw) {
       const parsed = JSON.parse(settingsRaw) as {apiBaseUrl?: string};
       const val = parsed.apiBaseUrl ? normalize(parsed.apiBaseUrl) : '';
@@ -1287,53 +1296,11 @@ async function fetchDirectPhoto(icao24: string, reg: string): Promise<AircraftPh
         };
       }
     } catch {
-      // continue to wikimedia fallback
-    }
-  }
-
-  // 2. Wikimedia Commons fallback photo search by registration (native CORS via origin=*)
-  const normReg = reg.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-  if (normReg.length >= 4) {
-    try {
-      const wmRes = await fetch(
-        `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(`"${reg}"`)}&gsrlimit=6&prop=imageinfo&iiprop=url|size|extmetadata&iiurlwidth=1280&format=json&origin=*`,
-        {signal: AbortSignal.timeout(4000)},
-      );
-      if (wmRes.ok) {
-        const wmJson = (await wmJsonPromise(wmRes)) as {
-          query?: {pages?: Record<string, {title?: string; imageinfo?: Array<Record<string, unknown>>}>};
-        };
-        const pages = Object.values(wmJson.query?.pages ?? {});
-        for (const page of pages) {
-          const title = String(page.title ?? '');
-          const normTitle = title.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-          if (!normTitle.includes(normReg)) continue;
-          if (!/\.(jpe?g|png|webp)$/i.test(title)) continue;
-          const info = page.imageinfo?.[0];
-          const url = String(info?.thumburl ?? info?.url ?? '');
-          if (url) {
-            return {
-              url,
-              thumbUrl: url,
-              photographer: 'Wikimedia Commons contributor',
-              link: String(info?.descriptionurl ?? `https://commons.wikimedia.org/wiki/${encodeURIComponent(title)}`),
-              source: 'wikimedia',
-              width: Number(info?.thumbwidth ?? info?.width ?? 1280),
-              height: Number(info?.thumbheight ?? info?.height ?? 850),
-            };
-          }
-        }
-      }
-    } catch {
-      // ignore
+      // continue to next Planespotters endpoint
     }
   }
 
   return null;
-}
-
-async function wmJsonPromise(res: Response): Promise<unknown> {
-  return res.json();
 }
 
 async function fetchDirectFlightDetail(params: URLSearchParams): Promise<FlightDetail> {
@@ -2340,7 +2307,15 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
     return fetchDirectWeather(params);
   }
   if (path === '/api/weather/layers') {
-    const empty: WeatherLayersResponse = {windGrid: [], markers: [], sigwxPolygons: [], fogZones: [], fetchedAt: Date.now()};
+    const empty: WeatherLayersResponse = {
+      windGrid: [],
+      pireps: [],
+      volcanic: [],
+      lightning: [],
+      fogZones: [],
+      sigwx: [],
+      fetchedAt: Date.now(),
+    };
     return empty;
   }
   if (path === '/api/nav/timezones') {

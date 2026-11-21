@@ -1,10 +1,8 @@
 import {
   Compass,
   Layers,
-  Minus,
   Pause,
   Play,
-  Plus,
   RotateCcw,
   SlidersHorizontal,
 } from 'lucide-react';
@@ -13,6 +11,7 @@ import * as THREE from 'three';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
 import {AIRPORT_CATALOG, type RegionPreset} from '../data/aviationCatalog';
 import {apiFetchJson, DEFAULT_CF_WORKER_URL} from '../services/directAviationClient';
+import {haversineNm} from '../services/offlineStore';
 import {AviationOverlaysManager, type AviationHudLabel} from '../three/aviationOverlays';
 import {World3DBuildingsManager} from '../three/cesiumBuildingsLayer';
 import {
@@ -31,6 +30,7 @@ import {
   myToLat,
   type BasemapVariant,
 } from '../three/gpuTileLayer';
+import {get2DAircraftSpriteAtlas} from '../three/liveryCompositor';
 import {buildWorld3DAircraft, type WorldAircraftHandle} from '../three/worldAircraftPool';
 import type {
   AirportDisruption,
@@ -42,28 +42,72 @@ import type {
   HazardCategory,
   LiveFlight,
   OceanicTrackSpec,
+  PlaneLabelSettings,
   RadarSettings,
   RainViewerMeta,
   SigmetHazard,
+  TimeZoneBoundaryFeature,
+  WeatherLayersResponse,
+  WeatherOverlaySettings,
 } from '../types/aviation';
 import {
-  buildFr24AircraftSvg,
   getDbFlagMeta,
   getEmergencySquawkMeta,
+  getFr24OperatorLogoUrl,
   resolveFr24ModelClass,
-  type Fr24ModelClass,
 } from './aircraftIcons';
 import {Button} from './ui/button';
 import {Popover, PopoverContent, PopoverTrigger} from './ui/popover';
 import {Separator} from './ui/separator';
 
+export const DEFAULT_PLANE_LABELS: PlaneLabelSettings = {
+  showOnGround: false,
+  showAirlineLogo: true,
+  showFlightNumber: true,
+  showRoute: true,
+  showModel: false,
+  showRegistration: false,
+  showModeS: false,
+  showAltitude: true,
+  showSpeed: false,
+  showSquawk: false,
+  showHeading: false,
+  showPhotoOnHover: true,
+  showDepartureTime: false,
+  showTakeOffTime: false,
+  showEta: false,
+  showDistanceToDest: false,
+  showRemainingTime: false,
+  showLastPositionReport: false,
+  allowOverlap: false,
+};
+
+export const DEFAULT_WX_LAYERS: WeatherOverlaySettings = {
+  cloudCoverage: false,
+  totalPrecip: false,
+  intensePrecip: false,
+  naRadar: false,
+  windBarbs: false,
+  sigwx: false,
+  airmetsSigmets: false,
+  airepsPireps: false,
+  volcanic: false,
+  turbulence: false,
+  icing: false,
+  lightning: false,
+  fog: false,
+};
+
 export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
   planeSize: 20,
   basemapStyle: 'auto',
   flightPathMode: 'all',
+  aircraft3DStyle: 'livery',
   locateMeEnabled: false,
   timeDisplayMode: 'airport',
-  showPlaneLabels: false,
+  showPlaneLabels: true,
+  planeLabels: DEFAULT_PLANE_LABELS,
+  wxLayers: DEFAULT_WX_LAYERS,
   showMetarDots: true,
   showSigmets: true,
   showTurbHazards: true,
@@ -75,6 +119,7 @@ export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
   showDrRings: true,
   show3DBuildings: false,
   showDayNightLine: true,
+  showTimeZones: true,
   showAtcBoundaries: true,
   showOceanicTracks: true,
   showHighAirways: true,
@@ -86,20 +131,27 @@ export const DEFAULT_RADAR_SETTINGS: RadarSettings = {
 };
 
 const BASEMAP_LABEL: Record<RadarSettings['basemapStyle'], string> = {
-  auto: 'Google Terrain',
-  terrain: 'Terrain Day',
-  'terrain-night': 'Terrain Night',
-  light: 'Terrain Light',
-  dark: 'Terrain Dark',
-  satellite: 'Satellite',
-  osm: 'OSM Vector',
+  auto: 'Auto MapTiler',
+  'maptiler-light': 'MapTiler Light',
+  'maptiler-dark': 'MapTiler Dark',
 };
 
 export const RadarSettingsPopover: React.FC<{
   settings: RadarSettings;
   onUpdateSettings: (patch: Partial<RadarSettings>) => void;
   onResetSettings: () => void;
-}> = ({settings, onUpdateSettings, onResetSettings}) => (
+}> = ({settings, onUpdateSettings, onResetSettings}) => {
+  const pl = settings.planeLabels ?? DEFAULT_PLANE_LABELS;
+  const togglePlaneLabelField = (key: Exclude<keyof PlaneLabelSettings, 'allowOverlap'>) => {
+    onUpdateSettings({
+      planeLabels: {
+        ...pl,
+        [key]: !pl[key],
+        allowOverlap: false,
+      },
+    });
+  };
+  return (
   <Popover>
     <PopoverTrigger
       className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border bg-secondary px-3.5 text-xs font-medium text-secondary-foreground hover:bg-accent transition-all cursor-pointer whitespace-nowrap shrink-0"
@@ -193,7 +245,7 @@ export const RadarSettingsPopover: React.FC<{
       <div className="space-y-1.5">
         <div className="text-xs font-medium text-foreground">Map Basemap</div>
         <div className="flex flex-wrap gap-1.5">
-          {(['auto', 'terrain', 'terrain-night', 'satellite', 'osm'] as const).map((style) => (
+          {(['auto', 'maptiler-light', 'maptiler-dark'] as const).map((style) => (
             <Button
               key={style}
               size="sm"
@@ -206,6 +258,27 @@ export const RadarSettingsPopover: React.FC<{
         </div>
       </div>
 
+      {/* 3D Aircraft Model Style */}
+      <div className="space-y-1.5">
+        <div className="text-xs font-medium text-foreground">3D World Aircraft Style</div>
+        <div className="grid grid-cols-2 gap-1.5">
+          <Button
+            size="sm"
+            variant={(settings.aircraft3DStyle ?? 'livery') === 'livery' ? 'default' : 'outline'}
+            onClick={() => onUpdateSettings({aircraft3DStyle: 'livery'})}
+          >
+            Live Liveries
+          </Button>
+          <Button
+            size="sm"
+            variant={settings.aircraft3DStyle === 'airnav-yellow' ? 'default' : 'outline'}
+            onClick={() => onUpdateSettings({aircraft3DStyle: 'airnav-yellow'})}
+          >
+            AirNav Yellow
+          </Button>
+        </div>
+      </div>
+
       <Separator />
 
       {/* Aeronautical & World Chart Overlays */}
@@ -215,6 +288,7 @@ export const RadarSettingsPopover: React.FC<{
           {(
             [
               {key: 'showDayNightLine', label: 'Day/Night Line'},
+              {key: 'showTimeZones', label: 'Time Zones'},
               {key: 'showAtcBoundaries', label: 'ATC Boundaries'},
               {key: 'showOceanicTracks', label: 'Oceanic Tracks'},
               {key: 'showHighAirways', label: 'High Airways'},
@@ -240,14 +314,86 @@ export const RadarSettingsPopover: React.FC<{
 
       <Separator />
 
+      {/* Plane Labels & 18 Granular Fields + Strictly Locked Allow Overlap */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-medium text-foreground">Aircraft Labels (18 Fields)</div>
+          <Button
+            size="sm"
+            variant={settings.showPlaneLabels ? 'default' : 'outline'}
+            onClick={() => onUpdateSettings({showPlaneLabels: !settings.showPlaneLabels})}
+          >
+            {settings.showPlaneLabels ? 'All On' : 'Sel Only'}
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-1">
+          {(
+            [
+              {key: 'showOnGround', label: 'Aircraft on Ground'},
+              {key: 'showAirlineLogo', label: 'Airline Logo'},
+              {key: 'showFlightNumber', label: 'Flight Number'},
+              {key: 'showRoute', label: 'Route'},
+              {key: 'showModel', label: 'Model'},
+              {key: 'showRegistration', label: 'Registration'},
+              {key: 'showModeS', label: 'Mode-S Hex'},
+              {key: 'showAltitude', label: 'Altitude'},
+              {key: 'showSpeed', label: 'Speed'},
+              {key: 'showSquawk', label: 'Squawk'},
+              {key: 'showHeading', label: 'Heading'},
+              {key: 'showPhotoOnHover', label: 'Photo on Hover'},
+              {key: 'showDepartureTime', label: 'Departure Time'},
+              {key: 'showTakeOffTime', label: 'Take-Off Time'},
+              {key: 'showEta', label: 'Estimated Arr (ETA)'},
+              {key: 'showDistanceToDest', label: 'Dist to Dest'},
+              {key: 'showRemainingTime', label: 'Remaining Time'},
+              {key: 'showLastPositionReport', label: 'Last Pos Report'},
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => togglePlaneLabelField(item.key)}
+              className={`h-7 px-2 rounded-md border text-[10.5px] font-medium text-left truncate transition-colors cursor-pointer ${
+                pl[item.key]
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'bg-background text-muted-foreground border-border hover:text-foreground'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Allow Overlap strictly greyed out & forced OFF */}
+        <div
+          className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-2.5 py-1.5 opacity-50 cursor-not-allowed select-none"
+          title="Disabled: Non-overlapping collision culling is permanently enforced"
+        >
+          <div>
+            <div className="text-[11px] font-medium text-muted-foreground">Allow Label Overlap</div>
+            <div className="text-[9.5px] text-muted-foreground">Locked OFF — collision culling active</div>
+          </div>
+          <button
+            type="button"
+            disabled
+            aria-disabled="true"
+            className="h-5 px-2 rounded-full bg-muted border border-border font-mono text-[10px] font-semibold text-muted-foreground cursor-not-allowed"
+          >
+            OFF
+          </button>
+        </div>
+      </div>
+
+      <Separator />
+
       {/* Map Overlay & Locate Toggles */}
       <div className="space-y-2">
-        <div className="text-xs font-medium text-foreground">Map Overlays &amp; Hazards</div>
+        <div className="text-xs font-medium text-foreground">Map Overlays &amp; Locate</div>
         <div className="grid grid-cols-2 gap-1.5">
           {(
             [
               {key: 'locateMeEnabled', label: 'Locate Me'},
-              {key: 'showPlaneLabels', label: 'Plane Labels'},
               {key: 'showMetarDots', label: 'METAR Colors'},
               {key: 'showSigmets', label: 'WX Hazards'},
               {key: 'showTurbHazards', label: 'Turbulence'},
@@ -376,11 +522,14 @@ export const RadarSettingsPopover: React.FC<{
       </details>
     </PopoverContent>
   </Popover>
-);
+  );
+};
 
 interface RadarMapProps {
   flights: LiveFlight[];
   selectedFlight: LiveFlight | null;
+  selectedFlightIds?: string[];
+  multiSelectMode?: boolean;
   selectedDetail: FlightDetail | null;
   selectedAirportIcao?: string | null;
   mapAirports?: AirportMarker[];
@@ -396,10 +545,11 @@ interface RadarMapProps {
   flyToLocation?: {lat: number; lon: number; zoom?: number; seq: number} | null;
   followSelected?: boolean;
   isolateSelected?: boolean;
+  playbackState?: {enabled: boolean; playing: boolean; progress: number; speed: number};
   isMobilePortrait?: boolean;
   onUserDragBreakFollow?: () => void;
   settings: RadarSettings;
-  onSelectFlight: (flight: LiveFlight, opts?: {in3DMode?: boolean}) => void;
+  onSelectFlight: (flight: LiveFlight, opts?: {in3DMode?: boolean; multiSelect?: boolean}) => void;
   onSelectAirport: (airport: {icao: string; iata: string; name: string}) => void;
   onBoundsChange: (
     bounds: {lamin: number; lomin: number; lamax: number; lomax: number},
@@ -559,145 +709,27 @@ function sanitizeAndSmoothTrail(
   return smoothedChains;
 }
 
-function getZoomRegionFlightCap(zoom: number): number {
-  if (zoom < 4.2) return 150;
-  if (zoom < 6.0) return 260;
-  if (zoom < 8.2) return 380;
-  if (zoom < 11.0) return 560;
-  return 900;
-}
-
 function selectFlightsForZoomAndRegion(
   flights: LiveFlight[],
   bounds: GeoBounds,
-  zoom: number,
   selectedFlightId: string | null,
+  selectedFlightIds: Set<string>,
   isolateSelected: boolean,
+  showGroundTraffic: boolean,
 ): LiveFlight[] {
-  if (isolateSelected && selectedFlightId) {
-    return flights.filter((f) => f.id === selectedFlightId);
+  if (isolateSelected && (selectedFlightId || selectedFlightIds.size > 0)) {
+    return flights.filter((f) => f.id === selectedFlightId || selectedFlightIds.has(f.id));
   }
 
-  const maxCap = getZoomRegionFlightCap(zoom);
   const contains = (lat: number, lon: number) =>
     lat >= bounds.south && lat <= bounds.north && lon >= bounds.west && lon <= bounds.east;
 
-  const inBounds = flights.filter(
-    (f) => f.id === selectedFlightId || contains(f.lat, f.lon),
-  );
-  if (inBounds.length <= maxCap) return inBounds;
-
-  const mustKeep: LiveFlight[] = [];
-  const candidates: LiveFlight[] = [];
-
-  for (const f of inBounds) {
-    if (
-      f.id === selectedFlightId ||
-      getEmergencySquawkMeta(f.squawk) ||
-      f.isLadd ||
-      f.isMilitary ||
-      f.isPia
-    ) {
-      mustKeep.push(f);
-    } else {
-      candidates.push(f);
-    }
-  }
-
-  if (mustKeep.length >= maxCap) return mustKeep.slice(0, maxCap);
-
-  const remainingBudget = maxCap - mustKeep.length;
-  if (candidates.length <= remainingBudget) return [...mustKeep, ...candidates];
-
-  const latSpan = Math.max(0.05, bounds.north - bounds.south);
-  const lonSpan = Math.max(0.05, bounds.east - bounds.west);
-  const cols = zoom < 6 ? 12 : zoom < 10 ? 10 : 8;
-  const rows = zoom < 6 ? 8 : 6;
-  const buckets = new Map<number, LiveFlight[]>();
-
-  for (const f of candidates) {
-    const col = Math.max(0, Math.min(cols - 1, Math.floor(((f.lon - bounds.west) / lonSpan) * cols)));
-    const row = Math.max(0, Math.min(rows - 1, Math.floor(((f.lat - bounds.south) / latSpan) * rows)));
-    const cellIdx = row * cols + col;
-    const arr = buckets.get(cellIdx);
-    if (arr) arr.push(f);
-    else buckets.set(cellIdx, [f]);
-  }
-
-  const cellQueues = Array.from(buckets.values());
-  for (const q of cellQueues) {
-    q.sort((a, b) => {
-      if (a.onGround !== b.onGround) return a.onGround ? 1 : -1;
-      return (b.lastContactEpoch || 0) - (a.lastContactEpoch || 0);
-    });
-  }
-
-  const chosen: LiveFlight[] = [...mustKeep];
-  let round = 0;
-  while (chosen.length < maxCap) {
-    let addedInRound = false;
-    for (const q of cellQueues) {
-      if (round < q.length) {
-        chosen.push(q[round]);
-        addedInRound = true;
-        if (chosen.length >= maxCap) break;
-      }
-    }
-    if (!addedInRound) break;
-    round++;
-  }
-  return chosen;
-}
-
-// Shared Texture Cache for Crisp FR24 SVG Aircraft Sprites in GPU 2D View
-const fr24SpriteTexCache = new Map<string, THREE.CanvasTexture>();
-function getFr24SpriteTexture(
-  modelClass: Fr24ModelClass,
-  fill: string,
-  stroke: string,
-  onReady: () => void,
-): THREE.CanvasTexture {
-  const key = `${modelClass}|${fill}|${stroke}`;
-  const hit = fr24SpriteTexCache.get(key);
-  if (hit) return hit;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
-  const g = canvas.getContext('2d')!;
-  // Immediate fallback triangle until SVG finishes decoding (first ~2ms)
-  g.fillStyle = fill;
-  g.strokeStyle = stroke;
-  g.lineWidth = 4;
-  g.beginPath();
-  g.moveTo(64, 16);
-  g.lineTo(106, 102);
-  g.lineTo(64, 82);
-  g.lineTo(22, 102);
-  g.closePath();
-  g.fill();
-  g.stroke();
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  fr24SpriteTexCache.set(key, tex);
-
-  const rawSvg = buildFr24AircraftSvg(modelClass, 112, fill, stroke);
-  const svg = rawSvg.includes('xmlns=')
-    ? rawSvg
-    : rawSvg.replace('<svg ', '<svg xmlns="http://www.w3.org/2000/svg" ');
-  const img = new Image();
-  img.onload = () => {
-    g.clearRect(0, 0, 128, 128);
-    g.shadowColor = 'rgba(0,0,0,0.45)';
-    g.shadowBlur = 5;
-    g.shadowOffsetY = 2;
-    g.drawImage(img, 8, 8, 112, 112);
-    tex.needsUpdate = true;
-    onReady();
-  };
-  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-  return tex;
+  // Unlimited flights rendered via single GPU InstancedMesh @ 60fps — only viewport & ground filter
+  return flights.filter((f) => {
+    if (f.id === selectedFlightId || selectedFlightIds.has(f.id)) return true;
+    if (!showGroundTraffic && f.onGround) return false;
+    return contains(f.lat, f.lon);
+  });
 }
 
 interface PooledFlightState {
@@ -706,12 +738,14 @@ interface PooledFlightState {
   renderLat: number;
   renderLon: number;
   renderTrack: number;
+  renderAltFt: number;
   fromLat: number;
   fromLon: number;
   fromTrack: number;
   targetLat: number;
   targetLon: number;
   targetTrack: number;
+  bankRad: number;
   blendStartMs: number;
   blendDurationMs: number;
   lastUpdateMs: number;
@@ -728,6 +762,8 @@ interface ProjectedAirportBadge {
   icao: string;
   iata: string;
   name: string;
+  lat: number;
+  lon: number;
   x: number;
   y: number;
   tier: 1 | 2 | 3;
@@ -738,16 +774,47 @@ interface ProjectedAirportBadge {
 
 interface ProjectedPlaneTag {
   id: string;
+  flightId: string;
+  lat: number;
+  lon: number;
+  altFt: number;
+  onGround: boolean;
+  iconPx: number;
   x: number;
   y: number;
-  text: string;
-  kind: 'emerg' | 'ladd' | 'mil' | 'std';
+  line1: string;
+  line2: string;
+  line3: string;
+  logoUrl: string;
+  kind: 'emerg' | 'sel' | 'ladd' | 'mil' | 'std';
 }
 
 interface ProjectedSurfaceLabel extends AirfieldHudLabel {
   id: string;
   x: number;
   y: number;
+}
+
+interface TrailHoverSegment {
+  lat0: number;
+  lon0: number;
+  alt0: number;
+  spd0: number;
+  lat1: number;
+  lon1: number;
+  alt1: number;
+  spd1: number;
+  y0: number;
+  y1: number;
+}
+
+function distPointToSeg2D(px: number, py: number, x0: number, y0: number, x1: number, y1: number): {dist: number; t: number} {
+  const vx = x1 - x0;
+  const vy = y1 - y0;
+  const lenSq = vx * vx + vy * vy;
+  if (lenSq < 1e-4) return {dist: Math.hypot(px - x0, py - y0), t: 0};
+  const t = Math.max(0, Math.min(1, ((px - x0) * vx + (py - y0) * vy) / lenSq));
+  return {dist: Math.hypot(px - (x0 + t * vx), py - (y0 + t * vy)), t};
 }
 
 const FOV_DEG = 46;
@@ -775,6 +842,8 @@ function worldAltY(altitudeFt: number, onGround: boolean, zoom: number, mercScal
 export const RadarMap: React.FC<RadarMapProps> = ({
   flights,
   selectedFlight,
+  selectedFlightIds = [],
+  multiSelectMode = false,
   selectedDetail,
   selectedAirportIcao,
   mapAirports = [],
@@ -790,6 +859,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   flyToLocation,
   followSelected = false,
   isolateSelected = false,
+  playbackState,
   isMobilePortrait = false,
   onUserDragBreakFollow,
   settings,
@@ -797,10 +867,25 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   onSelectAirport,
   onBoundsChange,
 }) => {
+  const outerContainerRef = useRef<HTMLDivElement | null>(null);
   const mountDivRef = useRef<HTMLDivElement | null>(null);
   const hoverTooltipRef = useRef<HTMLDivElement | null>(null);
   const airportHudRef = useRef<HTMLDivElement | null>(null);
   const planeHudRef = useRef<HTMLDivElement | null>(null);
+
+  // Zero-jiggle 60Hz direct DOM transform maps for all HUD layers
+  const navDomMapRef = useRef<Map<string, HTMLSpanElement>>(new Map());
+  const surfaceDomMapRef = useRef<Map<string, HTMLSpanElement>>(new Map());
+  const airportDomMapRef = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const planeDomMapRef = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const activeNavRef = useRef<Array<AviationHudLabel & {x: number; y: number}>>([]);
+  const activeSurfRef = useRef<ProjectedSurfaceLabel[]>([]);
+  const activeApRef = useRef<ProjectedAirportBadge[]>([]);
+  const activePlaneTagsRef = useRef<ProjectedPlaneTag[]>([]);
+  const selectedTrailSegsRef = useRef<TrailHoverSegment[]>([]);
+  const hoverPhotoCacheRef = useRef<Map<string, {url: string | null; requestedAt: number}>>(new Map());
+  const detailMetaCacheRef = useRef<Map<string, FlightDetail>>(new Map());
 
   const [radarFrameIdx, setRadarFrameIdx] = useState(0);
   const [radarPlaying, setRadarPlaying] = useState(false);
@@ -821,8 +906,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   flightsRef.current = flights;
   const selectedFlightRef = useRef(selectedFlight);
   selectedFlightRef.current = selectedFlight;
+  const selectedFlightIdsRef = useRef<Set<string>>(new Set(selectedFlightIds));
+  selectedFlightIdsRef.current = new Set(selectedFlightIds);
+  const multiSelectModeRef = useRef(multiSelectMode);
+  multiSelectModeRef.current = multiSelectMode;
   const selectedDetailRef = useRef(selectedDetail);
   selectedDetailRef.current = selectedDetail;
+  if (selectedDetail) detailMetaCacheRef.current.set(selectedDetail.id, selectedDetail);
   const selectedAirportIcaoRef = useRef(selectedAirportIcao);
   selectedAirportIcaoRef.current = selectedAirportIcao;
   const airportsRef = useRef(airports);
@@ -843,6 +933,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   followSelectedRef.current = followSelected;
   const isolateSelectedRef = useRef(isolateSelected);
   isolateSelectedRef.current = isolateSelected;
+  const playbackRef = useRef(playbackState);
+  playbackRef.current = playbackState;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const themeRef = useRef(theme);
@@ -1024,6 +1116,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           existing.targetLat = f.lat;
           existing.targetLon = f.lon;
           existing.targetTrack = f.trueTrackDeg;
+          existing.renderAltFt = f.altitudeFt;
           existing.blendStartMs = nowMs;
           existing.blendDurationMs = 1350;
           existing.lastUpdateMs = nowMs;
@@ -1035,12 +1128,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           renderLat: f.lat,
           renderLon: f.lon,
           renderTrack: f.trueTrackDeg,
+          renderAltFt: f.altitudeFt,
           fromLat: f.lat,
           fromLon: f.lon,
           fromTrack: f.trueTrackDeg,
           targetLat: f.lat,
           targetLon: f.lon,
           targetTrack: f.trueTrackDeg,
+          bankRad: 0,
           blendStartMs: nowMs,
           blendDurationMs: 0,
           lastUpdateMs: nowMs,
@@ -1084,12 +1179,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   }, [
     theme,
     settings.basemapStyle,
+    settings.aircraft3DStyle,
     settings.showDayNightLine,
+    settings.showTimeZones,
     settings.showAtcBoundaries,
     settings.showOceanicTracks,
     settings.showHighAirways,
     settings.showLowAirways,
     settings.showWaypoints,
+    settings.wxLayers,
   ]);
 
   // RainViewer auto-loop
@@ -1217,31 +1315,42 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     });
     stableAnchorRoot.add(tileManager.getGroup());
 
-    // Preload global base tiles + active region Google Terrain tiles immediately on website entry
+    // Preload global vector tiles immediately on website entry
     const resolveEffectiveStyle = (): BasemapVariant => {
       const s = settingsRef.current;
-      if (s.basemapStyle === 'auto') {
-        return themeRef.current === 'dark' ? 'terrain-night' : 'terrain';
-      }
-      if (s.basemapStyle === 'light') return 'terrain';
-      if (s.basemapStyle === 'dark') return 'terrain-night';
-      return s.basemapStyle;
+      if (s.basemapStyle === 'maptiler-dark') return 'maptiler-dark';
+      if (s.basemapStyle === 'maptiler-light') return 'maptiler-light';
+      return themeRef.current === 'dark' ? 'maptiler-dark' : 'maptiler-light';
     };
     tileManager.preloadWorldAndRegion(resolveEffectiveStyle(), initCam.mx, initCam.my, initCam.zoom);
 
     const aviationOverlays = new AviationOverlaysManager();
     stableAnchorRoot.add(aviationOverlays.root);
 
-    // Fetch Global ATC/FIR Boundaries, Live NAT/PACOT Oceanic Tracks & Refresh Day/Night Terminator
+    // Fetch Global ATC/FIR Boundaries, Time Zones, Live NAT/PACOT Oceanic Tracks & Weather Layers
     let lastEnrouteQueryKey = '';
     let lastEnrouteFetchMs = 0;
     let enrouteFetchInFlight = false;
+    let lastWxLayerKey = '';
+    let lastWxLayerFetchMs = 0;
+    let wxLayerFetchInFlight = false;
+    let dirtyTimezones = false;
+    let dirtyWxLayers = false;
 
     void apiFetchJson<{boundaries?: AtcBoundaryFeature[]}>('/api/nav/atc-boundaries')
       .then((res) => {
         if (!disposed && res?.boundaries?.length) {
           aviationOverlays.setAtcBoundaries(res.boundaries);
           dirtyRef.current.atc = true;
+        }
+      })
+      .catch(() => {});
+
+    void apiFetchJson<{timezones?: TimeZoneBoundaryFeature[]}>('/api/nav/timezones')
+      .then((res) => {
+        if (!disposed && res?.timezones?.length) {
+          aviationOverlays.setTimeZones(res.timezones);
+          dirtyTimezones = true;
         }
       })
       .catch(() => {});
@@ -1301,14 +1410,91 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     airfieldStore.preloadCatalogAirfields(myToLat(initCam.my), mxToLon(initCam.mx));
 
     // Aircraft GPU Pools:
-    // 1) 2D FR24 Sprite Quads (depthTest: false & high renderOrder so terminals NEVER cover 2D airplanes!)
+    // 1) Batched Single-Draw-Call 2D Aircraft Sprite Atlas InstancedMesh (5,000+ planes @ 60fps!)
+    const MAX_2D_PLANES = 16000;
+    const atlas = get2DAircraftSpriteAtlas(maxAniso);
     const unitSpriteGeo = new THREE.PlaneGeometry(1, 1);
     unitSpriteGeo.rotateX(-Math.PI / 2);
-    const ringGeo = new THREE.RingGeometry(0.62, 0.72, 24);
+    const cellAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_2D_PLANES), 1);
+    const fillAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_2D_PLANES * 3), 3);
+    unitSpriteGeo.setAttribute('aCell', cellAttr);
+    unitSpriteGeo.setAttribute('aFillColor', fillAttr);
+
+    const spriteAtlasMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uAtlas: {value: atlas.texture},
+        uCellCount: {value: atlas.cellCount},
+      },
+      vertexShader: `
+        attribute float aCell;
+        attribute vec3 aFillColor;
+        varying vec2 vUv;
+        varying float vCell;
+        varying vec3 vFill;
+        void main() {
+          vUv = uv;
+          vCell = aCell;
+          vFill = aFillColor;
+          vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uAtlas;
+        uniform float uCellCount;
+        varying vec2 vUv;
+        varying float vCell;
+        varying vec3 vFill;
+        void main() {
+          float cell = floor(vCell + 0.5);
+          vec2 uv = vec2((cell + vUv.x) / uCellCount, vUv.y);
+          vec4 tex = texture2D(uAtlas, uv);
+          if (tex.a < 0.08) discard;
+          // Preserve crisp dark outline from atlas while tinting white aircraft fill cleanly
+          vec3 rgb = tex.rgb * mix(vec3(1.0), vFill, step(0.35, tex.r));
+          gl_FragColor = vec4(rgb, tex.a);
+        }
+      `,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const plane2DInst = new THREE.InstancedMesh(unitSpriteGeo, spriteAtlasMat, MAX_2D_PLANES);
+    plane2DInst.frustumCulled = false;
+    plane2DInst.renderOrder = 21;
+    plane2DInst.count = 0;
+    aircraftRoot.add(plane2DInst);
+
+    const MAX_RING_INSTANCES = 512;
+    const ringGeo = new THREE.RingGeometry(0.62, 0.74, 24);
     ringGeo.rotateX(-Math.PI / 2);
-    const ringMatSel = new THREE.MeshBasicMaterial({color: '#F59E0B', transparent: true, opacity: 0.9, depthTest: false, depthWrite: false});
-    const ringMatEmerg = new THREE.MeshBasicMaterial({color: '#EF4444', transparent: true, opacity: 0.9, depthTest: false, depthWrite: false});
-    const ringMatLadd = new THREE.MeshBasicMaterial({color: '#A855F7', transparent: true, opacity: 0.85, depthTest: false, depthWrite: false});
+    const ringColorAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_RING_INSTANCES * 3), 3);
+    ringGeo.setAttribute('aRingCol', ringColorAttr);
+    const ringInstMat = new THREE.ShaderMaterial({
+      vertexShader: `
+        attribute vec3 aRingCol;
+        varying vec3 vCol;
+        void main() {
+          vCol = aRingCol;
+          gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vCol;
+        void main() {
+          gl_FragColor = vec4(vCol, 0.92);
+        }
+      `,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const ringInst = new THREE.InstancedMesh(ringGeo, ringInstMat, MAX_RING_INSTANCES);
+    ringInst.frustumCulled = false;
+    ringInst.renderOrder = 20;
+    ringInst.count = 0;
+    aircraftRoot.add(ringInst);
+
     const stemMat = new THREE.LineBasicMaterial({color: '#38BDF8', transparent: true, opacity: 0.55});
     const stemGeo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
@@ -1317,17 +1503,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const groundShadowGeo = new THREE.CircleGeometry(0.32, 12);
     groundShadowGeo.rotateX(-Math.PI / 2);
     const groundShadowMat = new THREE.MeshBasicMaterial({color: '#000000', transparent: true, opacity: 0.35, depthWrite: false});
-
-    const spritePool = new Map<
-      string,
-      {
-        group: THREE.Group;
-        quad: THREE.Mesh;
-        mat: THREE.MeshBasicMaterial;
-        ring?: THREE.Mesh;
-        spriteKey: string;
-      }
-    >();
 
     const world3DPool = new Map<
       string,
@@ -1562,7 +1737,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         return;
       }
 
-      // Hover hit-testing against projected aircraft screen positions
+      // Hover hit-testing against projected aircraft screen positions & selected track polyline
       const rect = canvasEl.getBoundingClientRect();
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
@@ -1583,21 +1758,115 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (tipEl) {
           const em = getEmergencySquawkMeta(best.squawk);
           const db = getDbFlagMeta(best);
-          tipEl.textContent = `${em ? `[${em.shortLabel}] ` : ''}${db ? `[${db.shortLabel}] ` : ''}${
+          const showPhoto = Boolean(settingsRef.current.planeLabels?.showPhotoOnHover);
+          let photoUrl: string | null = null;
+          if (showPhoto) {
+            const pKey = best.icao24 || best.id;
+            const cached = hoverPhotoCacheRef.current.get(pKey);
+            if (cached) {
+              photoUrl = cached.url;
+            } else {
+              hoverPhotoCacheRef.current.set(pKey, {url: null, requestedAt: performance.now()});
+              const qs = new URLSearchParams({
+                fr24Id: best.fr24Id ?? '',
+                icao24: best.icao24,
+                callsign: best.callsign,
+                reg: best.registration ?? '',
+                fnum: best.flightNumber ?? '',
+              });
+              void apiFetchJson<FlightDetail>(`/api/flight-detail?${qs.toString()}`)
+                .then((d) => {
+                  if (d) {
+                    detailMetaCacheRef.current.set(best!.id, d);
+                    hoverPhotoCacheRef.current.set(pKey, {
+                      url: d.photo?.thumbUrl || d.photo?.url || null,
+                      requestedAt: performance.now(),
+                    });
+                  }
+                })
+                .catch(() => {});
+            }
+          }
+
+          const titleTxt = `${em ? `[${em.shortLabel}] ` : ''}${db ? `[${db.shortLabel}] ` : ''}${
             best.callsign
           } · ${best.aircraftType}${
             best.origin && best.destination ? ` · ${best.origin}→${best.destination}` : ''
           } · ${best.onGround ? 'GND' : `FL${Math.round(best.altitudeFt / 100)}`}${
             best.squawk ? ` · SQK ${best.squawk}` : ''
           }`;
-          const tx = Math.min(rect.width - 210, Math.max(8, px + 14));
-          const ty = Math.min(rect.height - 40, Math.max(8, py - 14));
+
+          if (photoUrl) {
+            tipEl.innerHTML = '';
+            const wrap = document.createElement('div');
+            wrap.className = 'flex items-center gap-2';
+            const img = document.createElement('img');
+            img.src = photoUrl;
+            img.referrerPolicy = 'no-referrer';
+            img.className = 'w-16 h-10 object-cover rounded border border-border shrink-0';
+            const span = document.createElement('span');
+            span.textContent = titleTxt;
+            wrap.appendChild(img);
+            wrap.appendChild(span);
+            tipEl.appendChild(wrap);
+          } else {
+            tipEl.textContent = titleTxt;
+          }
+
+          const tx = Math.min(rect.width - (photoUrl ? 280 : 210), Math.max(8, px + 14));
+          const ty = Math.min(rect.height - (photoUrl ? 64 : 40), Math.max(8, py - 14));
           tipEl.style.transform = `translate(${Math.round(tx)}px, ${Math.round(ty)}px)`;
           tipEl.style.opacity = '1';
         }
       } else {
-        canvasEl.style.cursor = 'grab';
-        if (tipEl) tipEl.style.opacity = '0';
+        // Track Hover Altitude & Speed Tooltip along selected flight trail
+        let bestTrackDist = 14;
+        let trackAltFt = 0;
+        let trackSpdKts = 0;
+        let trackFound = false;
+        const cam = camStateRef.current;
+        const originMx = cam.mx;
+        const originMy = cam.my;
+        const w = rect.width || 800;
+        const h = rect.height || 540;
+        if (selectedTrailSegsRef.current.length > 0 && selectedFlightRef.current) {
+          for (const seg of selectedTrailSegsRef.current) {
+            const x0w = (lonToMx(seg.lon0) - originMx) * MERCATOR_WORLD_M;
+            const z0w = (latToMy(seg.lat0) - originMy) * MERCATOR_WORLD_M;
+            const x1w = (lonToMx(seg.lon1) - originMx) * MERCATOR_WORLD_M;
+            const z1w = (latToMy(seg.lat1) - originMy) * MERCATOR_WORLD_M;
+
+            _projVec.set(x0w, seg.y0, z0w).project(camera);
+            if (_projVec.z < -1 || _projVec.z > 1) continue;
+            const sx0 = (_projVec.x * 0.5 + 0.5) * w;
+            const sy0 = (-_projVec.y * 0.5 + 0.5) * h;
+
+            _projVec.set(x1w, seg.y1, z1w).project(camera);
+            if (_projVec.z < -1 || _projVec.z > 1) continue;
+            const sx1 = (_projVec.x * 0.5 + 0.5) * w;
+            const sy1 = (-_projVec.y * 0.5 + 0.5) * h;
+
+            const hit = distPointToSeg2D(px, py, sx0, sy0, sx1, sy1);
+            if (hit.dist < bestTrackDist) {
+              bestTrackDist = hit.dist;
+              trackAltFt = Math.round(seg.alt0 + (seg.alt1 - seg.alt0) * hit.t);
+              trackSpdKts = Math.round(seg.spd0 + (seg.spd1 - seg.spd0) * hit.t);
+              trackFound = true;
+            }
+          }
+        }
+        if (trackFound && tipEl) {
+          canvasEl.style.cursor = 'crosshair';
+          const fl = Math.round(trackAltFt / 100);
+          tipEl.textContent = `${selectedFlightRef.current?.callsign ?? 'Track'} · ${trackAltFt.toLocaleString()} ft (FL${String(fl).padStart(3, '0')}) · ${trackSpdKts} kt`;
+          const tx = Math.min(rect.width - 230, Math.max(8, px + 14));
+          const ty = Math.min(rect.height - 40, Math.max(8, py - 18));
+          tipEl.style.transform = `translate(${Math.round(tx)}px, ${Math.round(ty)}px)`;
+          tipEl.style.opacity = '1';
+        } else {
+          canvasEl.style.cursor = 'grab';
+          if (tipEl) tipEl.style.opacity = '0';
+        }
       }
     };
 
@@ -1625,13 +1894,18 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           }
         }
         if (best) {
-          onSelectRef.current(best, {in3DMode: camStateRef.current.pitchDeg > 10});
+          onSelectRef.current(best, {
+            in3DMode: camStateRef.current.pitchDeg > 10,
+            multiSelect: e.shiftKey || multiSelectModeRef.current,
+          });
         }
       }
       if (pointers.size < 2) dragMode = 'none';
     };
 
     const onWheel = (e: WheelEvent) => {
+      // Allow nested popovers/controls marked with data-no-map-wheel to scroll natively
+      if ((e.target as HTMLElement | null)?.closest?.('[data-no-map-wheel]')) return;
       e.preventDefault();
       const cam = camStateRef.current;
       const zoomStep = THREE.MathUtils.clamp(-e.deltaY * 0.0022, -0.75, 0.75);
@@ -1684,12 +1958,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       pressedKeys.delete(e.code);
     };
 
+    const wheelHostEl = outerContainerRef.current ?? container;
     canvasEl.addEventListener('pointerdown', onPointerDown);
     canvasEl.addEventListener('pointermove', onPointerMove);
     canvasEl.addEventListener('pointerup', onPointerUp);
     canvasEl.addEventListener('pointercancel', onPointerUp);
     canvasEl.addEventListener('pointerleave', onPointerLeave);
-    canvasEl.addEventListener('wheel', onWheel, {passive: false});
+    wheelHostEl.addEventListener('wheel', onWheel, {passive: false});
     canvasEl.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -1726,6 +2001,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     let lastBoundsEmitMs = 0;
     let lastEmittedKey = '';
     let lastHudSyncMs = 0;
+    let lastApSig = '';
     let lastTileHash = '';
     let lastCloudKey = '';
     let lastHazardKey = '';
@@ -1922,16 +2198,18 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     const rebuildTrails = (anchorMx: number, anchorMy: number, is3D: boolean, camZoom: number, bounds: GeoBounds) => {
       clearGroup(trailsRoot);
       selectedLastTrailPt = null;
+      selectedTrailSegsRef.current = [];
       const s = settingsRef.current;
       const sel = selectedFlightRef.current;
       const iso = isolateSelectedRef.current;
 
       const drawFlightTrail = (f: LiveFlight, isSel: boolean) => {
         const key = f.icao24 || f.id;
-        const detailTrail =
+        const detailPts =
           isSel && (selectedDetailRef.current?.trail?.length ?? 0) > 1
-            ? selectedDetailRef.current!.trail.map((p) => ({lat: p.lat, lon: p.lon, altFt: p.altFt}))
+            ? selectedDetailRef.current!.trail
             : [];
+        const detailTrail = detailPts.map((p) => ({lat: p.lat, lon: p.lon, altFt: p.altFt}));
         const clientTrail = clientTrailMapRef.current.get(key) ?? [];
         const raw =
           detailTrail.length > 0
@@ -1954,7 +2232,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           if (chain.length < 2) continue;
           const pos: number[] = [];
           const col: number[] = [];
-          for (const pt of chain) {
+          for (let i = 0; i < chain.length; i++) {
+            const pt = chain[i];
             const x = (lonToMx(pt.lon) - anchorMx) * MERCATOR_WORLD_M;
             const z = (latToMy(pt.lat) - anchorMy) * MERCATOR_WORLD_M;
             const y = is3D
@@ -1965,6 +2244,31 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             pos.push(x, y, z);
             const [r, g, b] = geofsAltitudeRgbNorm(pt.altFt);
             col.push(r, g, b);
+
+            if (isSel && i < chain.length - 1) {
+              const nxt = chain[i + 1];
+              const yNext = is3D
+                ? worldAltY(nxt.altFt, nxt.altFt < 80, camZoom, mercatorScaleAtLat(nxt.lat), 40)
+                : 1.5;
+              const matchedSpd0 =
+                detailPts.find((dp) => Math.abs(dp.lat - pt.lat) < 0.05 && Math.abs(dp.lon - pt.lon) < 0.05)?.speedKts ??
+                f.groundSpeedKts;
+              const matchedSpd1 =
+                detailPts.find((dp) => Math.abs(dp.lat - nxt.lat) < 0.05 && Math.abs(dp.lon - nxt.lon) < 0.05)?.speedKts ??
+                f.groundSpeedKts;
+              selectedTrailSegsRef.current.push({
+                lat0: pt.lat,
+                lon0: pt.lon,
+                alt0: pt.altFt,
+                spd0: matchedSpd0,
+                lat1: nxt.lat,
+                lon1: nxt.lon,
+                alt1: nxt.altFt,
+                spd1: matchedSpd1,
+                y0: y,
+                y1: yNext,
+              });
+            }
           }
           const geo = new THREE.BufferGeometry();
           geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -2169,12 +2473,11 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       const bearDelta = ((cam.targetBearingDeg - cam.bearingDeg + 540) % 360) - 180;
       cam.bearingDeg = (cam.bearingDeg + bearDelta * (1 - Math.exp(-11 * dt)) + 360) % 360;
 
-      const isDark = themeRef.current === 'dark';
       const s = settingsRef.current;
       const effectiveStyle = resolveEffectiveStyle();
-      const isNightTerrain = effectiveStyle === 'terrain-night' || effectiveStyle === 'dark' || effectiveStyle === 'satellite';
+      const isNightTerrain = effectiveStyle === 'maptiler-dark';
       (scene.background as THREE.Color).set(
-        isNightTerrain ? '#0e1726' : '#c6d5d8',
+        isNightTerrain ? '#333333' : '#f7f7f7',
       );
 
       const {mPerPx, w, h} = syncCameraTransform();
@@ -2222,13 +2525,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
       }
 
-      // 1) Update Google Terrain Tiles + RainViewer Precipitation Overlay (anchored to stableAnchorRoot!)
+      // 1) Update Basemap Tiles + Multi-Layer Weather Raster Overlays (anchored to stableAnchorRoot!)
       const rv = rainviewerRef.current;
       const rvFrame = rv && rv.frames.length > 0 ? rv.frames[radarFrameIdxRef.current] ?? rv.frames[rv.frames.length - 1] : null;
       const rvUrl = rv && rvFrame ? `${rv.host}${rvFrame.path}/256/{z}/{x}/{y}/2/1_1.png` : undefined;
       const tileCellX = Math.floor(cam.mx * 4096);
       const tileCellY = Math.floor(cam.my * 4096);
-      const tileHash = `${tileCellX}|${tileCellY}|${cam.zoom.toFixed(2)}|${effectiveStyle}|${s.showRadar}|${rvUrl || ''}|${cam.pitchDeg.toFixed(0)}|${w}|${h}`;
+      const wxMask = `${s.wxLayers?.cloudCoverage ? 1 : 0}${s.wxLayers?.totalPrecip ? 1 : 0}${s.wxLayers?.intensePrecip ? 1 : 0}${s.wxLayers?.naRadar ? 1 : 0}`;
+      const tileHash = `${tileCellX}|${tileCellY}|${cam.zoom.toFixed(2)}|${effectiveStyle}|${s.showRadar}|${wxMask}|${rvUrl || ''}|${cam.pitchDeg.toFixed(0)}|${w}|${h}`;
 
       if (tileHash !== lastTileHash || dirtyRef.current.tileAndHud || rebasedAnchor) {
         lastTileHash = tileHash;
@@ -2243,17 +2547,27 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           showRadar: s.showRadar,
           radarOpacity: s.radarOpacity,
           radarUrlTemplate: rvUrl,
+          wxLayers: s.wxLayers,
           aspect: w / Math.max(1, h),
           fovDeg: FOV_DEG,
           pitchDeg: cam.pitchDeg,
         });
       }
 
-      // 1b) Update Day/Night Line, ATC Boundaries, Oceanic Tracks & Enroute Aeronautical Charts
+      // 1b) Update Day/Night Line, Time Zones, ATC Boundaries, Oceanic Tracks, Enroute Charts & Weather Vector Layers
       const zoomBand = Math.floor(cam.zoom / 1.5);
       if (dirtyRef.current.dayNight) {
         dirtyRef.current.dayNight = false;
         aviationOverlays.rebuildDayNight(worldAnchorRef.mx, worldAnchorRef.my, s.showDayNightLine);
+      }
+      if (dirtyTimezones || rebasedAnchor || dirtyRef.current.atc) {
+        dirtyTimezones = false;
+        aviationOverlays.rebuildTimeZones(
+          worldAnchorRef.mx,
+          worldAnchorRef.my,
+          Boolean(s.showTimeZones),
+          isNightTerrain,
+        );
       }
       if (dirtyRef.current.atc) {
         dirtyRef.current.atc = false;
@@ -2314,23 +2628,61 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         });
       }
 
+      // Fetch & rebuild Weather Hazard / Wind Barb / Volcanic / PIREP / Lightning / Fog layers
+      const wl = s.wxLayers ?? DEFAULT_WX_LAYERS;
+      const wantsVectorWx =
+        wl.windBarbs || wl.sigwx || wl.airepsPireps || wl.volcanic || wl.lightning || wl.fog;
+      if (wantsVectorWx && !wxLayerFetchInFlight && nowMs - lastWxLayerFetchMs > 1200) {
+        const wqKey = `${Math.round(bounds.south / 3)}|${Math.round(bounds.north / 3)}|${Math.round(bounds.west / 4)}|${Math.round(bounds.east / 4)}`;
+        if (wqKey !== lastWxLayerKey) {
+          lastWxLayerKey = wqKey;
+          lastWxLayerFetchMs = nowMs;
+          wxLayerFetchInFlight = true;
+          const qs = new URLSearchParams({
+            lamin: bounds.south.toFixed(1),
+            lamax: bounds.north.toFixed(1),
+            lomin: bounds.west.toFixed(1),
+            lomax: bounds.east.toFixed(1),
+          });
+          void apiFetchJson<WeatherLayersResponse>(`/api/weather/layers?${qs.toString()}`)
+            .then((res) => {
+              if (!disposed && res) {
+                aviationOverlays.setWeatherLayers(res);
+                dirtyWxLayers = true;
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              wxLayerFetchInFlight = false;
+            });
+        }
+      }
+      if (dirtyWxLayers || rebasedAnchor || dirtyRef.current.tileAndHud) {
+        dirtyWxLayers = false;
+        aviationOverlays.rebuildWeatherLayers(worldAnchorRef.mx, worldAnchorRef.my, {
+          wxLayers: wl,
+          zoom: cam.zoom,
+          isNightTerrain,
+        });
+      }
+
       // 2) Persistent GPU Airfields Layer (GLUED to worldAnchorRef inside stableAnchorRoot!)
       airfieldsRoot.visible = true;
       const centerLat = myToLat(cam.my);
       const centerLon = mxToLon(cam.mx);
-      if (cam.zoom >= 7.5) {
+      if (cam.zoom >= 6.8) {
         const nearbyAps = unifiedAirportsRef.current
           .filter(
             (ap) =>
-              Math.abs(ap.lat - centerLat) < 1.6 &&
-              Math.abs(ap.lon - centerLon) < 2.0,
+              Math.abs(ap.lat - centerLat) < 2.4 &&
+              Math.abs(ap.lon - centerLon) < 3.0,
           )
           .sort(
             (a, b) =>
               Math.hypot(a.lat - centerLat, a.lon - centerLon) -
               Math.hypot(b.lat - centerLat, b.lon - centerLon),
           )
-          .slice(0, 5);
+          .slice(0, 10);
 
         for (const ap of nearbyAps) {
           airfieldStore.getInstant(ap.icao, ap.lat, ap.lon);
@@ -2344,8 +2696,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         const distDeg = Math.hypot(surf.lat - centerLat, surf.lon - centerLon);
         const isSelAp = Boolean(selApCode) && (surf.icao.toUpperCase() === selApCode || surf.iata.toUpperCase() === selApCode);
         const inRange =
-          (cam.zoom >= 8.2 && distDeg < 1.8) ||
-          (isSelAp && cam.zoom >= 6.5 && distDeg < 3.0);
+          (cam.zoom >= 7.5 && distDeg < 2.2) ||
+          (isSelAp && cam.zoom >= 6.0 && distDeg < 3.5);
         const verTag = `${surf.source}|${surf.taxiways.length}|${surf.runways.length}|${isNightTerrain ? 1 : 0}`;
         let rec = builtAirfields.get(surf.icao);
 
@@ -2379,12 +2731,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
       }
 
-      // Retain up to 48 built airfields in GPU memory
-      if (builtAirfields.size > 48) {
+      // Retain up to 96 built airfields persistently in GPU memory
+      if (builtAirfields.size > 96) {
         const sortedOld = Array.from(builtAirfields.entries())
           .filter(([, v]) => !v.handle.group.visible)
           .sort((a, b) => a[1].lastSeen - b[1].lastSeen);
-        while (builtAirfields.size > 48 && sortedOld.length > 0) {
+        while (builtAirfields.size > 96 && sortedOld.length > 0) {
           const [k, v] = sortedOld.shift()!;
           airfieldsRoot.remove(v.handle.group);
           v.handle.dispose();
@@ -2462,75 +2814,145 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         precipLines.visible = false;
       }
 
-      // 4) Update Live Aircraft (Forward priority loop + Selected NEVER reverts to 2D in 3D view!)
+      // 4) Update Live Aircraft (Unlimited batched 2D InstancedMesh + 3D Banked World Pool)
+      const selIds = selectedFlightIdsRef.current;
       const activeFlights = selectFlightsForZoomAndRegion(
         flightsRef.current,
         bounds,
-        cam.zoom,
         selectedFlightRef.current?.id ?? null,
+        selIds,
         isolateSelectedRef.current,
+        s.showGroundTraffic,
       );
 
       const nextHits: ScreenHitTarget[] = [];
-      const nextTags: ProjectedPlaneTag[] = [];
-      const seen2D = new Set<string>();
+      const candidateTags: Array<ProjectedPlaneTag & {priority: number; estW: number; estH: number}> = [];
       const seen3D = new Set<string>();
       let used3DCount = 0;
+      let inst2DCount = 0;
+      let ringCount = 0;
       const MAX_3D_MODELS = isSoftwareGl ? 360 : 520;
 
       const selId = selectedFlightRef.current?.id ?? null;
+      const useAirnavYellow = s.aircraft3DStyle === 'airnav-yellow';
+      const pb = playbackRef.current;
+      const plOpts = s.planeLabels ?? DEFAULT_PLANE_LABELS;
+
       const sortedForDraw = [...activeFlights].sort((a, b) => {
-        const aScore = a.id === selId ? 100 : getEmergencySquawkMeta(a.squawk) ? 80 : a.isLadd ? 60 : a.isMilitary ? 40 : a.onGround ? -10 : 0;
-        const bScore = b.id === selId ? 100 : getEmergencySquawkMeta(b.squawk) ? 80 : b.isLadd ? 60 : b.isMilitary ? 40 : b.onGround ? -10 : 0;
+        const aScore =
+          a.id === selId || selIds.has(a.id)
+            ? 100
+            : getEmergencySquawkMeta(a.squawk)
+              ? 80
+              : a.isLadd
+                ? 60
+                : a.isMilitary
+                  ? 40
+                  : a.onGround
+                    ? -10
+                    : 0;
+        const bScore =
+          b.id === selId || selIds.has(b.id)
+            ? 100
+            : getEmergencySquawkMeta(b.squawk)
+              ? 80
+              : b.isLadd
+                ? 60
+                : b.isMilitary
+                  ? 40
+                  : b.onGround
+                    ? -10
+                    : 0;
         if (aScore !== bScore) return bScore - aScore;
         const da = (a.lat - centerLat) ** 2 + (a.lon - centerLon) ** 2;
         const db = (b.lat - centerLat) ** 2 + (b.lon - centerLon) ** 2;
-        return da - db; // Nearest planes get 3D priority first!
+        return da - db;
       });
 
       let selLivePos: {wx: number; wy: number; wz: number} | null = null;
+      const tempCol = new THREE.Color();
+      const tempEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
-      // Forward loop so selectedFlight (index 0) and nearest aircraft ALWAYS receive 3D models first
       for (let i = 0; i < sortedForDraw.length; i++) {
         const f = sortedForDraw[i];
         const entry = flightPoolRef.current.get(f.id);
         if (!entry) continue;
 
-        const t =
-          entry.blendDurationMs > 0
-            ? Math.min(1, Math.max(0, (nowMs - entry.blendStartMs) / entry.blendDurationMs))
-            : 1;
-        const ease = 1 - Math.pow(1 - t, 3);
+        let nextLat = entry.renderLat;
+        let nextLon = entry.renderLon;
+        let nextTrack = entry.renderTrack;
+        let nextAltFt = f.altitudeFt;
 
-        const rawDtSec = Math.max(0, (nowMs - entry.lastUpdateMs) / 1000);
-        const glideMaxSec = f.onGround ? 0.55 : 1.6;
-        const speedFactor = f.onGround ? Math.max(0, Math.min(1, (f.groundSpeedKts - 16) / 35)) : 1;
-        const glideSec = Math.min(glideMaxSec, rawDtSec) * speedFactor;
+        // Flight Playback Trail Interpolation when playback mode is enabled
+        if (pb?.enabled) {
+          const tKey = f.icao24 || f.id;
+          const detTrail =
+            f.id === selId && (selectedDetailRef.current?.trail?.length ?? 0) > 1
+              ? selectedDetailRef.current!.trail
+              : null;
+          const rawTrail = detTrail ?? clientTrailMapRef.current.get(tKey);
+          if (rawTrail && rawTrail.length >= 2) {
+            const pNorm = Math.max(0, Math.min(1, pb.progress));
+            const fIdx = pNorm * (rawTrail.length - 1);
+            const i0 = Math.min(rawTrail.length - 2, Math.floor(fIdx));
+            const i1 = i0 + 1;
+            const frac = fIdx - i0;
+            const p0 = rawTrail[i0];
+            const p1 = rawTrail[i1];
+            nextLat = p0.lat + (p1.lat - p0.lat) * frac;
+            nextLon = p0.lon + (p1.lon - p0.lon) * frac;
+            nextAltFt = p0.altFt + (p1.altFt - p0.altFt) * frac;
+            const dLat = p1.lat - p0.lat;
+            const dLon = (p1.lon - p0.lon) * Math.max(0.15, Math.cos(THREE.MathUtils.degToRad(p0.lat)));
+            if (Math.hypot(dLat, dLon) > 1e-6) {
+              nextTrack = (THREE.MathUtils.radToDeg(Math.atan2(dLon, dLat)) + 360) % 360;
+            }
+          }
+        } else {
+          const t =
+            entry.blendDurationMs > 0
+              ? Math.min(1, Math.max(0, (nowMs - entry.blendStartMs) / entry.blendDurationMs))
+              : 1;
+          const ease = 1 - Math.pow(1 - t, 3);
 
-        let extLat = entry.targetLat;
-        let extLon = entry.targetLon;
-        if (!f.isEstimated && f.groundSpeedKts > (f.onGround ? 18 : 30) && glideSec > 0.04) {
-          const distNm = f.groundSpeedKts * (glideSec / 3600);
-          const trkRad = THREE.MathUtils.degToRad(entry.targetTrack);
-          extLat += (distNm / 60) * Math.cos(trkRad);
-          extLon += ((distNm / 60) * Math.sin(trkRad)) / Math.max(0.15, Math.cos(THREE.MathUtils.degToRad(entry.targetLat)));
+          const rawDtSec = Math.max(0, (nowMs - entry.lastUpdateMs) / 1000);
+          const glideMaxSec = f.onGround ? 0.55 : 1.6;
+          const speedFactor = f.onGround ? Math.max(0, Math.min(1, (f.groundSpeedKts - 16) / 35)) : 1;
+          const glideSec = Math.min(glideMaxSec, rawDtSec) * speedFactor;
+
+          let extLat = entry.targetLat;
+          let extLon = entry.targetLon;
+          if (!f.isEstimated && f.groundSpeedKts > (f.onGround ? 18 : 30) && glideSec > 0.04) {
+            const distNm = f.groundSpeedKts * (glideSec / 3600);
+            const trkRad = THREE.MathUtils.degToRad(entry.targetTrack);
+            extLat += (distNm / 60) * Math.cos(trkRad);
+            extLon += ((distNm / 60) * Math.sin(trkRad)) / Math.max(0.15, Math.cos(THREE.MathUtils.degToRad(entry.targetLat)));
+          }
+
+          nextLat = entry.fromLat + (extLat - entry.fromLat) * ease;
+          nextLon = entry.fromLon + (extLon - entry.fromLon) * ease;
+          const angDelta = ((entry.targetTrack - entry.fromTrack + 540) % 360) - 180;
+          nextTrack = (entry.fromTrack + angDelta * ease + 360) % 360;
         }
 
-        const nextLat = entry.fromLat + (extLat - entry.fromLat) * ease;
-        const nextLon = entry.fromLon + (extLon - entry.fromLon) * ease;
-        const angDelta = ((entry.targetTrack - entry.fromTrack + 540) % 360) - 180;
-        const nextTrack = (entry.fromTrack + angDelta * ease + 360) % 360;
+        const stepTrackDelta = ((nextTrack - entry.renderTrack + 540) % 360) - 180;
+        const targetAngDelta = ((entry.targetTrack - entry.fromTrack + 540) % 360) - 180;
+        const turnSignal = Math.abs(stepTrackDelta) > 0.01 ? stepTrackDelta / Math.max(0.016, dt) : targetAngDelta * 0.4;
+        const targetBankRad = f.onGround ? 0 : THREE.MathUtils.clamp(turnSignal * 0.018, -0.45, 0.45);
+        entry.bankRad = THREE.MathUtils.damp(entry.bankRad, targetBankRad, 6.0, dt);
+
         entry.renderLat = nextLat;
         entry.renderLon = nextLon;
         entry.renderTrack = nextTrack;
+        entry.renderAltFt = nextAltFt;
 
         const mScale = mercatorScaleAtLat(nextLat);
         const wx = (lonToMx(nextLon) - originMx) * MERCATOR_WORLD_M;
         const wz = (latToMy(nextLat) - originMy) * MERCATOR_WORLD_M;
-        const wy = worldAltY(f.altitudeFt, f.onGround, cam.zoom, mScale, cam.pitchDeg);
+        const wy = worldAltY(nextAltFt, f.onGround, cam.zoom, mScale, cam.pitchDeg);
 
-        const isSelected = f.id === selId;
-        if (isSelected) selLivePos = {wx, wy, wz};
+        const isSelected = f.id === selId || selIds.has(f.id);
+        if (f.id === selId) selLivePos = {wx, wy, wz};
         const emerg = getEmergencySquawkMeta(f.squawk);
         const dbMeta = getDbFlagMeta(f);
         const modelClass = resolveFr24ModelClass(f.aircraftType, f.callsign);
@@ -2552,20 +2974,25 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           ),
         );
 
-        // Selected plane in 3D view ALWAYS renders in 3D; ALL planes up to MAX_3D_MODELS render in 3D!
         const renderAs3D = is3D && (isSelected || used3DCount < MAX_3D_MODELS);
         let hitRadiusPx = Math.max(16, iconPx * 0.75);
 
         if (renderAs3D) {
           used3DCount++;
           seen3D.add(f.id);
+          const expectedStylePrefix = useAirnavYellow ? 'airnav|' : 'livery|';
           let rec = world3DPool.get(f.id);
-          if (!rec || rec.handle.modelKey.indexOf(modelClass + '|') !== 0 || (isSelected || Boolean(emerg)) !== Boolean(rec.handle.beaconMesh)) {
+          if (
+            !rec ||
+            !rec.handle.modelKey.startsWith(expectedStylePrefix) ||
+            !rec.handle.modelKey.includes(`|${modelClass}|`) ||
+            (isSelected || Boolean(emerg)) !== Boolean(rec.handle.beaconMesh)
+          ) {
             if (rec) {
               aircraftRoot.remove(rec.handle.group, rec.stem, rec.shadow);
               rec.handle.dispose();
             }
-            const handle = buildWorld3DAircraft(f, maxAniso, isSelected, Boolean(emerg));
+            const handle = buildWorld3DAircraft(f, maxAniso, isSelected, Boolean(emerg), useAirnavYellow);
             const stem = new THREE.Line(stemGeo, stemMat);
             const shadow = new THREE.Mesh(groundShadowGeo, groundShadowMat);
             aircraftRoot.add(handle.group, stem, shadow);
@@ -2585,6 +3012,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           rec.handle.bodyGroup.rotation.x = f.onGround
             ? 0
             : THREE.MathUtils.clamp(f.verticalRateFpm / 4500, -0.22, 0.25);
+          rec.handle.bodyGroup.rotation.z = -entry.bankRad;
           if (rec.handle.rotor) {
             rec.handle.rotor.rotation.y += dt * 16;
           }
@@ -2601,8 +3029,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             rec.stem.visible = false;
             rec.shadow.visible = false;
           }
-        } else {
-          seen2D.add(f.id);
+        } else if (inst2DCount < MAX_2D_PLANES) {
+          const worldSize = Math.max((f.onGround ? 36 : 42) * mScale, iconPx * mPerPx);
+          tempEuler.set(0, -THREE.MathUtils.degToRad(nextTrack), 0);
+          _dummyQuat.setFromEuler(tempEuler);
+          _dummyScale.set(worldSize, 1, worldSize);
+          _dummyMatrix.compose(_projVec.set(wx, wy, wz), _dummyQuat, _dummyScale);
+          plane2DInst.setMatrixAt(inst2DCount, _dummyMatrix);
+
           const iconFill = emerg
             ? '#EF4444'
             : isSelected
@@ -2614,53 +3048,20 @@ export const RadarMap: React.FC<RadarMapProps> = ({
                   : dbMeta?.kind === 'PIA'
                     ? '#22D3EE'
                     : '#F9D949';
-          const stroke = emerg || isSelected ? '#ffffff' : dbMeta?.kind === 'LADD' ? '#4C1D95' : isDark ? '#0B0E14' : '#13233a';
-          const sKey = `${modelClass}|${iconFill}|${stroke}|${emerg ? 'e' : isSelected ? 's' : dbMeta?.kind === 'LADD' ? 'l' : 'n'}`;
+          tempCol.set(iconFill);
+          cellAttr.setX(inst2DCount, atlas.getCellIndex(f.aircraftType, f.callsign));
+          fillAttr.setXYZ(inst2DCount, tempCol.r, tempCol.g, tempCol.b);
+          inst2DCount++;
 
-          let sp = spritePool.get(f.id);
-          if (!sp || sp.spriteKey !== sKey) {
-            if (sp) {
-              aircraftRoot.remove(sp.group);
-              sp.mat.dispose();
-            }
-            const tex = getFr24SpriteTexture(modelClass, iconFill, stroke, () => {
-              dirtyRef.current.flights = true;
-            });
-            const mat = new THREE.MeshBasicMaterial({
-              map: tex,
-              transparent: true,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const grp = new THREE.Group();
-            const quad = new THREE.Mesh(unitSpriteGeo, mat);
-            quad.renderOrder = isSelected || emerg ? 24 : 20;
-            grp.add(quad);
-
-            let ring: THREE.Mesh | undefined;
-            if (emerg || isSelected || dbMeta?.kind === 'LADD') {
-              ring = new THREE.Mesh(
-                ringGeo,
-                emerg ? ringMatEmerg : isSelected ? ringMatSel : ringMatLadd,
-              );
-              ring.position.y = -0.05;
-              ring.renderOrder = 19;
-              grp.add(ring);
-            }
-            aircraftRoot.add(grp);
-            sp = {group: grp, quad, mat, ring, spriteKey: sKey};
-            spritePool.set(f.id, sp);
+          if ((emerg || isSelected || dbMeta?.kind === 'LADD') && ringCount < MAX_RING_INSTANCES) {
+            _dummyQuat.identity();
+            _dummyScale.set(worldSize, 1, worldSize);
+            _dummyMatrix.compose(_projVec.set(wx, wy - 0.04, wz), _dummyQuat, _dummyScale);
+            ringInst.setMatrixAt(ringCount, _dummyMatrix);
+            tempCol.set(emerg ? '#EF4444' : isSelected ? '#F59E0B' : '#A855F7');
+            ringColorAttr.setXYZ(ringCount, tempCol.r, tempCol.g, tempCol.b);
+            ringCount++;
           }
-
-          // World size matching exact crisp pixel scale
-          const worldSize = Math.max(
-            (f.onGround ? 36 : 42) * mScale,
-            iconPx * mPerPx,
-          );
-          sp.group.visible = true;
-          sp.group.position.set(wx, wy, wz);
-          sp.group.scale.setScalar(worldSize);
-          sp.quad.rotation.y = -THREE.MathUtils.degToRad(nextTrack);
         }
 
         // Screen-space projection for fast picking & labels
@@ -2671,23 +3072,96 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           if (sx >= -40 && sy >= -40 && sx <= w + 40 && sy <= h + 40) {
             nextHits.push({x: sx, y: sy, r: hitRadiusPx, flight: f});
 
-            if ((emerg || isSelected || s.showPlaneLabels) && nextTags.length < 48) {
-              const text = emerg
-                ? `▲ ${emerg.shortLabel} · ${f.callsign}`
-                : `${dbMeta ? `[${dbMeta.shortLabel}] ` : ''}${f.callsign}${
-                    f.onGround ? ' GND' : ` FL${Math.round(f.altitudeFt / 100)}`
-                  }`;
-              nextTags.push({
+            const allowGroundLbl = plOpts.showOnGround || isSelected || Boolean(emerg);
+            if ((emerg || isSelected || (s.showPlaneLabels && (!f.onGround || allowGroundLbl))) && candidateTags.length < 400) {
+              const det = f.id === selId ? selectedDetailRef.current : detailMetaCacheRef.current.get(f.id);
+              const l1Parts: string[] = [];
+              if (emerg) l1Parts.push(`▲${emerg.shortLabel}`);
+              else if (dbMeta) l1Parts.push(`[${dbMeta.shortLabel}]`);
+              if (plOpts.showFlightNumber) l1Parts.push(f.flightNumber || f.callsign || f.icao24);
+              if (plOpts.showRoute) {
+                const orig = det?.originIata || f.origin;
+                const dest = det?.destinationIata || f.destination;
+                if (orig && dest) l1Parts.push(`${orig}→${dest}`);
+                else if (orig || dest) l1Parts.push(orig || dest);
+              }
+              if (plOpts.showModel && f.aircraftType) l1Parts.push(f.aircraftType);
+
+              const l2Parts: string[] = [];
+              if (plOpts.showRegistration && (det?.registration || f.registration)) l2Parts.push(det?.registration || f.registration);
+              if (plOpts.showModeS) l2Parts.push(f.icao24.toUpperCase());
+              if (plOpts.showAltitude) l2Parts.push(f.onGround ? 'GND' : `FL${Math.round(nextAltFt / 100)}`);
+              if (plOpts.showSpeed) l2Parts.push(`${Math.round(f.groundSpeedKts)}kt`);
+              if (plOpts.showSquawk && f.squawk) l2Parts.push(`SQK ${f.squawk}`);
+              if (plOpts.showHeading) l2Parts.push(`${String(Math.round(nextTrack)).padStart(3, '0')}°`);
+
+              const l3Parts: string[] = [];
+              const destCode = (det?.destinationIata || f.destination || '').toUpperCase();
+              const destCoords = destCode
+                ? unifiedAirportsRef.current.find((a) => a.iata.toUpperCase() === destCode || a.icao.toUpperCase() === destCode)
+                : undefined;
+              const remNm = destCoords ? haversineNm(nextLat, nextLon, destCoords.lat, destCoords.lon) : null;
+              const remMin = remNm !== null && f.groundSpeedKts > 60 ? Math.round((remNm / f.groundSpeedKts) * 60) : null;
+
+              if (plOpts.showDepartureTime && det?.scheduledDep) {
+                l3Parts.push(`DEP ${new Date(det.scheduledDep * 1000).toISOString().slice(11, 16)}Z`);
+              }
+              if (plOpts.showTakeOffTime && det?.actualDep) {
+                l3Parts.push(`T/O ${new Date(det.actualDep * 1000).toISOString().slice(11, 16)}Z`);
+              }
+              if (plOpts.showEta) {
+                const etaSec = det?.estimatedArr ?? (remMin !== null ? Math.floor(Date.now() / 1000) + remMin * 60 : undefined);
+                if (etaSec) l3Parts.push(`ETA ${new Date(etaSec * 1000).toISOString().slice(11, 16)}Z`);
+              }
+              if (plOpts.showDistanceToDest && remNm !== null) {
+                l3Parts.push(`${Math.round(remNm)}NM`);
+              }
+              if (plOpts.showRemainingTime && remMin !== null) {
+                l3Parts.push(`-${Math.floor(remMin / 60)}h${String(remMin % 60).padStart(2, '0')}m`);
+              }
+              if (plOpts.showLastPositionReport) {
+                const ageS = Math.max(0, Math.round(Date.now() / 1000 - f.lastContactEpoch));
+                l3Parts.push(`${ageS}s ago`);
+              }
+
+              const line1 = l1Parts.join(' ') || f.callsign;
+              const line2 = l2Parts.join(' · ');
+              const line3 = l3Parts.join(' · ');
+              const maxChars = Math.max(line1.length, line2.length, line3.length);
+              const linesCount = 1 + (line2 ? 1 : 0) + (line3 ? 1 : 0);
+
+              candidateTags.push({
                 id: f.id,
-                x: sx + iconPx * 0.5 + 4,
-                y: sy - 8,
-                text,
-                kind: emerg ? 'emerg' : dbMeta?.kind === 'LADD' ? 'ladd' : dbMeta?.kind === 'MIL' ? 'mil' : 'std',
+                flightId: f.id,
+                lat: nextLat,
+                lon: nextLon,
+                altFt: nextAltFt,
+                onGround: f.onGround,
+                iconPx,
+                x: sx + iconPx * 0.5 + 5,
+                y: sy - 10,
+                line1,
+                line2,
+                line3,
+                logoUrl: plOpts.showAirlineLogo ? getFr24OperatorLogoUrl(f.airlineIcao) : '',
+                kind: emerg ? 'emerg' : isSelected ? 'sel' : dbMeta?.kind === 'LADD' ? 'ladd' : dbMeta?.kind === 'MIL' ? 'mil' : 'std',
+                priority: emerg ? 4 : isSelected ? 3 : f.onGround ? 0 : 1,
+                estW: Math.max(58, maxChars * 6.4 + (plOpts.showAirlineLogo && f.airlineIcao ? 22 : 12)),
+                estH: linesCount * 13 + 8,
               });
             }
           }
         }
       }
+
+      plane2DInst.count = inst2DCount;
+      plane2DInst.instanceMatrix.needsUpdate = true;
+      cellAttr.needsUpdate = true;
+      fillAttr.needsUpdate = true;
+
+      ringInst.count = ringCount;
+      ringInst.instanceMatrix.needsUpdate = true;
+      ringColorAttr.needsUpdate = true;
 
       // Live 60Hz connector tip from selected flight's trail end to its moving nose
       if (selLivePos && selectedLastTrailPt && (isolateSelectedRef.current || s.flightPathMode !== 'off')) {
@@ -2708,14 +3182,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         selectedTipLine.visible = false;
       }
 
-      // Sweep unused pooled sprites & 3D aircraft cleanly
-      for (const [k, sp] of spritePool.entries()) {
-        if (!seen2D.has(k)) {
-          aircraftRoot.remove(sp.group);
-          sp.mat.dispose();
-          spritePool.delete(k);
-        }
-      }
       for (const [k, rec] of world3DPool.entries()) {
         if (!seen3D.has(k)) {
           aircraftRoot.remove(rec.handle.group, rec.stem, rec.shadow);
@@ -2726,7 +3192,47 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
       hitTargetsRef.current = nextHits;
 
-      // 5) Throttled (10Hz) React HUD projection sync for clickable Airport chips, Plane Labels & Top-right readouts
+      // 5) 60Hz Direct DOM Transform Updates (ZERO jiggle when panning/zooming!)
+      const projectDom = (el: HTMLElement | undefined, lat: number, lon: number, wy: number, offsetStr: string, pxOff = 0, pyOff = 0) => {
+        if (!el) return;
+        const wx = (lonToMx(lon) - originMx) * MERCATOR_WORLD_M;
+        const wz = (latToMy(lat) - originMy) * MERCATOR_WORLD_M;
+        _projVec.set(wx, wy, wz).project(camera);
+        if (_projVec.z < -1 || _projVec.z > 1) {
+          el.style.opacity = '0';
+          return;
+        }
+        const sx = (_projVec.x * 0.5 + 0.5) * w + pxOff;
+        const sy = (-_projVec.y * 0.5 + 0.5) * h + pyOff;
+        el.style.opacity = '1';
+        el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0)${offsetStr}`;
+      };
+
+      for (const ap of activeApRef.current) {
+        projectDom(airportDomMapRef.current.get(ap.icao), ap.lat, ap.lon, 2, ' translate(-6px, -50%)');
+      }
+      for (const lbl of activeNavRef.current) {
+        projectDom(navDomMapRef.current.get(lbl.id), lbl.lat, lbl.lon, 1, ' translate(-50%, -50%)');
+      }
+      for (const lbl of activeSurfRef.current) {
+        projectDom(
+          surfaceDomMapRef.current.get(lbl.id),
+          lbl.lat,
+          lbl.lon,
+          is3D && lbl.kind === 'terminal' ? 16 : 1,
+          ' translate(-50%, -50%)',
+        );
+      }
+      for (const tag of activePlaneTagsRef.current) {
+        const pooled = flightPoolRef.current.get(tag.flightId);
+        const lat = pooled ? pooled.renderLat : tag.lat;
+        const lon = pooled ? pooled.renderLon : tag.lon;
+        const alt = pooled ? pooled.renderAltFt : tag.altFt;
+        const py = worldAltY(alt, tag.onGround, cam.zoom, mercatorScaleAtLat(lat), cam.pitchDeg);
+        projectDom(planeDomMapRef.current.get(tag.id), lat, lon, py, '', tag.iconPx * 0.5 + 5, -10);
+      }
+
+      // 6) Throttled (10Hz) React HUD Membership Sync + Strict Non-Overlapping Plane Label Culling
       if (nowMs - lastHudSyncMs > 100) {
         lastHudSyncMs = nowMs;
         setHudCamera((prev) => {
@@ -2737,7 +3243,31 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             ? prev
             : {zoom: nz, bearing: nb, pitch: np};
         });
-        setPlaneTags(nextTags);
+
+        // Strict AABB Non-Overlapping Collision Culling (allowOverlap ALWAYS false)
+        candidateTags.sort((a, b) => b.priority - a.priority);
+        const placedBoxes: Array<[number, number, number, number]> = [];
+        const acceptedTags: ProjectedPlaneTag[] = [];
+        for (const cand of candidateTags) {
+          if (acceptedTags.length >= 90) break;
+          const x0 = cand.x - 3;
+          const y0 = cand.y - 3;
+          const x1 = cand.x + cand.estW + 3;
+          const y1 = cand.y + cand.estH + 3;
+          let overlaps = false;
+          for (let b = 0; b < placedBoxes.length; b++) {
+            const box = placedBoxes[b];
+            if (x0 < box[2] && x1 > box[0] && y0 < box[3] && y1 > box[1]) {
+              overlaps = true;
+              break;
+            }
+          }
+          if (overlaps) continue;
+          placedBoxes.push([x0, y0, x1, y1]);
+          acceptedTags.push(cand);
+        }
+        activePlaneTagsRef.current = acceptedTags;
+        setPlaneTags(acceptedTags);
 
         const nextAps: ProjectedAirportBadge[] = [];
         for (const ap of unifiedAirportsRef.current) {
@@ -2758,6 +3288,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             icao: ap.icao,
             iata: ap.iata || ap.icao,
             name: ap.name,
+            lat: ap.lat,
+            lon: ap.lon,
             x: sx,
             y: sy,
             tier: ap.tier,
@@ -2767,7 +3299,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           });
         }
         nextAps.sort((a, b) => (a.isSelected ? -1 : b.isSelected ? 1 : a.tier - b.tier));
-        setAirportBadges(nextAps.slice(0, 42));
+        const slicedAps = nextAps.slice(0, 42);
+        activeApRef.current = slicedAps;
+        const apSig = slicedAps.map((a) => `${a.icao}:${a.isSelected ? 1 : 0}:${a.catColor}`).join('|');
+        if (apSig !== lastApSig || (slicedAps.length > 0 && airportDomMapRef.current.size !== slicedAps.length)) {
+          lastApSig = apSig;
+          setAirportBadges(slicedAps);
+        }
 
         // Project Taxiway, Apron, Terminal & Close-Up Gate Labels
         const nextSurfLabels: ProjectedSurfaceLabel[] = [];
@@ -2801,11 +3339,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             }
           }
         }
+        activeSurfRef.current = nextSurfLabels;
         setSurfaceLabels((prev) => (prev.length === 0 && nextSurfLabels.length === 0 ? prev : nextSurfLabels));
 
-        // Project collision-culled FIR, Oceanic Track, Airway, and Waypoint HUD labels
+        // Project collision-culled TimeZone, FIR, Oceanic Track, Airway, Waypoint & WX HUD labels
         const rawNav = aviationOverlays.getHudLabels({
           showAtcBoundaries: s.showAtcBoundaries,
+          showTimeZones: Boolean(s.showTimeZones),
           showOceanicTracks: s.showOceanicTracks,
           showHighAirways: s.showHighAirways,
           showLowAirways: s.showLowAirways,
@@ -2814,8 +3354,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         });
         const nextNav: Array<AviationHudLabel & {x: number; y: number}> = [];
         const occupiedCells = new Set<string>();
+        const seenNavIds = new Set<string>();
         for (const lbl of rawNav) {
           if (nextNav.length >= 64) break;
+          if (seenNavIds.has(lbl.id)) continue;
           const lx = (lonToMx(lbl.lon) - originMx) * MERCATOR_WORLD_M;
           const lz = (latToMy(lbl.lat) - originMy) * MERCATOR_WORLD_M;
           _projVec.set(lx, 1, lz).project(camera);
@@ -2826,8 +3368,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           const cellKey = `${Math.round(sx / 78)}|${Math.round(sy / 30)}`;
           if (occupiedCells.has(cellKey)) continue;
           occupiedCells.add(cellKey);
+          seenNavIds.add(lbl.id);
           nextNav.push({...lbl, x: sx, y: sy});
         }
+        activeNavRef.current = nextNav;
         setNavLabels((prev) => (prev.length === 0 && nextNav.length === 0 ? prev : nextNav));
       }
 
@@ -2849,7 +3393,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       canvasEl.removeEventListener('pointerup', onPointerUp);
       canvasEl.removeEventListener('pointercancel', onPointerUp);
       canvasEl.removeEventListener('pointerleave', onPointerLeave);
-      canvasEl.removeEventListener('wheel', onWheel);
+      wheelHostEl.removeEventListener('wheel', onWheel);
       canvasEl.removeEventListener('contextmenu', onContextMenu);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
@@ -2864,10 +3408,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       clearGroup(hazardsRoot);
       clearGroup(trailsRoot);
 
-      for (const sp of spritePool.values()) {
-        sp.mat.dispose();
-      }
-      spritePool.clear();
       for (const w3 of world3DPool.values()) {
         w3.handle.dispose();
       }
@@ -2878,10 +3418,9 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       precipGeo.dispose();
       precipMat.dispose();
       unitSpriteGeo.dispose();
+      spriteAtlasMat.dispose();
       ringGeo.dispose();
-      ringMatSel.dispose();
-      ringMatEmerg.dispose();
-      ringMatLadd.dispose();
+      ringInstMat.dispose();
       stemGeo.dispose();
       stemMat.dispose();
       groundShadowGeo.dispose();
@@ -2906,31 +3445,45 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   const isWorld3DActive = hudCamera.pitch > 10;
 
   return (
-    <div className={`relative w-full h-full overflow-hidden bg-card ${isMobilePortrait ? 'skydeck-mobile-map' : ''}`}>
+    <div ref={outerContainerRef} className={`relative w-full h-full overflow-hidden bg-card ${isMobilePortrait ? 'skydeck-mobile-map' : ''}`}>
       {/* Dedicated Three.js OpenGL/WebGL2 World Map Canvas */}
       <div ref={mountDivRef} className="w-full h-full" />
 
-      {/* Projected ATC FIR, Oceanic Track, High/Low Airway & Waypoint Labels */}
+      {/* Projected TimeZone, ATC FIR, Oceanic Track, Airway, Waypoint & WX Hazard Labels (60Hz direct transform) */}
       {navLabels.length > 0 && (
         <div className="pointer-events-none absolute inset-0 overflow-hidden z-[402]">
           {navLabels.map((lbl) => (
             <span
               key={lbl.id}
-              style={{
-                transform: `translate(${Math.round(lbl.x)}px, ${Math.round(lbl.y)}px) translate(-50%, -50%)`,
+              ref={(el) => {
+                if (el) navDomMapRef.current.set(lbl.id, el);
+                else navDomMapRef.current.delete(lbl.id);
               }}
-              className={`absolute left-0 top-0 rounded px-1 py-0.5 font-mono font-semibold whitespace-nowrap ${
-                lbl.kind === 'fir' || lbl.kind === 'oceanic-fir'
-                  ? 'text-[9.5px] tracking-wider bg-slate-900/65 text-sky-200 border border-sky-400/35'
-                  : lbl.kind === 'nat'
-                    ? lbl.direction === 'east'
-                      ? 'text-[9.5px] bg-fuchsia-950/85 text-fuchsia-200 border border-fuchsia-400/50'
-                      : 'text-[9.5px] bg-cyan-950/85 text-cyan-200 border border-cyan-400/50'
-                    : lbl.kind === 'airway-hi'
-                      ? 'text-[8.5px] bg-blue-950/75 text-blue-200 border border-blue-400/40'
-                      : lbl.kind === 'airway-lo'
-                        ? 'text-[8.5px] bg-emerald-950/75 text-emerald-200 border border-emerald-400/40'
-                        : 'text-[8.5px] bg-white/80 dark:bg-slate-900/80 text-blue-900 dark:text-sky-200 border border-blue-500/30 translate-y-3'
+              style={{
+                transform: `translate3d(${lbl.x.toFixed(1)}px, ${lbl.y.toFixed(1)}px, 0) translate(-50%, -50%)`,
+              }}
+              className={`absolute left-0 top-0 rounded px-1 py-0.5 font-mono font-semibold whitespace-nowrap will-change-transform ${
+                lbl.kind === 'timezone'
+                  ? 'text-[9px] tracking-tight bg-amber-950/75 text-amber-200 border border-amber-400/40'
+                  : lbl.kind === 'fir' || lbl.kind === 'oceanic-fir'
+                    ? 'text-[9.5px] tracking-wider bg-slate-900/65 text-sky-200 border border-sky-400/35'
+                    : lbl.kind === 'nat'
+                      ? lbl.direction === 'east'
+                        ? 'text-[9.5px] bg-fuchsia-950/85 text-fuchsia-200 border border-fuchsia-400/50'
+                        : 'text-[9.5px] bg-cyan-950/85 text-cyan-200 border border-cyan-400/50'
+                      : lbl.kind === 'airway-hi'
+                        ? 'text-[8.5px] bg-blue-950/75 text-blue-200 border border-blue-400/40'
+                        : lbl.kind === 'airway-lo'
+                          ? 'text-[8.5px] bg-emerald-950/75 text-emerald-200 border border-emerald-400/40'
+                          : lbl.kind === 'wx-volc'
+                            ? 'text-[8.5px] bg-orange-950/85 text-orange-200 border border-orange-400/60'
+                            : lbl.kind === 'wx-ltg'
+                              ? 'text-[8.5px] bg-yellow-950/85 text-yellow-200 border border-yellow-400/50'
+                              : lbl.kind === 'wx-fog'
+                                ? 'text-[8.5px] bg-slate-800/85 text-slate-200 border border-slate-400/50'
+                                : lbl.kind === 'wx-pirep'
+                                  ? 'text-[8.5px] bg-sky-950/85 text-sky-200 border border-sky-400/50'
+                                  : 'text-[8.5px] bg-white/80 dark:bg-slate-900/80 text-blue-900 dark:text-sky-200 border border-blue-500/30 translate-y-3'
               }`}
             >
               {lbl.text}
@@ -2945,10 +3498,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           {surfaceLabels.map((lbl) => (
             <span
               key={lbl.id}
-              style={{
-                transform: `translate(${Math.round(lbl.x)}px, ${Math.round(lbl.y)}px) translate(-50%, -50%)`,
+              ref={(el) => {
+                if (el) surfaceDomMapRef.current.set(lbl.id, el);
+                else surfaceDomMapRef.current.delete(lbl.id);
               }}
-              className={`absolute left-0 top-0 rounded px-1 py-0.5 font-mono font-bold whitespace-nowrap shadow-xs ${
+              style={{
+                transform: `translate3d(${lbl.x.toFixed(1)}px, ${lbl.y.toFixed(1)}px, 0) translate(-50%, -50%)`,
+              }}
+              className={`absolute left-0 top-0 rounded px-1 py-0.5 font-mono font-bold whitespace-nowrap shadow-xs will-change-transform ${
                 lbl.kind === 'taxiway'
                   ? 'bg-amber-400 text-[#0B101B] text-[9.5px] border border-amber-200/80'
                   : lbl.kind === 'terminal'
@@ -2964,16 +3521,20 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         </div>
       )}
 
-      {/* Projected Clickable Airport METAR Pins (Solid surfaces, zero backdrop-blur over WebGL) */}
+      {/* Projected Clickable Airport METAR Pins */}
       <div ref={airportHudRef} className="pointer-events-none absolute inset-0 overflow-hidden z-[410]">
         {airportBadges.map((ap) => (
           <button
             key={ap.icao}
+            ref={(el) => {
+              if (el) airportDomMapRef.current.set(ap.icao, el);
+              else airportDomMapRef.current.delete(ap.icao);
+            }}
             type="button"
             onClick={() => onSelectAirport({icao: ap.icao, iata: ap.iata, name: ap.name})}
             title={`${ap.iata} (${ap.icao}) · ${ap.name}${ap.wxCat ? ` · ${ap.wxCat}` : ''}`}
-            style={{transform: `translate(${Math.round(ap.x)}px, ${Math.round(ap.y)}px) translate(-6px, -50%)`}}
-            className="pointer-events-auto absolute left-0 top-0 inline-flex items-center cursor-pointer group"
+            style={{transform: `translate3d(${ap.x.toFixed(1)}px, ${ap.y.toFixed(1)}px, 0) translate(-6px, -50%)`}}
+            className="pointer-events-auto absolute left-0 top-0 inline-flex items-center cursor-pointer group will-change-transform"
           >
             <span
               style={{
@@ -2996,36 +3557,57 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         ))}
       </div>
 
-      {/* Projected Aircraft Labels (Selected / Emergency / Show Labels) */}
+      {/* Projected Non-Overlapping Aircraft Labels */}
       <div ref={planeHudRef} className="pointer-events-none absolute inset-0 overflow-hidden z-[420]">
         {planeTags.map((tag) => (
           <div
             key={tag.id}
-            style={{transform: `translate(${Math.round(tag.x)}px, ${Math.round(tag.y)}px)`}}
-            className={`absolute left-0 top-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-bold whitespace-nowrap border ${
+            ref={(el) => {
+              if (el) planeDomMapRef.current.set(tag.id, el);
+              else planeDomMapRef.current.delete(tag.id);
+            }}
+            style={{transform: `translate3d(${tag.x.toFixed(1)}px, ${tag.y.toFixed(1)}px, 0)`}}
+            className={`absolute left-0 top-0 rounded-md px-1.5 py-0.5 font-mono text-[9.5px] leading-tight font-bold whitespace-nowrap border shadow-xs will-change-transform ${
               tag.kind === 'emerg'
                 ? 'bg-red-600 text-white border-white'
-                : tag.kind === 'ladd'
-                  ? 'bg-purple-700 text-white border-purple-300'
-                  : tag.kind === 'mil'
-                    ? 'bg-emerald-800 text-white border-emerald-300'
-                    : 'bg-[#F9D949] text-[#13233a] border-[#13233a]/40'
+                : tag.kind === 'sel'
+                  ? 'bg-amber-400 text-[#0B101B] border-white'
+                  : tag.kind === 'ladd'
+                    ? 'bg-purple-700 text-white border-purple-300'
+                    : tag.kind === 'mil'
+                      ? 'bg-emerald-800 text-white border-emerald-300'
+                      : 'bg-[#F9D949] text-[#13233a] border-[#13233a]/40'
             }`}
           >
-            {tag.text}
+            <div className="flex items-center gap-1">
+              {tag.logoUrl && (
+                <img
+                  src={tag.logoUrl}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = 'none';
+                  }}
+                  className="h-3 max-w-[24px] object-contain rounded-xs shrink-0"
+                />
+              )}
+              <span>{tag.line1}</span>
+            </div>
+            {tag.line2 && <div className="text-[8.5px] font-semibold opacity-90">{tag.line2}</div>}
+            {tag.line3 && <div className="text-[8px] font-medium opacity-80">{tag.line3}</div>}
           </div>
         ))}
       </div>
 
-      {/* Hover Tooltip */}
+      {/* Hover Tooltip (Aircraft Telemetry / Photo / Trail Point Alt & Speed) */}
       <div
         ref={hoverTooltipRef}
-        className="pointer-events-none absolute left-0 top-0 z-[720] rounded-lg border border-border bg-card px-2.5 py-1 font-mono text-[11px] font-medium text-foreground shadow-lg transition-opacity duration-100 whitespace-nowrap"
+        className="pointer-events-none absolute left-0 top-0 z-[720] rounded-lg border border-border bg-card px-2.5 py-1.5 font-mono text-[11px] font-medium text-foreground shadow-lg transition-opacity duration-100 whitespace-nowrap"
         style={{opacity: 0}}
       />
 
-      {/* Top-Right Compact GPU Camera Controls: 3D World Toggle, Horizon Pitch/Altitude, Compass, Zoom +/- */}
-      <div className="absolute top-3 right-3 z-[460] flex flex-col gap-1.5">
+      {/* Top-Right Compact 3D View Toggle & North Compass (No +/- buttons or z2.0 clutter) */}
+      <div className="absolute top-3 right-3 z-[460] flex flex-col gap-1.5" data-no-map-wheel>
         <button
           type="button"
           onClick={() => {
@@ -3033,7 +3615,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             camStateRef.current.targetPitchDeg = nextPitch;
             if (isWorld3DActive) camStateRef.current.targetElevOffsetM = 0;
           }}
-          title={isWorld3DActive ? 'Switch to 2D Top-Down Radar' : 'Tilt into 3D World Map with 3D Planes (Ctrl+Drag up/down/left/right)'}
+          title={isWorld3DActive ? 'Switch to 2D Top-Down Radar' : 'Tilt into 3D World Map with 3D Planes'}
           className={`h-8 px-2.5 rounded-lg border font-mono text-[11px] font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer ${
             isWorld3DActive
               ? 'bg-sky-600 text-white border-sky-400'
@@ -3051,7 +3633,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             camStateRef.current.targetPitchDeg = 0;
             camStateRef.current.targetElevOffsetM = 0;
           }}
-          title="Reset North Up & Flat 2D (Ctrl+Drag to pan up/down/left/right in 3D)"
+          title="Reset North Up & Flat 2D"
           className="h-8 px-2.5 rounded-lg border border-border bg-card text-foreground hover:bg-accent font-mono text-[10.5px] flex items-center justify-center gap-1 shadow-md cursor-pointer"
         >
           <Compass
@@ -3060,33 +3642,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           />
           {hudCamera.bearing}°
         </button>
-
-        <div className="flex flex-col rounded-lg border border-border bg-card overflow-hidden shadow-md">
-          <button
-            type="button"
-            onClick={() => {
-              camStateRef.current.targetZoom = Math.min(19.2, camStateRef.current.targetZoom + 1);
-            }}
-            aria-label="Zoom in"
-            className="h-8 w-full flex items-center justify-center text-foreground hover:bg-accent border-b border-border cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              camStateRef.current.targetZoom = Math.max(2.0, camStateRef.current.targetZoom - 1);
-            }}
-            aria-label="Zoom out"
-            className="h-8 w-full flex items-center justify-center text-foreground hover:bg-accent cursor-pointer"
-          >
-            <Minus className="w-3.5 h-3.5" />
-          </button>
-        </div>
       </div>
 
       {/* Top-Right Compact GeoFS Altitude Legend & Optional Weather Radar Player */}
-      <div className="hidden md:flex absolute top-3 right-24 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm">
+      <div className="hidden md:flex absolute top-3 right-24 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm" data-no-map-wheel>
         {settings.showRadar && rainviewer && rainviewer.frames.length > 0 && (
           <div className="flex items-center gap-2 pr-2.5 border-r border-border">
             <button
@@ -3137,8 +3696,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({
             <span className="w-2 h-2 rounded-full bg-[#F472B6]" />
             50k+
           </span>
-          <span className="text-border">|</span>
-          <span className="text-foreground/80">z{hudCamera.zoom.toFixed(1)} · Ctrl+Drag 3D / WASD</span>
           {loading && flights.length === 0 && (
             <span className="text-primary font-semibold ml-1">Syncing…</span>
           )}
