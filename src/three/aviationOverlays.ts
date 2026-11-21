@@ -202,24 +202,40 @@ export class AviationOverlaysManager {
     );
   }
 
-  public setAtcBoundaries(data: AtcBoundaryFeature[]) {
-    this.atcData = data;
+  public setAtcBoundaries(data: AtcBoundaryFeature[] | null | undefined) {
+    this.atcData = Array.isArray(data) ? data : [];
   }
 
-  public setTimeZones(data: TimeZoneBoundaryFeature[]) {
-    this.timezoneData = data;
+  public setTimeZones(data: TimeZoneBoundaryFeature[] | null | undefined) {
+    this.timezoneData = Array.isArray(data) ? data : [];
   }
 
-  public setOceanicTracks(data: OceanicTrackSpec[]) {
-    this.oceanicData = data;
+  public setOceanicTracks(data: OceanicTrackSpec[] | null | undefined) {
+    this.oceanicData = Array.isArray(data) ? data : [];
   }
 
-  public setEnrouteData(data: EnrouteChartResponse) {
-    this.enrouteData = data;
+  public setEnrouteData(data: Partial<EnrouteChartResponse> | null | undefined) {
+    this.enrouteData = {
+      waypoints: Array.isArray(data?.waypoints) ? data.waypoints : [],
+      highAirways: Array.isArray(data?.highAirways) ? data.highAirways : [],
+      lowAirways: Array.isArray(data?.lowAirways) ? data.lowAirways : [],
+    };
   }
 
-  public setWeatherLayers(data: WeatherLayersResponse | null) {
-    this.wxLayersData = data;
+  public setWeatherLayers(data: Partial<WeatherLayersResponse> | null | undefined) {
+    if (!data) {
+      this.wxLayersData = null;
+      return;
+    }
+    this.wxLayersData = {
+      windGrid: Array.isArray(data.windGrid) ? data.windGrid : [],
+      pireps: Array.isArray(data.pireps) ? data.pireps : [],
+      volcanic: Array.isArray(data.volcanic) ? data.volcanic : [],
+      lightning: Array.isArray(data.lightning) ? data.lightning : [],
+      fogZones: Array.isArray(data.fogZones) ? data.fogZones : [],
+      sigwx: Array.isArray(data.sigwx) ? data.sigwx : [],
+      fetchedAt: Number(data.fetchedAt ?? Date.now()),
+    };
   }
 
   public getHudLabels(opts: {
@@ -548,12 +564,15 @@ export class AviationOverlaysManager {
       isNightTerrain: boolean;
     },
   ) {
+    if (!this.airwaysGroup || !this.waypointsGroup) return;
     disposeGroupChildren(this.airwaysGroup);
     disposeGroupChildren(this.waypointsGroup);
     this.hudAirwayLabels = [];
     this.hudWaypointLabels = [];
 
-    const {highAirways, lowAirways, waypoints} = this.enrouteData;
+    const highAirways = Array.isArray(this.enrouteData?.highAirways) ? this.enrouteData.highAirways : [];
+    const lowAirways = Array.isArray(this.enrouteData?.lowAirways) ? this.enrouteData.lowAirways : [];
+    const waypoints = Array.isArray(this.enrouteData?.waypoints) ? this.enrouteData.waypoints : [];
 
     // 1. High & Low Airways
     if (opts.showHighAirways && highAirways.length > 0) {
@@ -821,8 +840,9 @@ export class AviationOverlaysManager {
     };
 
     // 1. Fog Zones & Mist Patches
-    if (wxLayers.fog && data.fogZones.length > 0) {
-      for (const fz of data.fogZones) {
+    const fogZones = data.fogZones ?? [];
+    if (wxLayers.fog && fogZones.length > 0) {
+      for (const fz of fogZones) {
         if (fz.coords && fz.coords.length >= 2) {
           drawPolyRing(fz.coords, isNightTerrain ? '#CBD5E1' : '#64748B', 0.72, 0.65);
           if (fz.coords.length >= 3) {
@@ -858,7 +878,7 @@ export class AviationOverlaysManager {
     }
 
     // 2. Significant Weather FL250-630 & Volcanic Ash Plumes
-    for (const poly of data.sigwx) {
+    for (const poly of data.sigwx ?? []) {
       if (!poly.coords || poly.coords.length < 3) continue;
       const isVa = /VOLCAN/i.test(poly.title + ' ' + poly.detail);
       if (isVa && wxLayers.volcanic) {
@@ -869,12 +889,13 @@ export class AviationOverlaysManager {
     }
 
     // 3. Wind Barbs (World-space staff + speed pennants/feathers, always crisp at any zoom)
-    if (wxLayers.windBarbs && data.windGrid.length > 0) {
+    const windGrid = data.windGrid ?? [];
+    if (wxLayers.windBarbs && windGrid.length > 0) {
       const barbVerts: number[] = [];
       const pxToM = MERCATOR_WORLD_M / (256 * Math.pow(2, zoom));
       const staffLen = 28 * pxToM;
       const tickLen = 9 * pxToM;
-      for (const wp of data.windGrid) {
+      for (const wp of windGrid) {
         const useUpper = zoom < 6.5;
         const spd = useUpper && wp.upperSpeedKts > 0 ? wp.upperSpeedKts : wp.surfaceSpeedKts;
         const dirDeg = useUpper && wp.upperSpeedKts > 0 ? wp.upperDirDeg : wp.surfaceDirDeg;
@@ -949,10 +970,10 @@ export class AviationOverlaysManager {
       size: number;
       hudKind: AviationHudLabel['kind'];
     }> = [
-      {enabled: wxLayers.volcanic, items: data.volcanic, color: '#F97316', size: 11, hudKind: 'wx-volc'},
-      {enabled: wxLayers.airepsPireps, items: data.pireps, color: '#38BDF8', size: 8, hudKind: 'wx-pirep'},
-      {enabled: wxLayers.lightning, items: data.lightning, color: '#FACC15', size: 9, hudKind: 'wx-ltg'},
-      {enabled: wxLayers.fog, items: data.fogZones, color: '#94A3B8', size: 8, hudKind: 'wx-fog'},
+      {enabled: wxLayers.volcanic, items: data.volcanic ?? [], color: '#F97316', size: 11, hudKind: 'wx-volc'},
+      {enabled: wxLayers.airepsPireps, items: data.pireps ?? [], color: '#38BDF8', size: 8, hudKind: 'wx-pirep'},
+      {enabled: wxLayers.lightning, items: data.lightning ?? [], color: '#FACC15', size: 9, hudKind: 'wx-ltg'},
+      {enabled: wxLayers.fog, items: fogZones, color: '#94A3B8', size: 8, hudKind: 'wx-fog'},
     ];
 
     for (const grp of ptGroups) {

@@ -10,10 +10,14 @@ import type {
   AirportDisruption,
   AirportMarker,
   AirportWeather,
+  AtcBoundaryFeature,
+  EnrouteChartResponse,
   FlightDetail,
   FlightsResponse,
   HazardCategory,
   LiveFlight,
+  NavWaypointSpec,
+  OceanicTrackSpec,
   PastFlightRecord,
   ProviderStatus,
   RainViewerMeta,
@@ -22,6 +26,7 @@ import type {
   SafetyRecordResponse,
   SigmetHazard,
   TaxiwaySegment,
+  TimeZoneBoundaryFeature,
   TrailPoint,
   WeatherLayersResponse,
 } from '../types/aviation';
@@ -34,6 +39,21 @@ import {
   parseOverpassAirfieldElements,
   type OverpassElement,
 } from '../utils/airfieldGeometry';
+import {
+  buildBuiltinFixNavaids,
+  buildFallbackTimeZones,
+  buildReliefTerrainGrid,
+  BUILTIN_NAT_FALLBACK,
+  BUILTIN_PACOTS,
+  computeEnrouteChartForBounds,
+  FALLBACK_FIRS,
+  LIVEATC_STATIONS,
+  parseAtcBoundariesFromVatsim,
+  parseNavaidsCsv,
+  parseOceanicTracksFromNattrak,
+  parseTimeZonesFromGeoJson,
+  parseWeatherLayersPayload,
+} from '../utils/navChartShared';
 import {resolveTimezoneByCoordsAndCode} from '../utils/timezone';
 
 function isDirectSurfaceVehicle(a: Record<string, unknown>, callsign: string): boolean {
@@ -74,6 +94,15 @@ let browserMilCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: nu
 let browserLaddCache: {ts: number; ac: Array<Record<string, unknown>>; nowSec: number} | null = null;
 let staticSnapshotPromise: Promise<LiveFlight[] | null> | null = null;
 let cachedStaticSnapshot: {ts: number; flights: LiveFlight[]} | null = null;
+let cachedBrowserAtc: {ts: number; boundaries: AtcBoundaryFeature[]} | null = null;
+let browserAtcPromise: Promise<AtcBoundaryFeature[]> | null = null;
+let cachedBrowserTz: {ts: number; timezones: TimeZoneBoundaryFeature[]} | null = null;
+let browserTzPromise: Promise<TimeZoneBoundaryFeature[]> | null = null;
+let cachedBrowserOceanic: {ts: number; tracks: OceanicTrackSpec[]} | null = null;
+let browserOceanicPromise: Promise<OceanicTrackSpec[]> | null = null;
+let cachedBrowserNavaids: {ts: number; list: NavWaypointSpec[]; byIdent: Map<string, NavWaypointSpec>} | null = null;
+let browserNavaidsPromise: Promise<{list: NavWaypointSpec[]; byIdent: Map<string, NavWaypointSpec>}> | null = null;
+const browserWxLayersCache = new Map<string, {ts: number; data: WeatherLayersResponse}>();
 let workerCooldownUntil = 0;
 let relayQueue: Promise<void> = Promise.resolve();
 let flightPollCycle = 0;
@@ -290,6 +319,11 @@ async function fetchTextViaCorsRelay(targetUrl: string, timeoutMs = 8000): Promi
 }
 
 async function fetchJsonViaCorsRelay<T>(targetUrl: string, timeoutMs = 8000): Promise<T | null> {
+  // 0. Same-origin snapshot published by the scheduled GitHub Action (no proxy, no CORS)
+  if (isStaticHostingMode()) {
+    const snap = await snapshotForUrl<T>(targetUrl);
+    if (snap) return snap;
+  }
   // 1. User's Cloudflare Worker CORS Proxy (skipped if No-Worker mode or cooldown active)
   const cfWorker = Date.now() >= workerCooldownUntil ? getCloudflareWorkerUrl() : '';
   if (cfWorker) {
@@ -731,7 +765,85 @@ async function getBrowserGlobalRunways(): Promise<Map<string, DirectAipRunwayEnt
   return directRunwaysPromise;
 }
 
+// ---- Same-origin data snapshots (written by the scheduled GitHub Action, see scripts/fetch-snapshots.mjs) ----
+// On static hosts (GitHub Pages) the browser cannot call most aviation APIs because they send no CORS headers.
+// The Action fetches them server-side and publishes them next to the site, so no worker/proxy is needed.
+const SNAPSHOT_MAX_AGE_MS = 90 * 60 * 1000;
+const snapshotMem = new Map<string, {ts: number; value: unknown | null}>();
+
+async function loadSnapshot<T>(name: string): Promise<T | null> {
+  const hit = snapshotMem.get(name);
+  if (hit && Date.now() - hit.ts < 60000) return hit.value as T | null;
+  let value: unknown | null = null;
+  try {
+    const res = await fetch(`./data/${name}.json`, {signal: AbortSignal.timeout(6000), cache: 'no-cache'});
+    const ct = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (res.ok && !ct.includes('text/html')) {
+      const wrapped = (await res.json()) as {generatedAt?: number; data?: unknown};
+      if (wrapped && typeof wrapped.generatedAt === 'number' && Date.now() - wrapped.generatedAt < SNAPSHOT_MAX_AGE_MS) {
+        value = wrapped.data ?? null;
+      }
+    }
+  } catch {
+    value = null;
+  }
+  snapshotMem.set(name, {ts: Date.now(), value});
+  return value as T | null;
+}
+
+async function snapshotForUrl<T>(targetUrl: string): Promise<T | null> {
+  let u: URL;
+  try {
+    u = new URL(targetUrl);
+  } catch {
+    return null;
+  }
+  const fmt = u.searchParams.get('format');
+  if (u.hostname === 'aviationweather.gov') {
+    const m = u.pathname.match(/\/api\/data\/(airsigmet|isigmet|gairmet)$/);
+    if (m && (fmt === 'geojson' || fmt === 'json') && !u.searchParams.has('bbox')) {
+      return loadSnapshot<T>(`${m[1]}-${fmt}`);
+    }
+    if (u.pathname.endsWith('/api/data/metar') && u.searchParams.has('ids') && fmt === 'json') {
+      const wanted = (u.searchParams.get('ids') ?? '').toUpperCase().split(',').filter(Boolean);
+      const rows = await loadSnapshot<Array<Record<string, unknown>>>('metar-hubs');
+      if (!Array.isArray(rows) || wanted.length === 0) return null;
+      const set = new Set(wanted);
+      const picked = rows.filter((r) => set.has(String(r.icaoId ?? '').toUpperCase()));
+      const covered = new Set(picked.map((r) => String(r.icaoId ?? '').toUpperCase()));
+      let hit = 0;
+      for (const w of wanted) if (covered.has(w)) hit++;
+      return hit >= wanted.length * 0.5 ? (picked as unknown as T) : null;
+    }
+  }
+  if (u.hostname === 'api.adsb.lol') {
+    if (u.pathname === '/v2/ladd') return loadSnapshot<T>('adsb-ladd');
+    if (u.pathname === '/v2/mil') return loadSnapshot<T>('adsb-mil');
+  }
+  return null;
+}
+
+/** Endpoints that never send CORS headers: on a static host calling them only produces console errors. */
+function isBrowserBlockedEndpoint(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'opensky-network.org') return true;
+    if (u.hostname === 'api.adsb.lol' && /^\/v2\/(all|ladd|mil)$/.test(u.pathname)) return true;
+    if (u.hostname === 'opendata.adsb.fi' && u.pathname === '/api/v2/all') return true;
+    if (u.hostname === 'aviationweather.gov') return true;
+    if (u.hostname.endsWith('overpass-api.de') || u.hostname.includes('overpass.')) return true;
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 async function fetchNativeCorsJson<T>(url: string, timeoutMs = 6500): Promise<T | null> {
+  if (isStaticHostingMode()) {
+    const snap = await snapshotForUrl<T>(url);
+    if (snap) return snap;
+    if (isBrowserBlockedEndpoint(url)) return null;
+  }
   try {
     const res = await fetch(url, {signal: AbortSignal.timeout(timeoutMs)});
     if (!res.ok) return null;
@@ -774,29 +886,28 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
     flightPollCycle++;
     const providers: ProviderStatus[] = [];
 
-    // 1. Direct native-CORS OpenSky fetch (zero worker / zero CORS issues)
+    // 1. Bounded OpenSky via CORS relay (OpenSky blocks direct cross-origin requests from github.io and 429s /states/all)
     const openSkyPromise = (async (): Promise<LiveFlight[]> => {
+      if (noWorker || isGlobal || !getCloudflareWorkerUrl()) {
+        return [];
+      }
       const t0 = Date.now();
       try {
-        const url = isGlobal
-          ? 'https://opensky-network.org/api/states/all'
-          : `https://opensky-network.org/api/states/all?lamin=${osMinLat.toFixed(2)}&lomin=${osMinLon.toFixed(2)}&lamax=${osMaxLat.toFixed(2)}&lomax=${osMaxLon.toFixed(2)}`;
-        const res = await fetch(url, {signal: AbortSignal.timeout(12000)});
-        if (!res.ok) {
+        const url = `https://opensky-network.org/api/states/all?lamin=${osMinLat.toFixed(2)}&lomin=${osMinLon.toFixed(2)}&lamax=${osMaxLat.toFixed(2)}&lomax=${osMaxLon.toFixed(2)}`;
+        const json = await fetchJsonViaCorsRelay<{states?: Array<unknown[]>; time?: number}>(url, 8000);
+        if (!json) {
           providers.push({
             provider: 'opensky',
             ok: false,
             count: 0,
             latencyMs: Date.now() - t0,
-            note: `HTTP ${res.status}`,
+            note: 'Unavailable',
           });
           return [];
         }
-        const json = (await res.json()) as {states?: Array<unknown[]>; time?: number};
         const nowSec = json.time ?? Math.floor(Date.now() / 1000);
         const list: LiveFlight[] = [];
-        const sliceLimit = isGlobal ? 4500 : 1800;
-        for (const s of (json.states ?? []).slice(0, sliceLimit)) {
+        for (const s of (json.states ?? []).slice(0, 1800)) {
           const lat = Number(s[6]);
           const lon = Number(s[5]);
           if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
@@ -849,43 +960,30 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
       }
     })();
 
-    // 2. Native-CORS adsb.lol & adsb.fi direct browser calls (No worker required!)
+    // 2. adsb.lol & adsb.fi via Cloudflare Worker CORS relay (direct browser requests lack ACAO header and /v2/all returns 400)
     const directAdsbPromise = (async (): Promise<LiveFlight[]> => {
+      if (noWorker || !getCloudflareWorkerUrl()) {
+        return [];
+      }
       const t0 = Date.now();
       const nowMs = Date.now();
       const needMil = !browserMilCache || nowMs - browserMilCache.ts >= 15000;
       const needLadd = !browserLaddCache || nowMs - browserLaddCache.ts >= 18000;
-      const lolUrl = isGlobal
-        ? 'https://api.adsb.lol/v2/all'
-        : `https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/${radiusNm}`;
-      const fiUrl = isGlobal
-        ? 'https://opendata.adsb.fi/api/v2/all'
-        : `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${radiusNm}`;
-
-      const useCachedGlobalLol = isGlobal && browserGlobalLolCache && nowMs - browserGlobalLolCache.ts < 12000;
-      const useCachedGlobalFi = isGlobal && browserGlobalFiCache && nowMs - browserGlobalFiCache.ts < 12000;
+      const lolRadius = Math.min(250, radiusNm);
+      const lolUrl = `https://api.adsb.lol/v2/point/${centerLat.toFixed(3)}/${centerLon.toFixed(3)}/${lolRadius}`;
+      const fiUrl = `https://opendata.adsb.fi/api/v2/lat/${centerLat.toFixed(3)}/lon/${centerLon.toFixed(3)}/dist/${lolRadius}`;
 
       const [lolJson, milJson, laddJson, fiJson] = await Promise.all([
-        useCachedGlobalLol
-          ? Promise.resolve({ac: browserGlobalLolCache!.ac, now: browserGlobalLolCache!.nowSec * 1000})
-          : fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; now?: number}>(lolUrl, isGlobal ? 9000 : 6500),
+        fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>(lolUrl, 6500),
         needMil
-          ? fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; now?: number}>('https://api.adsb.lol/v2/mil', 6500)
+          ? fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>('https://api.adsb.lol/v2/mil', 6500)
           : Promise.resolve(null),
         needLadd
-          ? fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; now?: number}>('https://api.adsb.lol/v2/ladd', 6500)
+          ? fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; now?: number}>('https://api.adsb.lol/v2/ladd', 6500)
           : Promise.resolve(null),
-        useCachedGlobalFi
-          ? Promise.resolve<{ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}>({
-              aircraft: browserGlobalFiCache!.ac,
-              now: browserGlobalFiCache!.nowSec * 1000,
-            })
-          : fetchNativeCorsJson<{ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}>(fiUrl, isGlobal ? 9000 : 6500),
+        fetchJsonViaCorsRelay<{ac?: Array<Record<string, unknown>>; aircraft?: Array<Record<string, unknown>>; now?: number}>(fiUrl, 6500),
       ]);
 
-      if (isGlobal && lolJson?.ac && !useCachedGlobalLol) {
-        browserGlobalLolCache = {ts: Date.now(), ac: lolJson.ac, nowSec: Math.floor((lolJson.now ?? Date.now()) / 1000)};
-      }
       if (milJson?.ac) {
         browserMilCache = {ts: Date.now(), ac: milJson.ac, nowSec: Math.floor((milJson.now ?? Date.now()) / 1000)};
       }
@@ -893,15 +991,12 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
         browserLaddCache = {ts: Date.now(), ac: laddJson.ac, nowSec: Math.floor((laddJson.now ?? Date.now()) / 1000)};
       }
       const fiRows = fiJson?.aircraft ?? fiJson?.ac;
-      if (isGlobal && fiRows && !useCachedGlobalFi) {
-        browserGlobalFiCache = {ts: Date.now(), ac: fiRows, nowSec: Math.floor((fiJson?.now ?? Date.now()) / 1000)};
-      }
 
       const out: LiveFlight[] = [];
       if (lolJson?.ac) {
         const parsed = parseAdsbExchangeList(lolJson.ac, 'adsb.lol', Math.floor((lolJson.now ?? Date.now()) / 1000));
         out.push(...parsed);
-        providers.push({provider: 'adsb.lol-direct', ok: parsed.length > 0, count: parsed.length, latencyMs: Date.now() - t0});
+        providers.push({provider: 'adsb.lol', ok: parsed.length > 0, count: parsed.length, latencyMs: Date.now() - t0});
       }
       if (browserLaddCache?.ac) {
         const laddRows = isGlobal
@@ -934,7 +1029,7 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
       if (fiRows && fiRows.length > 0) {
         const fiParsed = parseAdsbExchangeList(fiRows, 'adsb.fi', Math.floor((fiJson?.now ?? Date.now()) / 1000));
         out.push(...fiParsed);
-        providers.push({provider: 'adsb.fi-direct', ok: fiParsed.length > 0, count: fiParsed.length, latencyMs: Date.now() - t0});
+        providers.push({provider: 'adsb.fi', ok: fiParsed.length > 0, count: fiParsed.length, latencyMs: Date.now() - t0});
       }
       return out;
     })();
@@ -1024,8 +1119,8 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
         }
       }
 
-      // If strict No-Worker mode OR FR24 relays were blocked/empty, merge same-origin FR24 snapshot for callsign/route enrichment
-      if (noWorker || frOut.length === 0) {
+      // Merge static snapshot when noWorker / FR24 relays were empty / global density enrichment
+      if (noWorker || frOut.length === 0 || (isGlobal && frOut.length < 2500)) {
         const snap = await fetchStaticSnapshotFlights();
         if (snap.length > 0) {
           const inBox = snap.filter(
@@ -1037,7 +1132,7 @@ async function fetchDirectFlights(params: URLSearchParams): Promise<FlightsRespo
             ok: true,
             count: inBox.length,
             latencyMs: 5,
-            note: noWorker ? 'Strict Wi-Fi snapshot + China FR24' : 'FR24 relay fallback',
+            note: noWorker ? 'Strict Wi-Fi snapshot' : 'Global snapshot seed',
           });
         }
       }
@@ -1204,9 +1299,9 @@ async function fetchDirectWeather(params: URLSearchParams): Promise<{airports: A
   }
 
   const targetUrl = `https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(icaosRaw)}&format=json`;
-  const rows =
-    (await fetchNativeCorsJson<Array<Record<string, unknown>>>(targetUrl, 5000)) ??
-    (await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(targetUrl, 7500));
+  const rows = isNoWorkerModePreferred()
+    ? null
+    : await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(targetUrl, 7500);
   if (!Array.isArray(rows) || rows.length === 0) {
     return {airports: cached?.airports ?? [], cached: Boolean(cached)};
   }
@@ -1698,18 +1793,32 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
   let osmSucceeded = false;
 
   const overpassPromise = (async () => {
+    if (isStaticHostingMode()) {
+      // Static host: use the airfield geometry baked by the GitHub Action (same origin, no CORS).
+      try {
+        const res = await fetch(`./data/surface/${encodeURIComponent(icao)}.json`, {signal: AbortSignal.timeout(8000)});
+        const ct = (res.headers.get('content-type') ?? '').toLowerCase();
+        if (!res.ok || ct.includes('text/html')) return;
+        const wrapped = (await res.json()) as {generatedAt?: number; data?: ReturnType<typeof parseOverpassAirfieldElements>};
+        const d = wrapped?.data;
+        if (!d || !Array.isArray(d.taxiways)) return;
+        osmRunways = d.osmRunways ?? [];
+        taxiways = d.taxiways;
+        aprons = d.aprons ?? [];
+        labeledAprons = d.labeledAprons ?? [];
+        terminals = d.terminals ?? [];
+        stands = d.stands ?? [];
+        holdingPositions = d.holdingPositions ?? [];
+        gates = d.gates ?? [];
+        osmSucceeded = osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
+      } catch {
+        // fall back to AIP + synthesized geometry
+      }
+      return;
+    }
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) return;
     const q = buildOverpassAirfieldQuery(lat, lon);
-    const cfWorker = getCloudflareWorkerUrl();
-    const endpoints = [
-      ...GLOBAL_OVERPASS_MIRRORS.slice(0, 3),
-      ...(cfWorker
-        ? [
-            `${cfWorker}/?url=${encodeURIComponent('https://overpass.openstreetmap.fr/api/interpreter')}`,
-            `${cfWorker}/?url=${encodeURIComponent('https://overpass-api.de/api/interpreter')}`,
-          ]
-        : []),
-    ];
+    const endpoints = GLOBAL_OVERPASS_MIRRORS.slice(1, 3);
 
     try {
       const json = await Promise.any(
@@ -1721,7 +1830,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
               Accept: 'application/json',
             },
             body: `data=${encodeURIComponent(q)}`,
-            signal: AbortSignal.timeout(10500),
+            signal: AbortSignal.timeout(8000),
           });
           if (!osmRes.ok) throw new Error(`HTTP ${osmRes.status}`);
           const parsed = (await osmRes.json()) as {elements?: OverpassElement[]};
@@ -1744,7 +1853,7 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
       osmSucceeded =
         osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
     } catch {
-      // fall back to AIP + synthesized geometry
+      // fall back to AIP + curated & synthesized geometry
     }
   })();
 
@@ -1990,10 +2099,12 @@ async function fetchDirectPastFlights(params: URLSearchParams): Promise<{query: 
     if (!hex) return;
     const endSec = Math.floor(Date.now() / 1000);
     const beginSec = endSec - 7 * 86400;
-    const rows = await fetchNativeCorsJson<Array<Record<string, unknown>>>(
-      `https://opensky-network.org/api/flights/aircraft?icao24=${encodeURIComponent(hex)}&begin=${beginSec}&end=${endSec}`,
-      5500,
-    );
+    const rows = isNoWorkerModePreferred()
+      ? null
+      : await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(
+          `https://opensky-network.org/api/flights/aircraft?icao24=${encodeURIComponent(hex)}&begin=${beginSec}&end=${endSec}`,
+          5500,
+        );
     if (Array.isArray(rows)) {
       for (const row of rows.slice(0, 14)) {
         const cs = String(row.callsign ?? hex).trim().toUpperCase();
@@ -2162,8 +2273,9 @@ function parseDirectSigmetList(features: Array<Record<string, unknown>>, source:
 
 async function fetchDirectHazards(): Promise<{sigmets: SigmetHazard[]; rainviewer: RainViewerMeta | null; cached: boolean}> {
   const awcFetch = async (url: string) =>
-    (await fetchNativeCorsJson<Record<string, unknown> | Array<Record<string, unknown>>>(url, 4500)) ??
-    (await fetchJsonViaCorsRelay<Record<string, unknown> | Array<Record<string, unknown>>>(url, 6500));
+    isNoWorkerModePreferred()
+      ? null
+      : fetchJsonViaCorsRelay<Record<string, unknown> | Array<Record<string, unknown>>>(url, 6500);
 
   const [airRaw, intlRaw, gAirRaw, rvJson] = await Promise.all([
     awcFetch('https://aviationweather.gov/api/data/airsigmet?format=geojson'),
@@ -2201,10 +2313,9 @@ async function fetchDirectDisruptions(): Promise<{items: AirportDisruption[]; so
   const sources: string[] = [];
   const hubIcaos = AIRPORT_CATALOG.map((a) => a.icao).join(',');
   const metarUrl = `https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(hubIcaos)}&format=json`;
-  const metars =
-    (await fetchNativeCorsJson<Array<Record<string, unknown>>>(metarUrl, 4500)) ??
-    (await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(metarUrl, 6500)) ??
-    [];
+  const metars = isNoWorkerModePreferred()
+    ? []
+    : (await fetchJsonViaCorsRelay<Array<Record<string, unknown>>>(metarUrl, 6500)) ?? [];
 
   if (Array.isArray(metars) && metars.length > 0) {
     sources.push('NOAA AWC Hub Weather');
@@ -2238,6 +2349,213 @@ async function fetchDirectDisruptions(): Promise<{items: AirportDisruption[]; so
     }
   }
   return {items, sources, cached: false};
+}
+
+async function getBrowserAtcBoundaries(): Promise<AtcBoundaryFeature[]> {
+  if (cachedBrowserAtc && Date.now() - cachedBrowserAtc.ts < 12 * 3600_000) {
+    return cachedBrowserAtc.boundaries;
+  }
+  if (browserAtcPromise) return browserAtcPromise;
+
+  browserAtcPromise = (async () => {
+    try {
+      const [geoRes, datRes] = await Promise.allSettled([
+        fetch('https://raw.githubusercontent.com/vatsimnetwork/vatspy-data-project/master/Boundaries.geojson', {
+          signal: AbortSignal.timeout(12000),
+        }),
+        fetch('https://raw.githubusercontent.com/vatsimnetwork/vatspy-data-project/master/VATSpy.dat', {
+          signal: AbortSignal.timeout(8000),
+        }),
+      ]);
+      const datText =
+        datRes.status === 'fulfilled' && datRes.value.ok ? await datRes.value.text() : null;
+      if (geoRes.status === 'fulfilled' && geoRes.value.ok) {
+        const json = (await geoRes.value.json()) as Parameters<typeof parseAtcBoundariesFromVatsim>[0];
+        const out = parseAtcBoundariesFromVatsim(json, datText);
+        if (out.length > 0) {
+          cachedBrowserAtc = {ts: Date.now(), boundaries: out};
+          return out;
+        }
+      }
+    } catch {
+      // fall back cleanly
+    }
+    return FALLBACK_FIRS;
+  })().finally(() => {
+    browserAtcPromise = null;
+  });
+
+  return browserAtcPromise;
+}
+
+async function getBrowserTimeZones(): Promise<TimeZoneBoundaryFeature[]> {
+  if (cachedBrowserTz && Date.now() - cachedBrowserTz.ts < 24 * 3600_000) {
+    return cachedBrowserTz.timezones;
+  }
+  if (browserTzPromise) return browserTzPromise;
+
+  browserTzPromise = (async () => {
+    try {
+      const res = await fetch(
+        'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_time_zones.geojson',
+        {signal: AbortSignal.timeout(14000)},
+      );
+      if (res.ok) {
+        const json = (await res.json()) as Parameters<typeof parseTimeZonesFromGeoJson>[0];
+        const out = parseTimeZonesFromGeoJson(json);
+        if (out.length > 0) {
+          cachedBrowserTz = {ts: Date.now(), timezones: out};
+          return out;
+        }
+      }
+    } catch {
+      // fall back cleanly
+    }
+    return buildFallbackTimeZones();
+  })().finally(() => {
+    browserTzPromise = null;
+  });
+
+  return browserTzPromise;
+}
+
+async function getBrowserGlobalNavaids(): Promise<{
+  list: NavWaypointSpec[];
+  byIdent: Map<string, NavWaypointSpec>;
+}> {
+  if (cachedBrowserNavaids && Date.now() - cachedBrowserNavaids.ts < 12 * 3600_000) {
+    return {list: cachedBrowserNavaids.list, byIdent: cachedBrowserNavaids.byIdent};
+  }
+  if (browserNavaidsPromise) return browserNavaidsPromise;
+
+  browserNavaidsPromise = (async () => {
+    let parsed = buildBuiltinFixNavaids();
+    try {
+      const res = await fetch('https://davidmegginson.github.io/ourairports-data/navaids.csv', {
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.ok) {
+        const csv = await res.text();
+        const csvParsed = parseNavaidsCsv(csv);
+        if (csvParsed.list.length > 0) {
+          parsed = csvParsed;
+        }
+      }
+    } catch {
+      // keep builtin fixes
+    }
+    cachedBrowserNavaids = {ts: Date.now(), list: parsed.list, byIdent: parsed.byIdent};
+    return parsed;
+  })().finally(() => {
+    browserNavaidsPromise = null;
+  });
+
+  return browserNavaidsPromise;
+}
+
+async function getBrowserOceanicTracks(): Promise<OceanicTrackSpec[]> {
+  if (cachedBrowserOceanic && Date.now() - cachedBrowserOceanic.ts < 15 * 60_000) {
+    return cachedBrowserOceanic.tracks;
+  }
+  if (browserOceanicPromise) return browserOceanicPromise;
+
+  browserOceanicPromise = (async () => {
+    const tracks: OceanicTrackSpec[] = [];
+    const {byIdent} = await getBrowserGlobalNavaids().catch(() => buildBuiltinFixNavaids());
+    try {
+      const raw = await fetchNativeCorsJson<Parameters<typeof parseOceanicTracksFromNattrak>[0]>(
+        'https://nattrak.vatsim.net/api/tracks',
+        6000,
+      );
+      if (Array.isArray(raw)) {
+        tracks.push(...parseOceanicTracksFromNattrak(raw, byIdent));
+      }
+    } catch {
+      // fallback below
+    }
+    if (tracks.length === 0) {
+      tracks.push(...BUILTIN_NAT_FALLBACK);
+    }
+    tracks.push(...BUILTIN_PACOTS);
+    cachedBrowserOceanic = {ts: Date.now(), tracks};
+    return tracks;
+  })().finally(() => {
+    browserOceanicPromise = null;
+  });
+
+  return browserOceanicPromise;
+}
+
+async function fetchDirectWeatherLayers(params: URLSearchParams): Promise<WeatherLayersResponse> {
+  const lamin = Math.max(-75, Math.min(75, Number.parseFloat(params.get('lamin') ?? '20') || 20));
+  const lamax = Math.max(-75, Math.min(75, Number.parseFloat(params.get('lamax') ?? '55') || 55));
+  const lomin = Math.max(-180, Math.min(180, Number.parseFloat(params.get('lomin') ?? '-130') || -130));
+  const lomax = Math.max(-180, Math.min(180, Number.parseFloat(params.get('lomax') ?? '-60') || -60));
+
+  const sLat = Math.min(lamin, lamax);
+  const nLat = Math.max(lamin, lamax);
+  const wLon = Math.min(lomin, lomax);
+  const eLon = Math.max(lomin, lomax);
+
+  const cacheKey = `${Math.round(sLat / 3)}_${Math.round(nLat / 3)}_${Math.round(wLon / 4)}_${Math.round(eLon / 4)}`;
+  const cached = browserWxLayersCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 120_000) {
+    return cached.data;
+  }
+
+  const cols = 5;
+  const rows = 4;
+  const sampleLats: number[] = [];
+  const sampleLons: number[] = [];
+  const latSpan = Math.max(2, nLat - sLat);
+  const lonSpan = Math.max(2, eLon - wLon);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      sampleLats.push(Number((sLat + ((r + 0.5) / rows) * latSpan).toFixed(2)));
+      sampleLons.push(Number((wLon + ((c + 0.5) / cols) * lonSpan).toFixed(2)));
+    }
+  }
+  const clampedBbox = `${Math.max(-85, sLat).toFixed(2)},${Math.max(-180, wLon).toFixed(2)},${Math.min(85, nLat).toFixed(2)},${Math.min(180, eLon).toFixed(2)}`;
+  const awcFetch = <T>(url: string) =>
+    isNoWorkerModePreferred() ? Promise.resolve(null) : fetchJsonViaCorsRelay<T>(url, 5500);
+
+  const [omJson, pirepJson, isigmetJson, airsigmetJson, metarJson] = await Promise.all([
+    fetchNativeCorsJson<unknown>(
+      `https://api.open-meteo.com/v1/forecast?latitude=${sampleLats.join(',')}&longitude=${sampleLons.join(',')}&current=wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,visibility,weather_code&hourly=wind_speed_250hPa,wind_direction_250hPa&wind_speed_unit=kn&forecast_days=1`,
+      6000,
+    ),
+    awcFetch<Array<Record<string, unknown>>>(
+      `https://aviationweather.gov/api/data/pirep?format=json&bbox=${clampedBbox}`,
+    ),
+    awcFetch<Array<Record<string, unknown>>>(
+      'https://aviationweather.gov/api/data/isigmet?format=json',
+    ),
+    awcFetch<Array<Record<string, unknown>>>(
+      'https://aviationweather.gov/api/data/airsigmet?format=json',
+    ),
+    awcFetch<Array<Record<string, unknown>>>(
+      `https://aviationweather.gov/api/data/metar?format=json&bbox=${clampedBbox}&hours=1`,
+    ),
+  ]);
+
+  const data = parseWeatherLayersPayload({
+    omJson,
+    pirepJson,
+    isigmetJson,
+    airsigmetJson,
+    metarJson,
+    sampleLats,
+    sampleLons,
+    latSpan,
+    lonSpan,
+  });
+
+  if (browserWxLayersCache.size > 32) {
+    const oldest = browserWxLayersCache.keys().next().value;
+    if (oldest) browserWxLayersCache.delete(oldest);
+  }
+  browserWxLayersCache.set(cacheKey, {ts: Date.now(), data});
+  return data;
 }
 
 async function handleStaticRoute(path: string, params: URLSearchParams): Promise<unknown> {
@@ -2307,19 +2625,61 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
     return fetchDirectWeather(params);
   }
   if (path === '/api/weather/layers') {
-    const empty: WeatherLayersResponse = {
-      windGrid: [],
-      pireps: [],
-      volcanic: [],
-      lightning: [],
-      fogZones: [],
-      sigwx: [],
-      fetchedAt: Date.now(),
-    };
-    return empty;
+    return fetchDirectWeatherLayers(params);
+  }
+  if (path === '/api/nav/atc-boundaries') {
+    const boundaries = await getBrowserAtcBoundaries();
+    return {boundaries};
+  }
+  if (path === '/api/nav/oceanic-tracks') {
+    const tracks = await getBrowserOceanicTracks();
+    return {tracks};
+  }
+  if (path === '/api/nav/enroute') {
+    const lamin = Number.parseFloat(params.get('lamin') ?? '20');
+    const lamax = Number.parseFloat(params.get('lamax') ?? '55');
+    const lomin = Number.parseFloat(params.get('lomin') ?? '-135');
+    const lomax = Number.parseFloat(params.get('lomax') ?? '-60');
+    const zoom = Number.parseFloat(params.get('zoom') ?? '5');
+    const {list} = await getBrowserGlobalNavaids();
+    return computeEnrouteChartForBounds(
+      list,
+      Number.isFinite(lamin) ? lamin : 20,
+      Number.isFinite(lamax) ? lamax : 55,
+      Number.isFinite(lomin) ? lomin : -135,
+      Number.isFinite(lomax) ? lomax : -60,
+      Number.isFinite(zoom) ? zoom : 5,
+    ) satisfies EnrouteChartResponse;
   }
   if (path === '/api/nav/timezones') {
-    return {timezones: []};
+    const timezones = await getBrowserTimeZones();
+    return {timezones};
+  }
+  if (path === '/api/liveatc/stations') {
+    const q = (params.get('q') ?? params.get('icao') ?? '').trim().toUpperCase();
+    const stations = q
+      ? LIVEATC_STATIONS.filter(
+          (s) =>
+            s.icao.includes(q) ||
+            s.iata.includes(q) ||
+            s.name.toUpperCase().includes(q) ||
+            s.facility.toUpperCase().includes(q) ||
+            s.country.includes(q),
+        )
+      : LIVEATC_STATIONS;
+    return {stations};
+  }
+  if (path === '/api/terrain/grid') {
+    const lat = Number.parseFloat(params.get('lat') ?? '37.62');
+    const lon = Number.parseFloat(params.get('lon') ?? '-122.38');
+    const spanDeg = Math.max(0.05, Math.min(4.0, Number.parseFloat(params.get('spanDeg') ?? '0.45') || 0.45));
+    const gridN = Math.max(8, Math.min(32, Number.parseInt(params.get('n') ?? '16', 10) || 16));
+    return buildReliefTerrainGrid(
+      Number.isFinite(lat) ? lat : 37.62,
+      Number.isFinite(lon) ? lon : -122.38,
+      spanDeg,
+      gridN,
+    );
   }
   if (path === '/api/disruptions') return fetchDirectDisruptions();
   if (path === '/api/acars') return {messages: [], sourceStatus: 'Static CORS Direct Mode', cached: false};
@@ -2338,6 +2698,18 @@ function isKnownStaticHost(): boolean {
     host.endsWith('.surge.sh') ||
     host.endsWith('.neocities.org')
   );
+}
+
+export function isStaticHostingMode(): boolean {
+  if (staticHostingDetected || isKnownStaticHost()) {
+    staticHostingDetected = true;
+    return true;
+  }
+  return false;
+}
+
+export function markStaticHostingDetected(): void {
+  staticHostingDetected = true;
 }
 
 let backendProbePromise: Promise<boolean> | null = null;

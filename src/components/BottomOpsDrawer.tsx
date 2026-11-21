@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import React, {useEffect, useMemo, useState} from 'react';
 import {AIRPORT_CATALOG} from '../data/aviationCatalog';
-import {apiFetchJson} from '../services/directAviationClient';
+import {apiFetchJson, isStaticHostingMode} from '../services/directAviationClient';
 import type {
   AcarsMessage,
   AirportDisruption,
@@ -511,11 +511,15 @@ export const BottomOpsDrawer: React.FC<BottomOpsDrawerProps> = ({
                   controls
                   autoPlay
                   preload="none"
-                  src={`/api/liveatc/stream?mount=${encodeURIComponent(activeStation.mount)}`}
+                  src={
+                    isStaticHostingMode()
+                      ? `https://d.liveatc.net/${encodeURIComponent(activeStation.mount)}`
+                      : `./api/liveatc/stream?mount=${encodeURIComponent(activeStation.mount)}`
+                  }
                   className="w-full h-9"
                 />
                 <div className="text-[10.5px] text-muted-foreground">
-                  Streaming proxied LiveATC MP3 mount ({activeStation.mount}). Availability depends on
+                  Streaming LiveATC MP3 mount ({activeStation.mount}). Availability depends on
                   volunteer receiver uptime.
                 </div>
               </div>

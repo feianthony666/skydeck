@@ -3,6 +3,8 @@ name: Deploy SkyDeck to GitHub Pages
 on:
   push:
     branches: ['main', 'master']
+  schedule:
+    - cron: '*/10 * * * *' # refresh weather / SIGMET / military data snapshots
   workflow_dispatch:
 
 permissions:
@@ -23,11 +25,30 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      - name: Restore airfield cache
+        uses: actions/cache@v4
+        with:
+          path: public/data/surface
+          key: airfields-v1-${{ github.run_id }}
+          restore-keys: airfields-v1-
+      - name: Bake airfield geometry (OSM, same-origin, no CORS)
+        continue-on-error: true
+        run: npx tsx scripts/bake-airfields.ts
+      - name: Fetch live data snapshots (weather, SIGMET, military/LADD)
+        continue-on-error: true
+        run: |
+          HUBS=$(npx tsx -e "import {AIRPORT_CATALOG} from './src/data/aviationCatalog'; console.log(AIRPORT_CATALOG.map(a=>a.icao).join(','))")
+          node scripts/fetch-snapshots.mjs "$HUBS"
       - name: Build static site
         run: npm run build
+      - name: Verify build output
+        run: |
+          test -f dist/index.html
+          test -f dist/.nojekyll || touch dist/.nojekyll
+          ls -la dist
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

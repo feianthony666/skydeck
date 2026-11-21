@@ -2379,7 +2379,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       cloudInst.instanceMatrix.needsUpdate = true;
     };
 
-    const tick = () => {
+    const tickInner = () => {
       if (disposed) return;
       const nowMs = performance.now();
       const dt = Math.min(0.08, Math.max(0.001, (nowMs - lastFrameMs) / 1000));
@@ -3376,7 +3376,27 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }
 
       renderer.render(scene, camera);
-      frameId = requestAnimationFrame(tick);
+    };
+
+    // A single failing overlay/layer must never freeze the whole map: always draw and always reschedule.
+    let lastTickErrorLog = 0;
+    const tick = () => {
+      if (disposed) return;
+      try {
+        tickInner();
+      } catch (err) {
+        const t = performance.now();
+        if (t - lastTickErrorLog > 5000) {
+          lastTickErrorLog = t;
+          console.error('SkyDeck frame error (recovered):', err);
+        }
+        try {
+          renderer.render(scene, camera);
+        } catch {
+          // ignore secondary render failure
+        }
+      }
+      if (!disposed) frameId = requestAnimationFrame(tick);
     };
 
     tick();

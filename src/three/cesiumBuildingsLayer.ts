@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {isStaticHostingMode} from '../services/directAviationClient';
 import {GLOBAL_OVERPASS_MIRRORS} from '../utils/airfieldGeometry';
 import {latToMy, lonToMx, MERCATOR_WORLD_M, mercatorScaleAtLat} from './gpuTileLayer';
 
@@ -160,55 +161,57 @@ export class World3DBuildingsManager {
     this.inFlightCells.add(cellKey);
 
     try {
-      // 1. Primary local OSM building footprints (fast, crisp, zero ECEF transform mismatch)
-      const dLat = 0.012;
-      const dLon = 0.015;
-      const s = (centerLat - dLat).toFixed(4);
-      const w = (centerLon - dLon).toFixed(4);
-      const n = (centerLat + dLat).toFixed(4);
-      const e = (centerLon + dLon).toFixed(4);
-      const q = `[out:json][timeout:8];(way["building"]["building"!="terminal"](${s},${w},${n},${e}););out geom 180;`;
-
+      // 1. Primary local OSM building footprints (skip direct Overpass on static hosts where it triggers 403/CORS)
       let polys: OsmBuildingPoly[] = [];
-      try {
-        const res = await Promise.any(
-          GLOBAL_OVERPASS_MIRRORS.slice(0, 3).map(async (mirror) => {
-            const r = await fetch(mirror, {
-              method: 'POST',
-              headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-              body: `data=${encodeURIComponent(q)}`,
-              signal: AbortSignal.timeout(5500),
-            });
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return (await r.json()) as {
-              elements?: Array<{
-                geometry?: Array<{lat: number; lon: number}>;
-                tags?: Record<string, string>;
-              }>;
-            };
-          }),
-        );
-        for (const el of res.elements ?? []) {
-          if (!el.geometry || el.geometry.length < 3) continue;
-          const coords: Array<[number, number]> = el.geometry.map((p) => [p.lat, p.lon]);
-          const hRaw = Number.parseFloat(el.tags?.height ?? '');
-          const lvRaw = Number.parseFloat(el.tags?.['building:levels'] ?? '');
-          const heightM = Number.isFinite(hRaw)
-            ? Math.min(260, Math.max(6, hRaw))
-            : Number.isFinite(lvRaw)
-              ? Math.min(240, Math.max(6, lvRaw * 3.8))
-              : 14;
-          polys.push({coords, heightM});
-        }
-      } catch {
-        polys = [];
-      }
+      if (!isStaticHostingMode()) {
+        const dLat = 0.012;
+        const dLon = 0.015;
+        const s = (centerLat - dLat).toFixed(4);
+        const w = (centerLon - dLon).toFixed(4);
+        const n = (centerLat + dLat).toFixed(4);
+        const e = (centerLon + dLon).toFixed(4);
+        const q = `[out:json][timeout:8];(way["building"]["building"!="terminal"](${s},${w},${n},${e}););out geom 180;`;
 
-      if (polys.length > 0) {
-        this.osmChunkCache.set(cellKey, polys);
-        this.buildOsmCellGroup(cellKey, centerLat, centerLon, polys);
-        this.onUpdated();
-        return;
+        try {
+          const res = await Promise.any(
+            GLOBAL_OVERPASS_MIRRORS.slice(1, 3).map(async (mirror) => {
+              const r = await fetch(mirror, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `data=${encodeURIComponent(q)}`,
+                signal: AbortSignal.timeout(5500),
+              });
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              return (await r.json()) as {
+                elements?: Array<{
+                  geometry?: Array<{lat: number; lon: number}>;
+                  tags?: Record<string, string>;
+                }>;
+              };
+            }),
+          );
+          for (const el of res.elements ?? []) {
+            if (!el.geometry || el.geometry.length < 3) continue;
+            const coords: Array<[number, number]> = el.geometry.map((p) => [p.lat, p.lon]);
+            const hRaw = Number.parseFloat(el.tags?.height ?? '');
+            const lvRaw = Number.parseFloat(el.tags?.['building:levels'] ?? '');
+            const heightM = Number.isFinite(hRaw)
+              ? Math.min(260, Math.max(6, hRaw))
+              : Number.isFinite(lvRaw)
+                ? Math.min(240, Math.max(6, lvRaw * 3.8))
+                : 14;
+            polys.push({coords, heightM});
+          }
+        } catch {
+          polys = [];
+        }
+
+        if (polys.length > 0) {
+          this.osmChunkCache.set(cellKey, polys);
+          this.buildOsmCellGroup(cellKey, centerLat, centerLon, polys);
+          this.onUpdated();
+          return;
+        }
       }
 
       // 2. Last-resort fallback: Cesium Ion 3D Buildings (asset 96188) .b3dm -> GLB

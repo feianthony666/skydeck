@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import {
+  isStaticHostingMode,
+  markStaticHostingDetected,
+} from '../services/directAviationClient';
 import type {WeatherOverlaySettings} from '../types/aviation';
 import {
   createFallbackGridCanvas,
@@ -143,20 +147,26 @@ export class GpuTileManager {
     const entry = this.mvtCache.get(key);
     if (!entry) return;
 
-    const tryUrls = [
-      `/api/vtile/${z}/${x}/${y}`,
-      MAPTILER_V4_DIRECT_TPL.replace('{z}', String(z))
-        .replace('{x}', String(x))
-        .replace('{y}', String(y)),
-    ];
+    const directUrl = MAPTILER_V4_DIRECT_TPL.replace('{z}', String(z))
+      .replace('{x}', String(x))
+      .replace('{y}', String(y));
+
+    const tryUrls = isStaticHostingMode()
+      ? [directUrl]
+      : [`./api/vtile/${z}/${x}/${y}`, directUrl];
 
     let parsed: ParsedMvtTile | null = null;
     for (const url of tryUrls) {
       try {
-        const res = await fetch(url, {signal: AbortSignal.timeout(5500)});
+        const res = await fetch(url, {signal: AbortSignal.timeout(6500)});
         if (res.status === 204) {
           parsed = new Map();
           break;
+        }
+        const ct = (res.headers.get('content-type') ?? '').toLowerCase();
+        if (url.startsWith('./api/') && (res.status === 404 || ct.includes('text/html'))) {
+          markStaticHostingDetected();
+          continue;
         }
         if (!res.ok) continue;
         const buf = await res.arrayBuffer();
@@ -454,7 +464,9 @@ export class GpuTileManager {
         yOrder: 1,
         opacity: Math.max(0.45, radarOpacity * 0.85),
         nightTint: 0,
-        tpl: '/api/wtile/clouds/{z}/{x}/{y}',
+        tpl: isStaticHostingMode()
+          ? 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-east-ir-4km-900913/{z}/{x}/{y}.png'
+          : './api/wtile/clouds/{z}/{x}/{y}',
         intenseOnly: 0,
         tag: 'clouds',
       });
@@ -491,7 +503,9 @@ export class GpuTileManager {
         yOrder: 4,
         opacity: Math.min(0.9, radarOpacity + 0.1),
         nightTint: 0,
-        tpl: '/api/wtile/nexrad/{z}/{x}/{y}',
+        tpl: isStaticHostingMode()
+          ? 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png'
+          : './api/wtile/nexrad/{z}/{x}/{y}',
         intenseOnly: 0,
         tag: 'nexrad',
       });
