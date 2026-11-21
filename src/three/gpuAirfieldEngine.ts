@@ -1637,13 +1637,23 @@ export class PersistentAirfieldStore {
       });
       const fetched = await apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`);
       if (fetched && (fetched.runways.length > 0 || fetched.taxiways.length > 0)) {
+        // Fallback (non-OSM) data contains invented taxiways / a fake "MAIN APRON" box: never draw those.
+        const real = fetched.source === 'osm-overpass';
+        const base: AirfieldSurfaceData = real
+          ? fetched
+          : {
+              ...fetched,
+              taxiways: fetched.taxiways.filter((t) => !String(t.id).startsWith('syn-')),
+              aprons: [],
+              labeledAprons: (fetched.labeledAprons ?? []).filter((a) => !String(a.id).startsWith('syn-')),
+            };
         const cleanData: AirfieldSurfaceData = {
-          ...fetched,
-          runways: applyDisplacedThresholds(key, fetched.runways),
+          ...base,
+          runways: applyDisplacedThresholds(key, base.runways),
           aprons:
-            fetched.aprons.length > 0
-              ? fetched.aprons
-              : (fetched.labeledAprons ?? []).map((a) => a.coords),
+            base.aprons.length > 0
+              ? base.aprons
+              : (base.labeledAprons ?? []).map((a) => a.coords),
         };
         if (cleanData.aprons.length === 0 && cleanData.labeledAprons?.length) {
           cleanData.aprons = cleanData.labeledAprons.map((a) => a.coords);

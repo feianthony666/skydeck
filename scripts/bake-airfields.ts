@@ -21,7 +21,7 @@ async function query(q: string): Promise<{elements?: OverpassElement[]} | null> 
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'User-Agent': 'SkyDeck-Airfield-Bake/1.0'},
         body: `data=${encodeURIComponent(q)}`,
-        signal: AbortSignal.timeout(40000),
+        signal: AbortSignal.timeout(100000),
       });
       if (!res.ok) continue;
       const json = (await res.json()) as {elements?: OverpassElement[]};
@@ -44,7 +44,7 @@ for (const ap of AIRPORT_CATALOG) {
   } catch {
     /* missing */
   }
-  const json = await query(buildOverpassAirfieldQuery(ap.lat, ap.lon));
+  const json = await query(buildOverpassAirfieldQuery(ap.lat, ap.lon, 90));
   if (!json) {
     failed++;
     console.warn('fail', ap.icao);
