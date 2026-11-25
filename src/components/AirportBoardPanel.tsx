@@ -45,6 +45,7 @@ interface AirportBoardPanelProps {
   onFilterChange: (filter: 'none' | 'all' | 'arrivals' | 'departures' | 'delayed') => void;
   onSelectFlightFromBoard: (item: AirportBoardFlight) => void;
   onFocusAirfield?: () => void;
+  embedded?: boolean;
   onClose: () => void;
 }
 
@@ -283,6 +284,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
   onFilterChange,
   onSelectFlightFromBoard,
   onFocusAirfield,
+  embedded = false,
   onClose,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'board' | 'chart' | 'datasheet' | 'approach'>('board');
@@ -425,7 +427,13 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
       aria-label={`Airport arrivals, departures, and charts for ${airport.iata || airport.icao}`}
       className="flex-1 h-full min-h-0 flex flex-col"
     >
-      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl">
+      <Card
+        className={
+          embedded
+            ? 'flex-1 min-h-0 flex flex-col overflow-hidden border-0 shadow-none rounded-none bg-transparent'
+            : 'flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl'
+        }
+      >
         {/* Compact Sticky Airport Top Bar */}
         <CardHeader className="py-2.5 px-4 shrink-0 border-b border-border/70 space-y-2">
           <div className="flex flex-row items-center justify-between gap-2">
@@ -547,7 +555,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
               </div>
 
               {/* Interactive Zoomable Vector Aerodrome Chart */}
-              <div className="rounded-xl border border-border bg-[#070B12] overflow-auto max-h-[300px]">
+              <div className="rounded-xl border border-border bg-[#141923] overflow-auto max-h-[300px]">
                 <svg
                   viewBox="0 0 360 260"
                   style={{width: `${chartZoom * 100}%`, height: `${chartZoom * 240}px`}}
@@ -555,7 +563,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                   role="img"
                   aria-label={`Detailed aerodrome chart for ${dataSheet.icao}`}
                 >
-                  <rect width="360" height="260" fill="#070B12" />
+                  <rect width="360" height="260" fill="#141923" />
                   {/* Compass / Elevation corner stamp */}
                   <text
                     x="12"
@@ -850,13 +858,13 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                   </div>
 
                   {/* Approach Plan View SVG */}
-                  <div className="rounded-xl border border-border bg-[#070B12] p-2.5 space-y-1">
+                  <div className="rounded-xl border border-border bg-[#141923] p-2.5 space-y-1">
                     <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
                       <span>PLAN VIEW · {selectedApproach.runwayIdent}</span>
                       <span>MISSED HDG {String(selectedApproach.missedHeadingDeg).padStart(3, '0')}° → {selectedApproach.missedAltFt} FT</span>
                     </div>
                     <svg viewBox="0 0 320 90" className="w-full h-[86px] block">
-                      <rect width="320" height="90" fill="#070B12" />
+                      <rect width="320" height="90" fill="#141923" />
                       {/* Final Approach Course */}
                       <line
                         x1="28"
@@ -929,13 +937,13 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                   </div>
 
                   {/* 3.0° Glideslope Vertical Profile SVG */}
-                  <div className="rounded-xl border border-border bg-[#070B12] p-2.5 space-y-1">
+                  <div className="rounded-xl border border-border bg-[#141923] p-2.5 space-y-1">
                     <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
                       <span>PROFILE VIEW · GS {selectedApproach.glideslopeDeg.toFixed(1)}°</span>
                       <span>{selectedApproach.lightingSystem}</span>
                     </div>
                     <svg viewBox="0 0 320 110" className="w-full h-[106px] block">
-                      <rect width="320" height="110" fill="#070B12" />
+                      <rect width="320" height="110" fill="#141923" />
                       {/* Terrain ground datum */}
                       <line x1="10" y1="92" x2="310" y2="92" stroke="#475569" strokeWidth="1.5" />
                       {/* Stepdown / Glideslope beam */}
@@ -996,7 +1004,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
           ) : (
             <div className="space-y-3">
               {/* FlightDeck-style Dark Airfield Schematic (Runways + Gold Taxiways for ALL Airports) */}
-              <div className="relative rounded-xl bg-[#0B0E14] text-white overflow-hidden border border-border">
+              <div className="relative rounded-xl bg-[#141923] text-white overflow-hidden border border-border">
                 <div className="h-[104px] w-full relative">
                   <svg
                     viewBox="0 0 320 104"
@@ -1004,7 +1012,7 @@ export const AirportBoardPanel: React.FC<AirportBoardPanelProps> = ({
                     role="img"
                     aria-label={`Runway schematic for ${airport.iata || airport.icao}`}
                   >
-                    <rect width="320" height="104" fill="#0B0E14" />
+                    <rect width="320" height="104" fill="#141923" />
                     <g stroke="rgba(255,255,255,0.045)" strokeWidth="1">
                       <line x1="0" y1="26" x2="320" y2="26" />
                       <line x1="0" y1="52" x2="320" y2="52" />

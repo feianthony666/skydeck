@@ -564,15 +564,14 @@ export class AviationOverlaysManager {
       isNightTerrain: boolean;
     },
   ) {
-    if (!this.airwaysGroup || !this.waypointsGroup) return;
     disposeGroupChildren(this.airwaysGroup);
     disposeGroupChildren(this.waypointsGroup);
     this.hudAirwayLabels = [];
     this.hudWaypointLabels = [];
 
-    const highAirways = Array.isArray(this.enrouteData?.highAirways) ? this.enrouteData.highAirways : [];
-    const lowAirways = Array.isArray(this.enrouteData?.lowAirways) ? this.enrouteData.lowAirways : [];
-    const waypoints = Array.isArray(this.enrouteData?.waypoints) ? this.enrouteData.waypoints : [];
+    const highAirways = this.enrouteData?.highAirways ?? [];
+    const lowAirways = this.enrouteData?.lowAirways ?? [];
+    const waypoints = this.enrouteData?.waypoints ?? [];
 
     // 1. High & Low Airways
     if (opts.showHighAirways && highAirways.length > 0) {

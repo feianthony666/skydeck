@@ -44,13 +44,13 @@ export const GLOBAL_OVERPASS_MIRRORS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 
-export function buildOverpassAirfieldQuery(lat: number, lon: number, timeoutSec = 14): string {
+export function buildOverpassAirfieldQuery(lat: number, lon: number): string {
   const s = (lat - 0.055).toFixed(4);
   const w = (lon - 0.080).toFixed(4);
   const n = (lat + 0.055).toFixed(4);
   const e = (lon + 0.080).toFixed(4);
   const bbox = `${s},${w},${n},${e}`;
-  return `[out:json][timeout:${timeoutSec}];(way["aeroway"~"^(runway|taxiway|taxilane|apron|terminal|parking_position|holding_position|displaced_threshold|stopway)$"](${bbox});relation["aeroway"~"^(apron|terminal)$"](${bbox});way["building"="terminal"](${bbox});relation["building"="terminal"](${bbox});node["aeroway"~"^(gate|parking_position|terminal|holding_position|displaced_threshold)$"](${bbox}););out geom qt;`;
+  return `[out:json][timeout:14];(way["aeroway"~"^(runway|taxiway|taxilane|apron|terminal|parking_position|holding_position|displaced_threshold|stopway)$"](${bbox});relation["aeroway"~"^(apron|terminal)$"](${bbox});way["building"="terminal"](${bbox});relation["building"="terminal"](${bbox});node["aeroway"~"^(gate|parking_position|terminal|holding_position|displaced_threshold)$"](${bbox}););out geom qt;`;
 }
 
 function cleanTaxiwayRef(raw?: string): string | undefined {

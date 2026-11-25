@@ -547,6 +547,8 @@ interface RadarMapProps {
   isolateSelected?: boolean;
   playbackState?: {enabled: boolean; playing: boolean; progress: number; speed: number};
   isMobilePortrait?: boolean;
+  rightPanelOpen?: boolean;
+  selectedFlightTrailsOnly?: boolean;
   onUserDragBreakFollow?: () => void;
   settings: RadarSettings;
   onSelectFlight: (flight: LiveFlight, opts?: {in3DMode?: boolean; multiSelect?: boolean}) => void;
@@ -861,6 +863,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   isolateSelected = false,
   playbackState,
   isMobilePortrait = false,
+  rightPanelOpen = false,
+  selectedFlightTrailsOnly = false,
   onUserDragBreakFollow,
   settings,
   onSelectFlight,
@@ -935,6 +939,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({
   isolateSelectedRef.current = isolateSelected;
   const playbackRef = useRef(playbackState);
   playbackRef.current = playbackState;
+  const selectedFlightTrailsOnlyRef = useRef(selectedFlightTrailsOnly);
+  selectedFlightTrailsOnlyRef.current = selectedFlightTrailsOnly;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const themeRef = useRef(theme);
@@ -1118,7 +1124,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           existing.targetTrack = f.trueTrackDeg;
           existing.renderAltFt = f.altitudeFt;
           existing.blendStartMs = nowMs;
-          existing.blendDurationMs = 1350;
+          existing.blendDurationMs = 950;
           existing.lastUpdateMs = nowMs;
         }
       } else {
@@ -1151,7 +1157,15 @@ export const RadarMap: React.FC<RadarMapProps> = ({
 
   useEffect(() => {
     dirtyRef.current.trails = true;
-  }, [selectedFlight, selectedDetail, isolateSelected, plannedRoute, settings.flightPathMode]);
+  }, [
+    selectedFlight,
+    selectedFlightIds,
+    selectedDetail,
+    isolateSelected,
+    plannedRoute,
+    settings.flightPathMode,
+    selectedFlightTrailsOnly,
+  ]);
 
   useEffect(() => {
     dirtyRef.current.hazards = true;
@@ -1904,11 +1918,24 @@ export const RadarMap: React.FC<RadarMapProps> = ({
     };
 
     const onWheel = (e: WheelEvent) => {
-      // Allow nested popovers/controls marked with data-no-map-wheel to scroll natively
+      // Allow nested popovers/dashboards marked with data-no-map-wheel to scroll natively
       if ((e.target as HTMLElement | null)?.closest?.('[data-no-map-wheel]')) return;
       e.preventDefault();
       const cam = camStateRef.current;
-      const zoomStep = THREE.MathUtils.clamp(-e.deltaY * 0.0022, -0.75, 0.75);
+
+      // Cross-platform delta normalization (Windows discrete mouse wheels vs macOS trackpad inertia)
+      const normDeltaY =
+        e.deltaMode === 1
+          ? e.deltaY * 32
+          : e.deltaMode === 2
+            ? e.deltaY * (container.clientHeight || 640)
+            : e.deltaY;
+      const isDiscreteWheel =
+        e.deltaMode !== 0 || (Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50);
+      const gain = isDiscreteWheel ? 0.0022 : 0.0028;
+      const zoomStep = THREE.MathUtils.clamp(-normDeltaY * gain, -0.82, 0.82);
+      if (Math.abs(zoomStep) < 1e-4) return;
+
       const nextZ = THREE.MathUtils.clamp(cam.targetZoom + zoomStep, 2.0, 19.2);
 
       if (followSelectedRef.current) {
@@ -1922,7 +1949,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       const hasHit = rayToGround(e.clientX, e.clientY, hitBefore);
       cam.targetZoom = nextZ;
 
-      if (hasHit && Math.abs(zoomStep) > 0.0005) {
+      if (hasHit) {
         const anchorMx = cam.mx + hitBefore.x / MERCATOR_WORLD_M;
         const anchorMy = cam.my + hitBefore.z / MERCATOR_WORLD_M;
         const startDMx = anchorMx - cam.mx;
@@ -1939,7 +1966,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         wheelAnchor.startZoom = startZoom;
         wheelAnchor.startDMx = startDMx;
         wheelAnchor.startDMy = startDMy;
-        wheelAnchor.expiresAt = performance.now() + 420;
+        wheelAnchor.expiresAt = performance.now() + 720;
       }
     };
 
@@ -2284,16 +2311,27 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         }
       };
 
-      if (sel && (iso || s.flightPathMode !== 'off')) {
-        drawFlightTrail(sel, true);
+      const showSelTrails =
+        selectedFlightTrailsOnlyRef.current || iso || s.flightPathMode !== 'off';
+      if (showSelTrails) {
+        if (sel) drawFlightTrail(sel, true);
+        const selIds = selectedFlightIdsRef.current;
+        if (selIds.size > 0) {
+          for (const f of flightsRef.current) {
+            if (f.id !== sel?.id && selIds.has(f.id)) {
+              drawFlightTrail(f, false);
+            }
+          }
+        }
       }
 
       if (s.flightPathMode === 'all' && !iso) {
         let count = 0;
         const maxBg = camZoom >= 8 ? 140 : 60;
+        const selIds = selectedFlightIdsRef.current;
         for (const f of flightsRef.current) {
           if (count >= maxBg) break;
-          if (f.onGround || f.id === sel?.id) continue;
+          if (f.onGround || f.id === sel?.id || selIds.has(f.id)) continue;
           if (f.lat < bounds.south || f.lat > bounds.north || f.lon < bounds.west || f.lon > bounds.east) continue;
           drawFlightTrail(f, false);
           count++;
@@ -2379,7 +2417,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       cloudInst.instanceMatrix.needsUpdate = true;
     };
 
-    const tickInner = () => {
+    const tick = () => {
       if (disposed) return;
       const nowMs = performance.now();
       const dt = Math.min(0.08, Math.max(0.001, (nowMs - lastFrameMs) / 1000));
@@ -2444,9 +2482,9 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         cam.velMy *= decay;
       }
 
-      cam.zoom = THREE.MathUtils.damp(cam.zoom, cam.targetZoom, 13, dt);
-      cam.pitchDeg = THREE.MathUtils.damp(cam.pitchDeg, cam.targetPitchDeg, 11, dt);
-      cam.elevOffsetM = THREE.MathUtils.damp(cam.elevOffsetM, cam.targetElevOffsetM, 10, dt);
+      cam.zoom = THREE.MathUtils.damp(cam.zoom, cam.targetZoom, 15, dt);
+      cam.pitchDeg = THREE.MathUtils.damp(cam.pitchDeg, cam.targetPitchDeg, 12, dt);
+      cam.elevOffsetM = THREE.MathUtils.damp(cam.elevOffsetM, cam.targetElevOffsetM, 11, dt);
 
       // Lock horizontal coords cleanly during pan or exact algebraic cursor-pinned wheel zoom
       if (dragMode === 'pan') {
@@ -2466,18 +2504,18 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         if (wheelAnchor.active && (nowMs >= wheelAnchor.expiresAt || Math.abs(cam.zoom - cam.targetZoom) <= 0.0004)) {
           wheelAnchor.active = false;
         }
-        cam.mx = THREE.MathUtils.damp(cam.mx, cam.targetMx, 14, dt);
-        cam.my = THREE.MathUtils.damp(cam.my, cam.targetMy, 14, dt);
+        cam.mx = THREE.MathUtils.damp(cam.mx, cam.targetMx, 16, dt);
+        cam.my = THREE.MathUtils.damp(cam.my, cam.targetMy, 16, dt);
       }
 
       const bearDelta = ((cam.targetBearingDeg - cam.bearingDeg + 540) % 360) - 180;
-      cam.bearingDeg = (cam.bearingDeg + bearDelta * (1 - Math.exp(-11 * dt)) + 360) % 360;
+      cam.bearingDeg = (cam.bearingDeg + bearDelta * (1 - Math.exp(-12 * dt)) + 360) % 360;
 
       const s = settingsRef.current;
       const effectiveStyle = resolveEffectiveStyle();
       const isNightTerrain = effectiveStyle === 'maptiler-dark';
       (scene.background as THREE.Color).set(
-        isNightTerrain ? '#333333' : '#f7f7f7',
+        isNightTerrain ? '#2A3344' : '#f7f7f7',
       );
 
       const {mPerPx, w, h} = syncCameraTransform();
@@ -2684,10 +2722,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({
           )
           .slice(0, 10);
 
-        for (const ap of nearbyAps) {
+        const selApUpper = (selectedAirportIcaoRef.current || '').toUpperCase();
+        nearbyAps.forEach((ap, apIdx) => {
           airfieldStore.getInstant(ap.icao, ap.lat, ap.lon);
-          void airfieldStore.ensureLoaded(ap.icao, ap.iata, ap.lat, ap.lon);
-        }
+          const wantDetail =
+            (cam.zoom >= 10.2 && apIdx < 2) ||
+            (Boolean(selApUpper) && (ap.icao.toUpperCase() === selApUpper || ap.iata.toUpperCase() === selApUpper));
+          void airfieldStore.ensureLoaded(ap.icao, ap.iata, ap.lat, ap.lon, wantDetail);
+        });
       }
 
       const loadedList = airfieldStore.getAllLoaded();
@@ -2872,6 +2914,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       let selLivePos: {wx: number; wy: number; wz: number} | null = null;
       const tempCol = new THREE.Color();
       const tempEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+      const nowEpochReal = Date.now() / 1000;
 
       for (let i = 0; i < sortedForDraw.length; i++) {
         const f = sortedForDraw[i];
@@ -2915,14 +2958,16 @@ export const RadarMap: React.FC<RadarMapProps> = ({
               : 1;
           const ease = 1 - Math.pow(1 - t, 3);
 
-          const rawDtSec = Math.max(0, (nowMs - entry.lastUpdateMs) / 1000);
-          const glideMaxSec = f.onGround ? 0.55 : 1.6;
-          const speedFactor = f.onGround ? Math.max(0, Math.min(1, (f.groundSpeedKts - 16) / 35)) : 1;
-          const glideSec = Math.min(glideMaxSec, rawDtSec) * speedFactor;
+          const dataAgeSec =
+            f.lastContactEpoch > 0
+              ? Math.max(0, Math.min(28, nowEpochReal - f.lastContactEpoch))
+              : Math.max(0, Math.min(10, (nowMs - entry.lastUpdateMs) / 1000));
+          const speedFactor = f.onGround ? Math.max(0, Math.min(1, (f.groundSpeedKts - 10) / 28)) : 1;
+          const glideSec = (f.onGround ? Math.min(6, dataAgeSec) : dataAgeSec) * speedFactor;
 
           let extLat = entry.targetLat;
           let extLon = entry.targetLon;
-          if (!f.isEstimated && f.groundSpeedKts > (f.onGround ? 18 : 30) && glideSec > 0.04) {
+          if (!f.isEstimated && f.groundSpeedKts > (f.onGround ? 12 : 25) && glideSec > 0.02) {
             const distNm = f.groundSpeedKts * (glideSec / 3600);
             const trkRad = THREE.MathUtils.degToRad(entry.targetTrack);
             extLat += (distNm / 60) * Math.cos(trkRad);
@@ -3164,7 +3209,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       ringColorAttr.needsUpdate = true;
 
       // Live 60Hz connector tip from selected flight's trail end to its moving nose
-      if (selLivePos && selectedLastTrailPt && (isolateSelectedRef.current || s.flightPathMode !== 'off')) {
+      if (selLivePos && selectedLastTrailPt && (selectedFlightTrailsOnlyRef.current || isolateSelectedRef.current || s.flightPathMode !== 'off')) {
         const lx = (lonToMx(selectedLastTrailPt.lon) - originMx) * MERCATOR_WORLD_M;
         const lz = (latToMy(selectedLastTrailPt.lat) - originMy) * MERCATOR_WORLD_M;
         const ly = is3D
@@ -3376,27 +3421,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       }
 
       renderer.render(scene, camera);
-    };
-
-    // A single failing overlay/layer must never freeze the whole map: always draw and always reschedule.
-    let lastTickErrorLog = 0;
-    const tick = () => {
-      if (disposed) return;
-      try {
-        tickInner();
-      } catch (err) {
-        const t = performance.now();
-        if (t - lastTickErrorLog > 5000) {
-          lastTickErrorLog = t;
-          console.error('SkyDeck frame error (recovered):', err);
-        }
-        try {
-          renderer.render(scene, camera);
-        } catch {
-          // ignore secondary render failure
-        }
-      }
-      if (!disposed) frameId = requestAnimationFrame(tick);
+      frameId = requestAnimationFrame(tick);
     };
 
     tick();
@@ -3626,8 +3651,13 @@ export const RadarMap: React.FC<RadarMapProps> = ({
         style={{opacity: 0}}
       />
 
-      {/* Top-Right Compact 3D View Toggle & North Compass (No +/- buttons or z2.0 clutter) */}
-      <div className="absolute top-3 right-3 z-[460] flex flex-col gap-1.5" data-no-map-wheel>
+      {/* Top-Right Compact 3D View Toggle & North Compass (shifts left cleanly when right dashboard window is docked open) */}
+      <div
+        className={`absolute top-3 z-[460] flex flex-col gap-1.5 transition-[right] duration-200 ${
+          rightPanelOpen ? 'right-3 md:right-[456px]' : 'right-3'
+        }`}
+        data-no-map-wheel
+      >
         <button
           type="button"
           onClick={() => {
@@ -3665,7 +3695,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({
       </div>
 
       {/* Top-Right Compact GeoFS Altitude Legend & Optional Weather Radar Player */}
-      <div className="hidden md:flex absolute top-3 right-24 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm" data-no-map-wheel>
+      <div
+        className={`hidden md:flex absolute top-3 z-[450] flex-wrap items-center gap-2.5 rounded-full bg-card border border-border px-3.5 py-1.5 text-[10.5px] shadow-sm transition-[right] duration-200 ${
+          rightPanelOpen ? 'right-[548px]' : 'right-24'
+        }`}
+        data-no-map-wheel
+      >
         {settings.showRadar && rainviewer && rainviewer.frames.length > 0 && (
           <div className="flex items-center gap-2 pr-2.5 border-r border-border">
             <button

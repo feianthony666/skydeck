@@ -89,6 +89,12 @@ async function loadCachedSurface(icao: string): Promise<AirfieldSurfaceData | nu
     if (!db) return null;
     const row = await db.get('surfaces', icao.toUpperCase());
     if (!row) return null;
+    if (
+      row.data.taxiways?.some((t) => t.id.startsWith('syn-twy-')) ||
+      row.data.labeledAprons?.some((a) => a.id === 'syn-apron-main')
+    ) {
+      return null;
+    }
     const ttl =
       row.data.source === 'osm-overpass' && row.data.taxiways.length > 0 ? 7 * 86400_000 : 120_000;
     if (Date.now() - row.savedAt > ttl) return null;
@@ -1610,7 +1616,13 @@ export class PersistentAirfieldStore {
     })();
   }
 
-  public async ensureLoaded(icao: string, iata: string, lat: number, lon: number): Promise<void> {
+  public async ensureLoaded(
+    icao: string,
+    iata: string,
+    lat: number,
+    lon: number,
+    detail = false,
+  ): Promise<void> {
     const key = (icao || iata).toUpperCase();
     const existing = this.memCache.get(key);
     if (existing && existing.source === 'osm-overpass' && existing.taxiways.length > 0) return;
@@ -1635,25 +1647,16 @@ export class PersistentAirfieldStore {
         lat: lat.toFixed(4),
         lon: lon.toFixed(4),
       });
+      if (detail) qs.set('detail', '1');
       const fetched = await apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`);
       if (fetched && (fetched.runways.length > 0 || fetched.taxiways.length > 0)) {
-        // Fallback (non-OSM) data contains invented taxiways / a fake "MAIN APRON" box: never draw those.
-        const real = fetched.source === 'osm-overpass';
-        const base: AirfieldSurfaceData = real
-          ? fetched
-          : {
-              ...fetched,
-              taxiways: fetched.taxiways.filter((t) => !String(t.id).startsWith('syn-')),
-              aprons: [],
-              labeledAprons: (fetched.labeledAprons ?? []).filter((a) => !String(a.id).startsWith('syn-')),
-            };
         const cleanData: AirfieldSurfaceData = {
-          ...base,
-          runways: applyDisplacedThresholds(key, base.runways),
+          ...fetched,
+          runways: applyDisplacedThresholds(key, fetched.runways),
           aprons:
-            base.aprons.length > 0
-              ? base.aprons
-              : (base.labeledAprons ?? []).map((a) => a.coords),
+            fetched.aprons.length > 0
+              ? fetched.aprons
+              : (fetched.labeledAprons ?? []).map((a) => a.coords),
         };
         if (cleanData.aprons.length === 0 && cleanData.labeledAprons?.length) {
           cleanData.aprons = cleanData.labeledAprons.map((a) => a.coords);

@@ -1913,7 +1913,7 @@ export function createApiRouter(): express.Router {
 
     const key = `${lamin.toFixed(1)},${lomin.toFixed(1)},${lamax.toFixed(1)},${lomax.toFixed(1)}`;
     const cached = flightsCache.get(key);
-    if (cached && Date.now() - cached.ts < 5500) {
+    if (cached && Date.now() - cached.ts < 2500) {
       res.json({...cached.data, fromServerCache: true});
       return;
     }
@@ -2809,6 +2809,85 @@ export function createApiRouter(): express.Router {
     res.json({query: rawQuery || icao24Param, items: items.slice(0, 24), fetchedAt: Date.now()});
   });
 
+  // 2g. Flight Playback Track for Historical Flights
+  router.get('/flight-playback', async (req, res) => {
+    const flightId = String(req.query.flightId ?? '').trim();
+    const icao24 = String(req.query.icao24 ?? '').trim().toLowerCase();
+    const timeSec = Number.parseInt(String(req.query.time ?? '0'), 10) || 0;
+    const trail: TrailPoint[] = [];
+    let source = 'unavailable';
+
+    if (flightId && !flightId.startsWith('os-') && !flightId.startsWith('live-')) {
+      try {
+        const r = await fetch(
+          `https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${encodeURIComponent(flightId)}`,
+          {headers: {'User-Agent': FR24_MOBILE_UA, Accept: 'application/json'}, signal: AbortSignal.timeout(6500)},
+        );
+        const json = await safeJson<{
+          result?: {
+            response?: {
+              data?: {
+                flight?: {
+                  track?: Array<{
+                    latitude?: number;
+                    longitude?: number;
+                    altitude?: {feet?: number};
+                    speed?: {kts?: number};
+                    heading?: number;
+                    timestamp?: number;
+                  }>;
+                };
+              };
+            };
+          };
+        }>(r);
+        const pts = json?.result?.response?.data?.flight?.track ?? [];
+        for (const p of pts) {
+          if (!Number.isFinite(Number(p.latitude)) || !Number.isFinite(Number(p.longitude))) continue;
+          trail.push({
+            lat: Number(p.latitude),
+            lon: Number(p.longitude),
+            altFt: Math.max(0, Math.round(Number(p.altitude?.feet ?? 0) || 0)),
+            speedKts: Math.max(0, Math.round(Number(p.speed?.kts ?? 0) || 0)),
+            trackDeg: Math.round(Number(p.heading ?? 0) || 0),
+            ts: Number(p.timestamp ?? 0) || 0,
+          });
+        }
+        if (trail.length > 0) source = 'fr24-playback';
+      } catch {
+        // fallback below
+      }
+    }
+
+    if (trail.length === 0 && icao24) {
+      try {
+        const r = await fetch(
+          `https://opensky-network.org/api/tracks/all?icao24=${encodeURIComponent(icao24)}&time=${timeSec || 0}`,
+          {headers: {'User-Agent': API_USER_AGENT, Accept: 'application/json'}, signal: AbortSignal.timeout(5500)},
+        );
+        const json = await safeJson<{
+          path?: Array<[number, number | null, number | null, number | null, number | null, boolean?]>;
+        }>(r);
+        for (const wp of json?.path ?? []) {
+          if (wp[1] == null || wp[2] == null) continue;
+          trail.push({
+            lat: wp[1],
+            lon: wp[2],
+            altFt: Math.max(0, Math.round((wp[3] ?? 0) * 3.28084)),
+            speedKts: 0,
+            trackDeg: Math.round(wp[4] ?? 0),
+            ts: wp[0] ?? 0,
+          });
+        }
+        if (trail.length > 0) source = 'opensky-track';
+      } catch {
+        // unavailable
+      }
+    }
+
+    res.json({flightId: flightId || icao24, trail, source});
+  });
+
   // 2c. Global Airports within Radar Viewport (All Airports)
   router.get('/airports', async (req, res) => {
     const lamin = Number(req.query.lamin ?? -85);
@@ -2991,65 +3070,6 @@ export function createApiRouter(): express.Router {
     }
 
     runways = applyDisplacedThresholds(catalog?.icao ?? icao, runways);
-
-    if (taxiways.length === 0 && runways.length > 0) {
-      runways.forEach((rw, idx) => {
-        if (rw.coords.length < 2) return;
-        const p1 = rw.coords[0];
-        const p2 = rw.coords[rw.coords.length - 1];
-        const cosLat = Math.max(0.2, Math.cos((p1[0] * Math.PI) / 180));
-        const dLat = p2[0] - p1[0];
-        const dLon = (p2[1] - p1[1]) * cosLat;
-        const len = Math.max(1e-5, Math.hypot(dLat, dLon));
-        const sideSign = idx % 2 === 0 ? 1 : -1;
-        const perpLat = (-dLon / len) * 0.0024 * sideSign;
-        const perpLon = ((dLat / len) * 0.0024 * sideSign) / cosLat;
-        const twyRef = ['A', 'B', 'C', 'L', 'G', 'H'][idx % 6];
-        const t1: [number, number] = [p1[0] + perpLat, p1[1] + perpLon];
-        const t2: [number, number] = [p2[0] + perpLat, p2[1] + perpLon];
-        taxiways.push({
-          id: `syn-twy-${rw.id}-par`,
-          kind: 'taxiway',
-          ref: twyRef,
-          widthM: 22,
-          coords: [t1, t2],
-        });
-        [0.08, 0.34, 0.66, 0.92].forEach((frac, cIdx) => {
-          const rx = p1[0] + (p2[0] - p1[0]) * frac;
-          const ry = p1[1] + (p2[1] - p1[1]) * frac;
-          const tx = t1[0] + (t2[0] - t1[0]) * frac;
-          const ty = t1[1] + (t2[1] - t1[1]) * frac;
-          taxiways.push({
-            id: `syn-twy-${rw.id}-ex-${cIdx}`,
-            kind: 'taxiway',
-            ref: `${twyRef}${cIdx + 1}`,
-            widthM: 18,
-            coords: [
-              [rx, ry],
-              [tx, ty],
-            ],
-          });
-        });
-      });
-    }
-
-    if (aprons.length === 0 && !osmSucceeded) {
-      const aLat = catalog?.lat ?? lat;
-      const aLon = catalog?.lon ?? lon;
-      const box: Array<[number, number]> = [
-        [aLat - 0.0025, aLon - 0.0038],
-        [aLat + 0.0025, aLon - 0.0038],
-        [aLat + 0.0025, aLon + 0.0038],
-        [aLat - 0.0025, aLon + 0.0038],
-      ];
-      aprons.push(box);
-      labeledAprons.push({
-        id: 'syn-apron-main',
-        ref: 'MAIN APRON',
-        coords: box,
-        center: [aLat, aLon],
-      });
-    }
 
     const result: AirfieldSurfaceData = {
       icao: catalog?.icao ?? icao,

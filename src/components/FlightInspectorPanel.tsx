@@ -11,6 +11,7 @@ import {
   MapPin,
   Plane,
   Radio,
+  Route,
   ShieldCheck,
   TrendingUp,
   Wrench,
@@ -53,8 +54,11 @@ interface FlightInspectorPanelProps {
   matchingAcars: AcarsMessage[];
   followSelected?: boolean;
   isolateSelected?: boolean;
+  showFlightTrails?: boolean;
+  embedded?: boolean;
   onToggleFollow?: () => void;
   onToggleIsolate?: () => void;
+  onToggleFlightTrails?: () => void;
   onClose: () => void;
   onSelectAirport?: (airport: {icao: string; iata: string; name: string}) => void;
 }
@@ -190,8 +194,11 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
   matchingAcars,
   followSelected = false,
   isolateSelected = false,
+  showFlightTrails = true,
+  embedded = false,
   onToggleFollow,
   onToggleIsolate,
+  onToggleFlightTrails,
   onClose,
   onSelectAirport,
 }) => {
@@ -583,7 +590,11 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
       aria-label={`Flight details for ${flight.callsign}`}
       className="flex-1 h-full min-h-0 flex flex-col"
     >
-      <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl">
+      <Card
+        className={`flex-1 min-h-0 flex flex-col overflow-hidden ${
+          embedded ? 'border-0 shadow-none rounded-none bg-transparent' : 'shadow-2xl'
+        }`}
+      >
         <CardHeader className="flex flex-row items-start justify-between gap-2 pb-2.5 pt-3.5 shrink-0 border-b border-border/60">
           <div className="space-y-1 min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -645,15 +656,27 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
             </div>
           )}
 
-          {/* Follow (Preserves User Zoom) + Isolate (Full Route) Quick Action Bar */}
-          {(onToggleFollow || onToggleIsolate) && (
-            <div className="grid grid-cols-2 gap-1.5 pb-0.5">
+          {/* Follow + Isolate + Flight Trails Quick Action Bar */}
+          {(onToggleFollow || onToggleIsolate || onToggleFlightTrails) && (
+            <div className="grid grid-cols-3 gap-1.5 pb-0.5">
+              {onToggleFlightTrails && (
+                <Button
+                  variant={showFlightTrails ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={onToggleFlightTrails}
+                  className="w-full justify-center whitespace-nowrap"
+                  title="Toggle altitude-gradient flight trail polyline for selected aircraft"
+                >
+                  <Route className="w-3.5 h-3.5 shrink-0" />
+                  <span>Flight Trails</span>
+                </Button>
+              )}
               {onToggleFollow && (
                 <Button
                   variant={followSelected ? 'default' : 'outline'}
                   size="sm"
                   onClick={onToggleFollow}
-                  className="w-full justify-center"
+                  className="w-full justify-center whitespace-nowrap"
                   title="Keep aircraft centered at your current map zoom"
                 >
                   <Crosshair className="w-3.5 h-3.5 shrink-0" />
@@ -665,7 +688,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
                   variant={isolateSelected ? 'default' : 'outline'}
                   size="sm"
                   onClick={onToggleIsolate}
-                  className="w-full justify-center"
+                  className="w-full justify-center whitespace-nowrap"
                   title="Hide all other traffic and show complete flight path"
                 >
                   <Eye className="w-3.5 h-3.5 shrink-0" />
@@ -763,7 +786,7 @@ export const FlightInspectorPanel: React.FC<FlightInspectorPanelProps> = ({
               </span>
             }
           >
-            <div className="rounded-lg bg-[#090d16] border border-slate-800 p-2">
+            <div className="rounded-lg bg-[#141923] border border-slate-700/80 p-2">
               <svg
                 viewBox={`0 0 ${chartGeom.W} ${chartGeom.H}`}
                 className="w-full h-[118px] overflow-visible"

@@ -53,23 +53,23 @@
 }
 
 .dark {
-  --background: #0B0E14;
-  --foreground: #E5E7EB;
-  --card: #12161F;
-  --card-foreground: #E5E7EB;
-  --popover: #161B26;
-  --popover-foreground: #E5E7EB;
+  --background: #141923;
+  --foreground: #E5E9F0;
+  --card: #1B2230;
+  --card-foreground: #E5E9F0;
+  --popover: #202939;
+  --popover-foreground: #E5E9F0;
   --primary: #38BDF8;
-  --primary-foreground: #080D16;
-  --secondary: #1A202C;
-  --secondary-foreground: #E5E7EB;
-  --muted: #1A202C;
-  --muted-foreground: #9CA3AF;
-  --accent: #1E2533;
+  --primary-foreground: #0F172A;
+  --secondary: #253042;
+  --secondary-foreground: #E5E9F0;
+  --muted: #253042;
+  --muted-foreground: #94A3B8;
+  --accent: #2C394E;
   --accent-foreground: #F8FAFC;
   --destructive: #EF4444;
-  --border: rgba(255, 255, 255, 0.08);
-  --input: rgba(255, 255, 255, 0.12);
+  --border: rgba(226, 232, 240, 0.11);
+  --input: rgba(226, 232, 240, 0.16);
   --ring: #38BDF8;
 }
 
@@ -127,7 +127,7 @@
 
 /* Leaflet Real Map Surface */
 .leaflet-container {
-  background: #10141c;
+  background: #141923;
   font-family: var(--font-sans);
 }
 
@@ -137,8 +137,8 @@ html:not(.dark) .leaflet-container {
 
 .leaflet-control-attribution {
   font-size: 10px !important;
-  background: rgba(11, 14, 20, 0.8) !important;
-  color: #9ca3af !important;
+  background: rgba(20, 25, 35, 0.85) !important;
+  color: #94a3b8 !important;
   backdrop-filter: none !important;
 }
 

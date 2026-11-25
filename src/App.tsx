@@ -1,51 +1,38 @@
 import {
-  Activity,
   AlertTriangle,
   ChevronDown,
   ChevronUp,
-  Layers,
-  ListFilter,
+  History,
   LocateFixed,
-  Maximize2,
-  Minimize2,
   Moon,
   Navigation,
+  PanelRightClose,
+  PanelRightOpen,
   Radar,
   Radio,
-  RefreshCw,
-  Scale,
+  Route,
   Search,
-  ShieldAlert,
-  SlidersHorizontal,
   Sun,
   WifiOff,
   X,
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {AirportBoardPanel} from './components/AirportBoardPanel';
-import {BottomOpsDrawer, type BottomOpsTab, type PlaybackState} from './components/BottomOpsDrawer';
+import {type PlaybackState} from './components/BottomOpsDrawer';
 import {CreditsAttributionsModal} from './components/CreditsAttributionsModal';
-import {FlightInspectorPanel} from './components/FlightInspectorPanel';
+import {FlightHistoryView} from './components/FlightHistoryView';
 import {FlightPlannerView} from './components/FlightPlannerView';
-import {MultiSelectSidebar} from './components/MultiSelectSidebar';
 import {PWAInstallButton} from './components/PWAInstallButton';
 import {
   DEFAULT_PLANE_LABELS,
   DEFAULT_RADAR_SETTINGS,
   DEFAULT_WX_LAYERS,
   RadarMap,
-  RadarSettingsPopover,
 } from './components/RadarMap';
+import {RightDashboardWindow, type DashboardTab} from './components/RightDashboardWindow';
 import {TaxiAcarsView} from './components/TaxiAcarsView';
-import {getDbFlagMeta, getEmergencySquawkMeta} from './components/aircraftIcons';
-import {Badge} from './components/ui/badge';
+import {getEmergencySquawkMeta} from './components/aircraftIcons';
 import {Button} from './components/ui/button';
-import {Card, CardContent, CardDescription, CardHeader, CardTitle} from './components/ui/card';
 import {Input} from './components/ui/input';
-import {Popover, PopoverContent, PopoverTrigger} from './components/ui/popover';
-import {Separator} from './components/ui/separator';
-import {Table, TableBody, TableCell, TableHead, TableHeader, TableRow} from './components/ui/table';
-import {TabsList, TabsTrigger} from './components/ui/tabs';
 import {
   AIRPORT_CATALOG,
   REGION_PRESETS,
@@ -147,11 +134,35 @@ function buildLocalRegion(lat: number, lon: number, label?: string): RegionPrese
   };
 }
 
+function detectInitialViewFromUrl(): {view: AppView; historyQuery: string} {
+  if (typeof window === 'undefined') return {view: 'radar', historyQuery: ''};
+  const host = window.location.hostname.toLowerCase();
+  const path = window.location.pathname.toLowerCase();
+  const hash = window.location.hash.toLowerCase();
+  const params = new URLSearchParams(window.location.search);
+  const viewParam = (params.get('view') || '').toLowerCase();
+  const historyQuery = (params.get('flight') || params.get('q') || '').trim().toUpperCase();
+  if (
+    host.startsWith('history.') ||
+    /(^|\/)history\/?$/.test(path) ||
+    hash.startsWith('#/history') ||
+    hash === '#history' ||
+    viewParam === 'history'
+  ) {
+    return {view: 'history', historyQuery};
+  }
+  if (hash.startsWith('#/taxi') || viewParam === 'taxi') return {view: 'taxi', historyQuery: ''};
+  if (hash.startsWith('#/planner') || viewParam === 'planner') return {view: 'planner', historyQuery: ''};
+  return {view: 'radar', historyQuery: ''};
+}
+
 export default function App() {
   const isOnline = useOnlineStatus();
+  const initialRoute = useMemo(() => detectInitialViewFromUrl(), []);
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [radarSettings, setRadarSettings] = useState<RadarSettings>(() => loadSavedRadarSettings());
-  const [activeView, setActiveView] = useState<AppView>('radar');
+  const [activeView, setActiveView] = useState<AppView>(initialRoute.view);
+  const [historyInitialQuery, setHistoryInitialQuery] = useState<string>(initialRoute.historyQuery);
   const [activeRegion, setActiveRegion] = useState<RegionPreset>(REGION_PRESETS[0]);
   const [localRegion, setLocalRegion] = useState<RegionPreset | null>(null);
   const [userLocation, setUserLocation] = useState<{
@@ -173,7 +184,11 @@ export default function App() {
   const [modelFilter, setModelFilter] = useState<string>('all');
   const [countryFilter, setCountryFilter] = useState<string>('all');
   const [isPortraitMobile, setIsPortraitMobile] = useState<boolean>(() => detectPortraitMobileViewport());
-  const [mobileSheetDetent, setMobileSheetDetent] = useState<'peek' | 'expanded'>('peek');
+  const [rightDashboardOpen, setRightDashboardOpen] = useState<boolean>(false);
+  const [dashboardTab, setDashboardTab] = useState<DashboardTab>('inspector');
+  const [selectedTrailsEnabled, setSelectedTrailsEnabled] = useState<boolean>(
+    () => loadSavedRadarSettings().flightPathMode !== 'off',
+  );
 
   const [rawFlights, setRawFlights] = useState<LiveFlight[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
@@ -231,9 +246,6 @@ export default function App() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [dockHidden, setDockHidden] = useState(false);
-  const [showTrafficSheet, setShowTrafficSheet] = useState(false);
-  const [opsDrawerOpen, setOpsDrawerOpen] = useState(false);
-  const [opsTab, setOpsTab] = useState<BottomOpsTab>('fov');
   const [gateChangeUpdates, setGateChangeUpdates] = useState<LiveFlightUpdateItem[]>([]);
   const prevGateMapRef = useRef<Map<string, string>>(new Map());
   const [plannedRoute, setPlannedRoute] = useState<{
@@ -295,6 +307,51 @@ export default function App() {
 
   const resetRadarSettings = useCallback(() => {
     setRadarSettings(DEFAULT_RADAR_SETTINGS);
+    setSelectedTrailsEnabled(true);
+  }, []);
+
+  const toggleFlightTrails = useCallback(() => {
+    setSelectedTrailsEnabled((prev) => {
+      const next = !prev;
+      updateRadarSettings({
+        flightPathMode: next ? (radarSettings.flightPathMode === 'all' ? 'all' : 'selected') : 'off',
+      });
+      return next;
+    });
+  }, [radarSettings.flightPathMode, updateRadarSettings]);
+
+  const navigateView = useCallback((nextView: AppView, historyQuery?: string) => {
+    if (historyQuery !== undefined) {
+      setHistoryInitialQuery(historyQuery);
+    }
+    setActiveView(nextView);
+    if (typeof window !== 'undefined' && !window.location.hostname.toLowerCase().startsWith('history.')) {
+      const targetHash =
+        nextView === 'history'
+          ? '#/history'
+          : nextView === 'taxi'
+            ? '#/taxi'
+            : nextView === 'planner'
+              ? '#/planner'
+              : '';
+      if (window.location.hash !== targetHash) {
+        try {
+          window.history.replaceState(null, '', targetHash || window.location.pathname + window.location.search);
+        } catch {
+          window.location.hash = targetHash;
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const detected = detectInitialViewFromUrl();
+      setActiveView(detected.view);
+      if (detected.historyQuery) setHistoryInitialQuery(detected.historyQuery);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
   // Preload cached global airport directory immediately on entry, then refresh in background
@@ -345,10 +402,10 @@ export default function App() {
       () => {
         setNowEpochSec(Math.floor(Date.now() / 1000));
       },
-      isOnline ? 5000 : 2000,
+      2000,
     );
     return () => clearInterval(id);
-  }, [isOnline]);
+  }, []);
 
   const fetchAirportsInView = useCallback(
     async (targetBounds = boundsRef.current, zoom = activeRegion.zoom) => {
@@ -614,7 +671,7 @@ export default function App() {
       void fetchLiveFlights(boundsRef.current, activeRegion.id).finally(() => {
         fetchingFlightsRef.current = false;
       });
-    }, 6000);
+    }, 3000);
     return () => clearInterval(id);
   }, [activeRegion, fetchLiveFlights, fetchAirportsInView]);
 
@@ -849,7 +906,6 @@ export default function App() {
 
   const groundTraffic = useMemo(() => flights.filter((f) => f.onGround), [flights]);
   const airborneTraffic = useMemo(() => flights.filter((f) => !f.onGround), [flights]);
-  const estimatedCount = useMemo(() => flights.filter((f) => f.isEstimated).length, [flights]);
   const laddCount = useMemo(
     () => flights.filter((f) => Boolean(f.isLadd || ((f.dbFlags ?? 0) & 8) !== 0)).length,
     [flights],
@@ -960,14 +1016,14 @@ export default function App() {
         setSelectedFlightId(f.id);
       }
       setSidebarMode('flight');
-      setMobileSheetDetent('peek');
-      setActiveView('radar');
-      setShowTrafficSheet(false);
+      setDashboardTab('inspector');
+      setRightDashboardOpen(true);
+      navigateView('radar');
       if (opts?.in3DMode) {
         setFollowSelected(true);
       }
     },
-    [multiSelectMode, selectedFlightId],
+    [multiSelectMode, selectedFlightId, navigateView],
   );
 
   const toggleFlightInMultiSelect = useCallback(
@@ -987,12 +1043,13 @@ export default function App() {
   const handleSelectAirport = useCallback(async (ap: {icao: string; iata: string; name: string}) => {
     setSelectedAirport(ap);
     setSidebarMode('airport');
-    setMobileSheetDetent('peek');
+    setDashboardTab('inspector');
+    setRightDashboardOpen(true);
     setAirportTrafficFilter('none');
     setAirportBoardLoading(true);
     setAirportBoard(null);
     setSelectedAirportSurface(null);
-    setActiveView('radar');
+    navigateView('radar');
 
     const matchMarker =
       mapAirports.find((m) => m.icao.toUpperCase() === ap.icao.toUpperCase()) ??
@@ -1058,7 +1115,7 @@ export default function App() {
     } finally {
       setAirportBoardLoading(false);
     }
-  }, [mapAirports]);
+  }, [mapAirports, navigateView]);
 
   const handleSelectFlightFromBoard = useCallback(
     (item: AirportBoardFlight) => {
@@ -1097,7 +1154,7 @@ export default function App() {
     );
   }, [airportsWeather, selectedAirport]);
 
-  const activeSidebarType: 'flight' | 'airport' | null =
+  const activeInspectorType: 'flight' | 'airport' | null =
     sidebarMode === 'airport' && selectedAirport
       ? 'airport'
       : sidebarMode === 'flight' && selectedFlight
@@ -1107,8 +1164,6 @@ export default function App() {
           : selectedAirport
             ? 'airport'
             : null;
-
-  const sidebarOpen = Boolean(activeSidebarType && activeView === 'radar');
 
   return (
     <div className="relative w-screen h-[100dvh] overflow-hidden bg-background text-foreground">
@@ -1136,6 +1191,8 @@ export default function App() {
           isolateSelected={isolateSelected}
           playbackState={playbackState}
           isMobilePortrait={isPortraitMobile}
+          rightPanelOpen={rightDashboardOpen && activeView === 'radar'}
+          selectedFlightTrailsOnly={selectedTrailsEnabled}
           onUserDragBreakFollow={() => setFollowSelected(false)}
           settings={radarSettings}
           onSelectFlight={handleSelectFlight}
@@ -1150,13 +1207,10 @@ export default function App() {
 
       {/* Dedicated Portrait Phone & Tablet Top App Bar (<= 52px high) */}
       {isPortraitMobile && (
-        <header className="fixed top-2 left-2 right-2 z-[560] h-[48px] flex items-center justify-between gap-2 rounded-2xl bg-card/92 backdrop-blur-md border border-border px-2.5 shadow-lg">
+        <header className="fixed top-2 left-2 right-2 z-[560] h-[48px] flex items-center justify-between gap-1.5 rounded-2xl bg-card/95 backdrop-blur-md border border-border px-2.5 shadow-lg">
           <button
             type="button"
-            onClick={() => {
-              setShowTrafficSheet(false);
-              setActiveView('radar');
-            }}
+            onClick={() => navigateView('radar')}
             className="flex items-center gap-1.5 min-h-[40px] px-1.5 rounded-xl font-display text-sm font-bold text-foreground whitespace-nowrap shrink-0 cursor-pointer"
           >
             <span>SkyDeck</span>
@@ -1180,109 +1234,19 @@ export default function App() {
           </select>
 
           <div className="flex items-center gap-1 shrink-0">
-            <Popover>
-              <PopoverTrigger
-                className={`inline-flex items-center justify-center min-w-[40px] min-h-[40px] rounded-xl border border-border transition-colors cursor-pointer relative ${
-                  activeFilterCount > 0
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-background text-foreground hover:bg-accent'
-                }`}
-                aria-label="Search and filter flights"
-              >
-                <SlidersHorizontal className="w-4 h-4" />
-                {activeFilterCount > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 rounded-full bg-amber-500 text-[10px] font-mono font-bold text-slate-950 px-1 flex items-center justify-center">
-                    {activeFilterCount}
-                  </span>
-                )}
-              </PopoverTrigger>
-              <PopoverContent side="bottom" align="end" className="w-[min(320px,calc(100vw-24px))] rounded-2xl p-3 space-y-2.5 shadow-xl z-[700]">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-foreground">Search &amp; Radar Filters</span>
-                  {activeFilterCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearchQuery('');
-                        setPhaseFilter('all');
-                        setTrafficFilter('all');
-                        setModelFilter('all');
-                        setCountryFilter('all');
-                      }}
-                      className="text-[11px] text-primary hover:underline cursor-pointer"
-                    >
-                      Reset ({activeFilterCount})
-                    </button>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Callsign, tail, hex, squawk 7700"
-                    aria-label="Search live ADS-B flights"
-                    className="h-9"
-                  />
-                  {searchQuery && (
-                    <Button size="icon" variant="ghost" onClick={() => setSearchQuery('')} aria-label="Clear search">
-                      <X className="w-4 h-4" />
-                    </Button>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <select
-                    value={trafficFilter}
-                    onChange={(e) => setTrafficFilter(e.target.value as TrafficFlagFilter)}
-                    aria-label="Filter by emergency squawk or DB flag"
-                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
-                  >
-                    <option value="all">All Feeds</option>
-                    <option value="emergency">Emergency (7500/7600/7700) · {emergencyFlights.length}</option>
-                    <option value="ladd">LADD Restricted · {laddCount}</option>
-                    <option value="military">Military / State · {militaryCount}</option>
-                    <option value="pia">PIA Privacy · {piaCount}</option>
-                  </select>
-                  <select
-                    value={phaseFilter}
-                    onChange={(e) => setPhaseFilter(e.target.value as 'all' | 'air' | 'ground')}
-                    aria-label="Filter by flight phase"
-                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
-                  >
-                    <option value="all">Air &amp; Ground</option>
-                    <option value="air">Airborne ({airborneTraffic.length})</option>
-                    <option value="ground">On Ground ({groundTraffic.length})</option>
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <select
-                    value={modelFilter}
-                    onChange={(e) => setModelFilter(e.target.value)}
-                    aria-label="Filter by aircraft model"
-                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
-                  >
-                    <option value="all">All Models ({availableModels.length})</option>
-                    {availableModels.map((m) => (
-                      <option key={m.code} value={m.code}>
-                        {m.code} ({m.count})
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={countryFilter}
-                    onChange={(e) => setCountryFilter(e.target.value)}
-                    aria-label="Filter by country of registration"
-                    className="h-8 rounded-lg bg-background border border-input px-2 text-xs text-foreground"
-                  >
-                    <option value="all">All Countries ({availableCountries.length})</option>
-                    {availableCountries.map((c) => (
-                      <option key={c.code} value={c.code}>
-                        {c.name} ({c.count})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </PopoverContent>
-            </Popover>
+            <button
+              type="button"
+              onClick={toggleFlightTrails}
+              aria-label="Toggle flight trails for selected aircraft"
+              title="Flight Trails"
+              className={`inline-flex items-center justify-center min-w-[38px] min-h-[38px] rounded-xl border cursor-pointer ${
+                selectedTrailsEnabled
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'bg-background text-foreground border-border'
+              }`}
+            >
+              <Route className="w-4 h-4" />
+            </button>
 
             {radarSettings.locateMeEnabled && (
               <button
@@ -1290,7 +1254,7 @@ export default function App() {
                 onClick={() => void syncToUserLocation()}
                 disabled={locating}
                 aria-label="Locate me"
-                className={`inline-flex items-center justify-center min-w-[40px] min-h-[40px] rounded-xl border border-border cursor-pointer ${
+                className={`inline-flex items-center justify-center min-w-[38px] min-h-[38px] rounded-xl border border-border cursor-pointer ${
                   activeRegion.id === 'local'
                     ? 'bg-secondary text-secondary-foreground'
                     : 'bg-background text-foreground'
@@ -1304,7 +1268,7 @@ export default function App() {
               type="button"
               onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
               aria-label="Toggle dark or light theme"
-              className="inline-flex items-center justify-center min-w-[40px] min-h-[40px] rounded-xl border border-border bg-background text-foreground cursor-pointer"
+              className="inline-flex items-center justify-center min-w-[38px] min-h-[38px] rounded-xl border border-border bg-background text-foreground cursor-pointer"
             >
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
@@ -1324,12 +1288,8 @@ export default function App() {
         phaseFilter !== 'all' ||
         (selectedAirport && airportTrafficFilter !== 'none')) && (
         <div
-          className={`fixed z-[520] flex flex-wrap items-center gap-1.5 transition-all duration-300 ${
-            isPortraitMobile
-              ? 'top-[62px] left-2 right-12'
-              : sidebarOpen
-                ? 'top-3 left-[min(420px,calc(100vw-24px))] hidden sm:flex'
-                : 'top-3 left-3'
+          className={`fixed z-[520] flex flex-wrap items-center gap-1.5 transition-all duration-200 ${
+            isPortraitMobile ? 'top-[62px] left-2 right-12' : 'top-3 left-3 max-w-[min(560px,calc(100vw-480px))]'
           }`}
         >
           {emergencyFlights.slice(0, 3).map((ef) => {
@@ -1448,453 +1408,103 @@ export default function App() {
         </div>
       )}
 
-      {/* Mobile Portrait Thumb-Zone Map Quick Filter & Settings Strip (when Sheet is closed) */}
-      {isPortraitMobile && activeView === 'radar' && !showTrafficSheet && !sidebarOpen && (
-        <div className="fixed bottom-[72px] left-2 right-2 z-[530] flex items-center justify-between gap-1.5 pb-safe pointer-events-none">
-          <div className="flex items-center gap-1 rounded-2xl bg-card/92 backdrop-blur-md border border-border p-1 shadow-lg overflow-x-auto pointer-events-auto">
-            {(
-              [
-                {id: 'all', label: `All (${flights.length})`},
-                {id: 'emergency', label: `EMERG (${emergencyFlights.length})`},
-                {id: 'ladd', label: `LADD (${laddCount})`},
-                {id: 'military', label: `MIL (${militaryCount})`},
-                {id: 'pia', label: `PIA (${piaCount})`},
-              ] as const
-            ).map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setTrafficFilter(opt.id)}
-                className={`min-h-[38px] rounded-xl px-2.5 text-[11px] font-mono font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
-                  trafficFilter === opt.id
-                    ? opt.id === 'emergency'
-                      ? 'bg-red-600 text-white'
-                      : opt.id === 'ladd'
-                        ? 'bg-purple-600 text-white'
-                        : opt.id === 'military'
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-1 rounded-2xl bg-card/92 backdrop-blur-md border border-border p-1 shadow-lg shrink-0 pointer-events-auto">
-            <RadarSettingsPopover
-              settings={radarSettings}
-              onUpdateSettings={updateRadarSettings}
-              onResetSettings={resetRadarSettings}
-            />
-            <button
-              type="button"
-              onClick={() => fetchLiveFlights(bounds, activeRegion.id)}
-              aria-label="Refresh traffic"
-              className="inline-flex items-center justify-center min-w-[38px] min-h-[38px] rounded-xl bg-background border border-border text-foreground cursor-pointer"
-            >
-              <RefreshCw className={`w-4 h-4 ${flightsLoading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Flight Inspector / Airport Board: Mobile Portrait 2-Detent Bottom Sheet OR Desktop Left Sidebar */}
-      <aside
-        aria-hidden={!sidebarOpen}
-        className={
-          isPortraitMobile
-            ? `fixed left-0 right-0 bottom-16 z-[550] flex flex-col gap-1.5 rounded-t-3xl bg-card/96 backdrop-blur-md border-t border-border shadow-2xl transition-all duration-300 ease-out pb-safe ${
-                mobileSheetDetent === 'expanded' ? 'h-[82dvh]' : 'h-[48dvh]'
-              } ${
-                sidebarOpen
-                  ? 'translate-y-0 opacity-100 pointer-events-auto'
-                  : 'translate-y-full opacity-0 pointer-events-none'
-              }`
-            : `fixed top-3 left-3 bottom-[84px] z-[550] w-[min(410px,calc(100vw-24px))] flex flex-col gap-2 transition-all duration-300 ease-out ${
-                sidebarOpen
-                  ? 'translate-x-0 opacity-100 pointer-events-auto'
-                  : '-translate-x-6 opacity-0 pointer-events-none'
-              }`
-        }
-      >
-        {isPortraitMobile && sidebarOpen && (
-          <div className="flex items-center justify-between px-4 pt-2 pb-0.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => setMobileSheetDetent((d) => (d === 'peek' ? 'expanded' : 'peek'))}
-              aria-label={mobileSheetDetent === 'peek' ? 'Expand sheet' : 'Collapse sheet'}
-              className="flex items-center gap-2 min-h-[34px] text-[11px] font-medium text-muted-foreground cursor-pointer"
-            >
-              <span className="w-9 h-1.5 rounded-full bg-border inline-block" />
-              {mobileSheetDetent === 'peek' ? (
-                <span className="inline-flex items-center gap-1">
-                  <Maximize2 className="w-3 h-3" /> Expand
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1">
-                  <Minimize2 className="w-3 h-3" /> Map View
-                </span>
-              )}
-            </button>
-            {selectedFlight && selectedAirport && (
-              <TabsList>
-                <TabsTrigger active={activeSidebarType === 'flight'} onClick={() => setSidebarMode('flight')}>
-                  {selectedFlight.callsign}
-                </TabsTrigger>
-                <TabsTrigger active={activeSidebarType === 'airport'} onClick={() => setSidebarMode('airport')}>
-                  {selectedAirport.iata}
-                </TabsTrigger>
-              </TabsList>
-            )}
-          </div>
-        )}
-
-        {!isPortraitMobile && selectedFlight && selectedAirport && sidebarOpen && (
-          <div className="rounded-full bg-card/95 backdrop-blur-md border border-border p-1 shadow-lg w-fit shrink-0">
-            <TabsList>
-              <TabsTrigger active={activeSidebarType === 'flight'} onClick={() => setSidebarMode('flight')}>
-                Flight: {selectedFlight.callsign}
-              </TabsTrigger>
-              <TabsTrigger active={activeSidebarType === 'airport'} onClick={() => setSidebarMode('airport')}>
-                Airport: {selectedAirport.iata}
-              </TabsTrigger>
-            </TabsList>
-          </div>
-        )}
-
-        <div className={`flex-1 min-h-0 flex flex-col ${isPortraitMobile ? 'px-2 pb-2' : 'drop-shadow-xl'}`}>
-          {activeSidebarType === 'airport' && selectedAirport ? (
-            <AirportBoardPanel
-              airport={selectedAirport}
-              board={airportBoard}
-              loading={airportBoardLoading}
-              weather={selectedAirportWeather}
-              surface={selectedAirportSurface}
-              timeDisplayMode={radarSettings.timeDisplayMode}
-              onTimeDisplayModeChange={(mode) => updateRadarSettings({timeDisplayMode: mode})}
-              activeFilter={airportTrafficFilter}
-              onFilterChange={setAirportTrafficFilter}
-              onSelectFlightFromBoard={handleSelectFlightFromBoard}
-              onFocusAirfield={() => {
-                const coords =
-                  selectedAirportSurface ??
-                  airportBoard ??
-                  mapAirports.find((m) => m.icao.toUpperCase() === selectedAirport.icao.toUpperCase()) ??
-                  AIRPORT_CATALOG.find((c) => c.icao.toUpperCase() === selectedAirport.icao.toUpperCase());
-                if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lon)) {
-                  setFlyToLocation((prev) => ({
-                    lat: coords.lat,
-                    lon: coords.lon,
-                    zoom: 13.6,
-                    seq: (prev?.seq ?? 0) + 1,
-                  }));
-                  if (isPortraitMobile) setMobileSheetDetent('peek');
-                }
-              }}
-              onClose={() => {
-                setSelectedAirport(null);
-                setSelectedAirportSurface(null);
-                setAirportTrafficFilter('none');
-                setSidebarMode(selectedFlight ? 'flight' : null);
-              }}
-            />
-          ) : selectedFlight ? (
-            <FlightInspectorPanel
-              flight={selectedFlight}
-              detail={selectedDetail}
-              detailLoading={detailLoading}
-              nowEpochSec={nowEpochSec}
-              timeDisplayMode={radarSettings.timeDisplayMode}
-              userLocation={userLocation}
-              mapAirports={mapAirports}
-              matchingAcars={matchingAcars}
-              followSelected={followSelected}
-              isolateSelected={isolateSelected}
-              onToggleFollow={() => {
-                setFollowSelected((v) => !v);
-                if (isPortraitMobile) setMobileSheetDetent('peek');
-              }}
-              onToggleIsolate={() => {
-                setIsolateSelected((v) => !v);
-                if (isPortraitMobile) setMobileSheetDetent('peek');
-              }}
-              onSelectAirport={(ap) => void handleSelectAirport(ap)}
-              onClose={() => {
-                setSelectedFlightId(null);
-                setFollowSelected(false);
-                setIsolateSelected(false);
-                setSidebarMode(selectedAirport ? 'airport' : null);
-              }}
-            />
-          ) : null}
-        </div>
-      </aside>
-
-      {/* Secondary Views Overlay (Taxi & ACARS / Flight Plan / Sector Traffic Sheet) */}
-      {(activeView !== 'radar' || showTrafficSheet) && (
-        <section
-          aria-label="Workspace panel"
-          className={`fixed z-[540] border border-border bg-card/96 backdrop-blur-md shadow-2xl overflow-y-auto transition-all duration-300 ease-out ${
-            isPortraitMobile
-              ? 'inset-x-0 top-[58px] bottom-16 rounded-t-3xl p-3 pb-6'
-              : 'inset-3 bottom-20 rounded-2xl p-4 sm:p-6'
-          }`}
-        >
-          <div className="flex items-center justify-between gap-3 pb-3 border-b border-border mb-4 sticky top-0 bg-card/96 backdrop-blur-md z-20">
-            <div className="font-display text-sm sm:text-base font-semibold text-foreground truncate">
-              {showTrafficSheet && activeView === 'radar'
-                ? `Sector Traffic · ${activeRegion.label}`
-                : activeView === 'taxi'
-                  ? 'Airport Surface Taxi & ACARS'
-                  : 'Weather-Coupled Flight Planner'}
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className={isPortraitMobile ? 'min-h-[40px] px-3' : ''}
-              onClick={() => {
-                setShowTrafficSheet(false);
-                setActiveView('radar');
-              }}
-            >
-              <X className="w-3.5 h-3.5" />
-              Back to Map
-            </Button>
-          </div>
-
-          {activeView === 'taxi' && (
-            <TaxiAcarsView
-              acarsMessages={acarsMessages}
-              acarsStatus={acarsStatus}
-              airportsWeather={airportsWeather}
-              theme={theme}
-              onRefreshAcars={fetchAcars}
-              onInspectFlight={(f) => handleSelectFlight(f)}
-            />
-          )}
-
-          {activeView === 'planner' && (
-            <FlightPlannerView
-              airportsWeather={airportsWeather}
-              sigmets={sigmets}
-              disruptions={disruptions}
-              onApplyRouteToRadar={(route) => {
-                setPlannedRoute(route);
-                setActiveView('radar');
-              }}
-            />
-          )}
-
-          {showTrafficSheet && activeView === 'radar' && (
-            <Card className="border-0 shadow-none bg-transparent">
-              <CardHeader className="px-0 pt-0 flex flex-col gap-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <CardTitle>{activeRegion.label}</CardTitle>
-                    <CardDescription>{activeRegion.subtitle}</CardDescription>
-                  </div>
-                  <TabsList>
-                    <TabsTrigger active={phaseFilter === 'all'} onClick={() => setPhaseFilter('all')}>
-                      All ({flights.length})
-                    </TabsTrigger>
-                    <TabsTrigger active={phaseFilter === 'air'} onClick={() => setPhaseFilter('air')}>
-                      Airborne ({airborneTraffic.length})
-                    </TabsTrigger>
-                    <TabsTrigger active={phaseFilter === 'ground'} onClick={() => setPhaseFilter('ground')}>
-                      Ground ({groundTraffic.length})
-                    </TabsTrigger>
-                  </TabsList>
-                </div>
-
-                {/* adsb.lol DB Flag, Emergency, Aircraft Model & Registration Country Strip */}
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {(
-                    [
-                      {id: 'all', label: 'All Feeds'},
-                      {id: 'ladd', label: `LADD (${laddCount})`},
-                      {id: 'military', label: `Military (${militaryCount})`},
-                      {id: 'pia', label: `PIA (${piaCount})`},
-                      {id: 'emergency', label: `Emergency (${emergencyFlights.length})`},
-                    ] as const
-                  ).map((item) => (
-                    <Button
-                      key={item.id}
-                      size="sm"
-                      variant={trafficFilter === item.id ? 'default' : 'outline'}
-                      onClick={() => setTrafficFilter(item.id)}
-                    >
-                      {item.label}
-                    </Button>
-                  ))}
-
-                  <select
-                    value={modelFilter}
-                    onChange={(e) => setModelFilter(e.target.value)}
-                    aria-label="Filter traffic by aircraft model"
-                    className="h-8 rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground cursor-pointer"
-                  >
-                    <option value="all">All Models ({availableModels.length})</option>
-                    {availableModels.map((m) => (
-                      <option key={m.code} value={m.code}>
-                        {m.code} ({m.count})
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={countryFilter}
-                    onChange={(e) => setCountryFilter(e.target.value)}
-                    aria-label="Filter traffic by country of origin"
-                    className="h-8 rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground cursor-pointer"
-                  >
-                    <option value="all">All Countries ({availableCountries.length})</option>
-                    {availableCountries.map((c) => (
-                      <option key={c.code} value={c.code}>
-                        {c.name} ({c.count})
-                      </option>
-                    ))}
-                  </select>
-
-                  {activeFilterCount > 0 && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setSearchQuery('');
-                        setPhaseFilter('all');
-                        setTrafficFilter('all');
-                        setModelFilter('all');
-                        setCountryFilter('all');
-                      }}
-                    >
-                      Clear ({activeFilterCount})
-                    </Button>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent className="px-0 pb-0">
-                <div className="border border-border rounded-xl overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Callsign</TableHead>
-                        <TableHead>DB Flag</TableHead>
-                        <TableHead>ICAO24</TableHead>
-                        <TableHead>Type / Reg</TableHead>
-                        <TableHead>Route</TableHead>
-                        <TableHead className="text-right">Altitude</TableHead>
-                        <TableHead className="text-right">GS</TableHead>
-                        <TableHead className="text-right">Squawk</TableHead>
-                        <TableHead className="text-right">Feed</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {filteredFlights.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
-                            {flightsLoading
-                              ? 'Polling live ADS-B receivers…'
-                              : 'No ADS-B contacts matched the current filter or viewport'}
-                          </TableCell>
-                        </TableRow>
-                      ) : (
-                        filteredFlights.slice(0, 120).map((f) => {
-                          const db = getDbFlagMeta(f);
-                          return (
-                            <TableRow
-                              key={f.id}
-                              onClick={() => handleSelectFlight(f)}
-                              data-state={selectedFlight?.id === f.id ? 'selected' : undefined}
-                              className="cursor-pointer"
-                            >
-                              <TableCell className="font-mono font-semibold text-foreground">{f.callsign}</TableCell>
-                              <TableCell className="font-mono">
-                                {db ? (
-                                  <Badge variant="outline">{db.shortLabel}</Badge>
-                                ) : (
-                                  <span className="text-muted-foreground text-[11px]">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell className="font-mono text-muted-foreground">{f.icao24}</TableCell>
-                              <TableCell className="font-mono text-foreground">
-                                {f.aircraftType}
-                                {f.registration ? (
-                                  <span className="text-muted-foreground ml-1.5">{f.registration}</span>
-                                ) : null}
-                              </TableCell>
-                              <TableCell className="font-mono text-foreground">
-                                {f.origin && f.destination ? `${f.origin} → ${f.destination}` : '—'}
-                              </TableCell>
-                              <TableCell className="font-mono tabular-nums text-right text-foreground">
-                                {f.onGround ? 'GND' : `${f.altitudeFt.toLocaleString()} ft`}
-                              </TableCell>
-                              <TableCell className="font-mono tabular-nums text-right text-foreground">
-                                {f.groundSpeedKts} kt
-                              </TableCell>
-                              <TableCell className="font-mono tabular-nums text-right text-foreground">
-                                {f.squawk || '—'}
-                              </TableCell>
-                              <TableCell className="font-mono text-right">
-                                <Badge variant={f.isEstimated ? 'warning' : 'outline'}>
-                                  {f.isEstimated ? 'DR-EST' : f.source}
-                                </Badge>
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })
-                      )}
-                    </TableBody>
-                  </Table>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </section>
-      )}
-
-      {/* Concurrent Multi-Select Aircraft Comparison Sidebar */}
-      {activeView === 'radar' && multiSelectFlights.length > 0 && (
-        <MultiSelectSidebar
-          flights={multiSelectFlights}
-          activeFlightId={selectedFlightId}
-          multiSelectMode={multiSelectMode}
-          onToggleMultiSelectMode={() => setMultiSelectMode((v) => !v)}
-          onFocusFlight={(f) => {
-            setSelectedFlightId(f.id);
-            setSidebarMode('flight');
-            setFlyToLocation((prev) => ({
-              lat: f.lat,
-              lon: f.lon,
-              zoom: 8,
-              seq: (prev?.seq ?? 0) + 1,
-            }));
-          }}
-          onRemoveFlight={(id) => {
-            setSelectedFlightIds((prev) => prev.filter((x) => x !== id));
-            if (selectedFlightId === id) {
-              setSelectedFlightId(null);
-            }
-          }}
-          onClearAll={() => setSelectedFlightIds([])}
-          isPortraitMobile={isPortraitMobile}
-        />
-      )}
-
-      {/* Upgraded Bottom Operations Drawer (FOV List · 13-Layer Weather · LiveATC · Flight Playback · Past · Updates · ASN Safety) */}
-      <BottomOpsDrawer
-        open={opsDrawerOpen && activeView === 'radar'}
-        activeTab={opsTab}
-        onTabChange={setOpsTab}
-        onClose={() => setOpsDrawerOpen(false)}
+      {/* Docked Right-Side Split Window Dashboard (Claude Artifacts / AI Studio style) */}
+      <RightDashboardWindow
+        open={rightDashboardOpen && activeView === 'radar'}
+        activeTab={dashboardTab}
+        onTabChange={setDashboardTab}
+        onClose={() => setRightDashboardOpen(false)}
         isPortraitMobile={isPortraitMobile}
+        onOpenCredits={() => setCreditsOpen(true)}
+        onOpenHistoryView={(q) => {
+          setRightDashboardOpen(false);
+          navigateView('history', q);
+        }}
+        activeInspectorType={activeInspectorType}
+        onInspectorTypeChange={(m) => setSidebarMode(m)}
         selectedFlight={selectedFlight}
-        fovFlights={fovFlights}
+        selectedDetail={selectedDetail}
+        detailLoading={detailLoading}
+        nowEpochSec={nowEpochSec}
+        userLocation={userLocation}
+        mapAirports={mapAirports}
+        matchingAcars={matchingAcars}
+        followSelected={followSelected}
+        isolateSelected={isolateSelected}
+        flightTrailsActive={selectedTrailsEnabled}
+        onToggleFollow={() => setFollowSelected((v) => !v)}
+        onToggleIsolate={() => setIsolateSelected((v) => !v)}
+        onToggleFlightTrails={toggleFlightTrails}
+        onCloseFlight={() => {
+          setSelectedFlightId(null);
+          setFollowSelected(false);
+          setIsolateSelected(false);
+          setSidebarMode(selectedAirport ? 'airport' : null);
+        }}
+        multiSelectFlights={multiSelectFlights}
         selectedFlightIds={selectedFlightIds}
         multiSelectMode={multiSelectMode}
         onToggleMultiSelectMode={() => setMultiSelectMode((v) => !v)}
         onToggleFlightInMultiSelect={toggleFlightInMultiSelect}
+        onRemoveMultiFlight={(id) => {
+          setSelectedFlightIds((prev) => prev.filter((x) => x !== id));
+          if (selectedFlightId === id) setSelectedFlightId(null);
+        }}
+        onClearMultiFlights={() => setSelectedFlightIds([])}
+        selectedAirport={selectedAirport}
+        airportBoard={airportBoard}
+        airportBoardLoading={airportBoardLoading}
+        selectedAirportWeather={selectedAirportWeather}
+        selectedAirportSurface={selectedAirportSurface}
+        airportTrafficFilter={airportTrafficFilter}
+        onAirportFilterChange={setAirportTrafficFilter}
+        onSelectAirport={(ap) => void handleSelectAirport(ap)}
+        onSelectFlightFromBoard={handleSelectFlightFromBoard}
+        onFocusAirfield={() => {
+          if (!selectedAirport) return;
+          const coords =
+            selectedAirportSurface ??
+            airportBoard ??
+            mapAirports.find((m) => m.icao.toUpperCase() === selectedAirport.icao.toUpperCase()) ??
+            AIRPORT_CATALOG.find((c) => c.icao.toUpperCase() === selectedAirport.icao.toUpperCase());
+          if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lon)) {
+            setFlyToLocation((prev) => ({
+              lat: coords.lat,
+              lon: coords.lon,
+              zoom: 13.6,
+              seq: (prev?.seq ?? 0) + 1,
+            }));
+          }
+        }}
+        onCloseAirport={() => {
+          setSelectedAirport(null);
+          setSelectedAirportSurface(null);
+          setAirportTrafficFilter('none');
+          setSidebarMode(selectedFlight ? 'flight' : null);
+        }}
+        flights={flights}
+        filteredFlights={filteredFlights}
+        fovFlights={fovFlights}
+        flightsLoading={flightsLoading}
+        providers={providers}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        phaseFilter={phaseFilter}
+        onPhaseFilterChange={setPhaseFilter}
+        trafficFilter={trafficFilter}
+        onTrafficFilterChange={setTrafficFilter}
+        modelFilter={modelFilter}
+        onModelFilterChange={setModelFilter}
+        availableModels={availableModels}
+        countryFilter={countryFilter}
+        onCountryFilterChange={setCountryFilter}
+        availableCountries={availableCountries}
+        laddCount={laddCount}
+        militaryCount={militaryCount}
+        piaCount={piaCount}
+        emergencyCount={emergencyFlights.length}
+        airborneCount={airborneTraffic.length}
+        groundCount={groundTraffic.length}
         onFocusFlight={(f) => {
           handleSelectFlight(f);
           setFlyToLocation((prev) => ({
@@ -1904,12 +1514,13 @@ export default function App() {
             seq: (prev?.seq ?? 0) + 1,
           }));
         }}
+        radarSettings={radarSettings}
+        onUpdateRadarSettings={updateRadarSettings}
+        onResetRadarSettings={resetRadarSettings}
         liveUpdates={liveUpdates}
         sigmets={sigmets}
         disruptions={disruptions}
         acarsMessages={acarsMessages}
-        radarSettings={radarSettings}
-        onUpdateRadarSettings={updateRadarSettings}
         playbackState={playbackState}
         onUpdatePlayback={(patch) => setPlaybackState((prev) => ({...prev, ...patch}))}
         onSelectFlightByHexOrCallsign={(icao24, callsign) => {
@@ -1926,7 +1537,6 @@ export default function App() {
               zoom: 9,
               seq: (prev?.seq ?? 0) + 1,
             }));
-            setOpsDrawerOpen(false);
           }
         }}
         onFlyToAirport={(code) => {
@@ -1942,7 +1552,6 @@ export default function App() {
               seq: (prev?.seq ?? 0) + 1,
             }));
             void handleSelectAirport({icao: cat.icao, iata: cat.iata, name: cat.name});
-            setOpsDrawerOpen(false);
           }
         }}
         onFlyToPoint={(lat, lon, zoom = 6) => {
@@ -1952,14 +1561,95 @@ export default function App() {
             zoom,
             seq: (prev?.seq ?? 0) + 1,
           }));
-          setOpsDrawerOpen(false);
         }}
-        onOpenCredits={() => setCreditsOpen(true)}
       />
+
+      {/* Full Workspace Overlay (History Sub-Domain · Taxi & ACARS · Flight Planner) */}
+      {activeView !== 'radar' && (
+        <section
+          aria-label="Workspace panel"
+          className={`fixed z-[540] border border-border bg-card/96 backdrop-blur-md shadow-2xl overflow-y-auto transition-all duration-200 ${
+            isPortraitMobile
+              ? 'inset-x-0 top-[58px] bottom-16 rounded-t-3xl p-3 pb-6'
+              : 'inset-3 bottom-20 rounded-2xl p-4 sm:p-6'
+          }`}
+        >
+          {activeView === 'history' && (
+            <FlightHistoryView
+              liveFlights={flights}
+              selectedFlight={selectedFlight}
+              initialQuery={historyInitialQuery}
+              onBackToRadar={() => navigateView('radar')}
+              onInspectLiveFlight={(f) => {
+                handleSelectFlight(f);
+                setFlyToLocation((prev) => ({
+                  lat: f.lat,
+                  lon: f.lon,
+                  zoom: 8.5,
+                  seq: (prev?.seq ?? 0) + 1,
+                }));
+              }}
+              onFlyToPoint={(lat, lon, zoom = 5.5) => {
+                setFlyToLocation((prev) => ({
+                  lat,
+                  lon,
+                  zoom,
+                  seq: (prev?.seq ?? 0) + 1,
+                }));
+              }}
+            />
+          )}
+
+          {activeView === 'taxi' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-border">
+                <div className="font-display text-sm sm:text-base font-semibold text-foreground">
+                  Airport Surface Taxi &amp; ACARS
+                </div>
+                <Button size="sm" variant="outline" onClick={() => navigateView('radar')}>
+                  <X className="w-3.5 h-3.5" />
+                  Back to Map
+                </Button>
+              </div>
+              <TaxiAcarsView
+                acarsMessages={acarsMessages}
+                acarsStatus={acarsStatus}
+                airportsWeather={airportsWeather}
+                theme={theme}
+                onRefreshAcars={fetchAcars}
+                onInspectFlight={(f) => handleSelectFlight(f)}
+              />
+            </div>
+          )}
+
+          {activeView === 'planner' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-border">
+                <div className="font-display text-sm sm:text-base font-semibold text-foreground">
+                  Weather-Coupled Flight Planner
+                </div>
+                <Button size="sm" variant="outline" onClick={() => navigateView('radar')}>
+                  <X className="w-3.5 h-3.5" />
+                  Back to Map
+                </Button>
+              </div>
+              <FlightPlannerView
+                airportsWeather={airportsWeather}
+                sigmets={sigmets}
+                disruptions={disruptions}
+                onApplyRouteToRadar={(route) => {
+                  setPlannedRoute(route);
+                  navigateView('radar');
+                }}
+              />
+            </div>
+          )}
+        </section>
+      )}
 
       <CreditsAttributionsModal open={creditsOpen} onClose={() => setCreditsOpen(false)} />
 
-      {/* Navigation Dock: Dedicated Portrait Mobile/Tablet 5-Tab Thumb Bar OR Compact Desktop Floating Island */}
+      {/* Streamlined Bottom Navigation Dock */}
       {isPortraitMobile ? (
         <nav
           aria-label="SkyDeck mobile navigation"
@@ -1971,33 +1661,30 @@ export default function App() {
                 id: 'radar',
                 label: 'Radar',
                 icon: <Radar className="w-5 h-5" />,
-                active: activeView === 'radar' && !showTrafficSheet && !opsDrawerOpen,
+                active: activeView === 'radar' && !rightDashboardOpen,
                 onClick: () => {
-                  setShowTrafficSheet(false);
-                  setOpsDrawerOpen(false);
-                  setActiveView('radar');
+                  setRightDashboardOpen(false);
+                  navigateView('radar');
                 },
               },
               {
-                id: 'ops',
-                label: liveUpdates.length > 0 ? `Ops ${liveUpdates.length}` : 'Ops',
-                icon: <Activity className="w-5 h-5" />,
-                active: activeView === 'radar' && opsDrawerOpen,
+                id: 'dashboard',
+                label: 'Dashboard',
+                icon: <PanelRightOpen className="w-5 h-5" />,
+                active: activeView === 'radar' && rightDashboardOpen,
                 onClick: () => {
-                  setShowTrafficSheet(false);
-                  setActiveView('radar');
-                  setOpsDrawerOpen((v) => !v);
+                  navigateView('radar');
+                  setRightDashboardOpen((v) => !v);
                 },
               },
               {
-                id: 'traffic',
-                label: laddCount > 0 ? `LADD ${laddCount}` : 'Traffic',
-                icon: <ListFilter className="w-5 h-5" />,
-                active: activeView === 'radar' && showTrafficSheet,
+                id: 'history',
+                label: 'History',
+                icon: <History className="w-5 h-5" />,
+                active: activeView === 'history',
                 onClick: () => {
-                  setOpsDrawerOpen(false);
-                  setActiveView('radar');
-                  setShowTrafficSheet((v) => !v);
+                  setRightDashboardOpen(false);
+                  navigateView('history');
                 },
               },
               {
@@ -2006,9 +1693,8 @@ export default function App() {
                 icon: <Radio className="w-5 h-5" />,
                 active: activeView === 'taxi',
                 onClick: () => {
-                  setShowTrafficSheet(false);
-                  setOpsDrawerOpen(false);
-                  setActiveView('taxi');
+                  setRightDashboardOpen(false);
+                  navigateView('taxi');
                 },
               },
               {
@@ -2017,9 +1703,8 @@ export default function App() {
                 icon: <Navigation className="w-5 h-5" />,
                 active: activeView === 'planner',
                 onClick: () => {
-                  setShowTrafficSheet(false);
-                  setOpsDrawerOpen(false);
-                  setActiveView('planner');
+                  setRightDashboardOpen(false);
+                  navigateView('planner');
                 },
               },
             ] as const
@@ -2042,37 +1727,34 @@ export default function App() {
       ) : (
         <nav
           aria-label="SkyDeck navigation and radar dock"
-          className={`fixed bottom-3 left-1/2 -translate-x-1/2 z-[600] max-w-[calc(100vw-20px)] transition-all duration-300 ease-out ${
-            dockHidden ? 'translate-y-0' : ''
-          }`}
+          className="fixed bottom-3 left-1/2 -translate-x-1/2 z-[600] max-w-[calc(100vw-20px)]"
         >
           {dockHidden ? (
             <button
               type="button"
               onClick={() => setDockHidden(false)}
-              className="inline-flex items-center gap-2 rounded-full bg-card/95 backdrop-blur-md border border-border px-4 py-2 text-xs font-semibold text-foreground shadow-xl hover:bg-accent cursor-pointer"
+              className="inline-flex items-center gap-2 rounded-full bg-card/95 backdrop-blur-md border border-border px-4 py-2 text-xs font-semibold text-foreground shadow-xl hover:bg-accent cursor-pointer whitespace-nowrap"
             >
               <ChevronUp className="w-3.5 h-3.5" />
-              SkyDeck Dock · {filteredFlights.length} ADS-B
+              SkyDeck · {filteredFlights.length} ADS-B
             </button>
           ) : (
             <div className="flex items-center gap-1 rounded-full bg-card/95 backdrop-blur-md border border-border px-2 py-1 shadow-2xl overflow-x-auto max-w-full">
-              {/* Brand + View Switcher */}
+              {/* Brand */}
               <button
                 type="button"
-                onClick={() => {
-                  setShowTrafficSheet(false);
-                  setActiveView('radar');
-                }}
-                className="font-display text-xs sm:text-sm font-bold tracking-tight text-foreground px-2 py-1 rounded-full hover:bg-accent whitespace-nowrap shrink-0 cursor-pointer"
+                onClick={() => navigateView('radar')}
+                className="font-display text-xs sm:text-sm font-bold tracking-tight text-foreground px-2.5 py-1 rounded-full hover:bg-accent whitespace-nowrap shrink-0 cursor-pointer"
               >
                 SkyDeck
               </button>
 
+              {/* View Switcher */}
               <div className="flex items-center gap-0.5 rounded-full bg-secondary/75 p-0.5 shrink-0">
                 {(
                   [
                     {id: 'radar', label: 'Radar'},
+                    {id: 'history', label: 'History'},
                     {id: 'taxi', label: 'Taxi'},
                     {id: 'planner', label: 'Plan'},
                   ] as const
@@ -2080,12 +1762,9 @@ export default function App() {
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => {
-                      setShowTrafficSheet(false);
-                      setActiveView(item.id);
-                    }}
+                    onClick={() => navigateView(item.id)}
                     className={`rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer ${
-                      activeView === item.id && !showTrafficSheet
+                      activeView === item.id
                         ? 'bg-primary text-primary-foreground shadow-xs'
                         : 'text-muted-foreground hover:text-foreground'
                     }`}
@@ -2095,12 +1774,12 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Compact Region Selector */}
+              {/* Region Selector */}
               <select
                 value={activeRegion.id}
                 onChange={(e) => handleSelectRegion(e.target.value)}
                 aria-label="Select radar coverage region"
-                className="h-8 max-w-[132px] sm:max-w-[155px] rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
+                className="h-8 max-w-[140px] rounded-full bg-background border border-input px-2.5 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer shrink-0"
               >
                 {localRegion && <option value={localRegion.id}>{localRegion.label}</option>}
                 {REGION_PRESETS.map((r) => (
@@ -2110,264 +1789,56 @@ export default function App() {
                 ))}
               </select>
 
-              {/* Optional Compact Locate Me */}
-              {radarSettings.locateMeEnabled && (
-                <Button
-                  size="icon"
-                  variant={activeRegion.id === 'local' ? 'secondary' : 'outline'}
-                  onClick={() => void syncToUserLocation()}
-                  disabled={locating}
-                  className="shrink-0 h-8 w-8"
-                  title="Sync map and ADS-B sector to your current location"
-                  aria-label="Locate me"
-                >
-                  <LocateFixed className={`w-3.5 h-3.5 ${locating ? 'animate-spin' : ''}`} />
-                </Button>
-              )}
+              {/* Quick Flight Search */}
+              <div className="relative hidden md:block w-32 lg:w-40 shrink-0">
+                <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <Input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Callsign / Tail…"
+                  aria-label="Quick search flights"
+                  className="h-8 rounded-full pl-8 pr-6 text-xs font-mono"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    aria-label="Clear quick search"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
 
-              {/* Unified Search, Squawk Emergency, Model & Country Filter Popover */}
-              <Popover>
-                <PopoverTrigger
-                  className={`inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                    trafficFilter === 'emergency'
-                      ? 'bg-red-600 text-white border-red-500'
-                      : activeFilterCount > 0
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-background text-foreground hover:bg-accent'
-                  }`}
-                  aria-label="Search and filter radar traffic"
-                >
-                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                  <span>
-                    {activeFilterCount > 0 ? `Filters (${activeFilterCount})` : 'Filter'}
-                  </span>
-                </PopoverTrigger>
-                <PopoverContent side="top" align="center" className="w-80 rounded-2xl p-3.5 space-y-3 shadow-xl">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-foreground">Search &amp; Traffic Filters</span>
-                    {activeFilterCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSearchQuery('');
-                          setPhaseFilter('all');
-                          setTrafficFilter('all');
-                          setModelFilter('all');
-                          setCountryFilter('all');
-                        }}
-                        className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
-                      >
-                        Reset all
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Callsign / Tail / Squawk Search */}
-                  <div className="flex items-center gap-1.5">
-                    <div className="relative flex-1">
-                      <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <Input
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Callsign, tail, hex, squawk (7700)"
-                        aria-label="Search live ADS-B flights"
-                        className="h-8 pl-8"
-                      />
-                    </div>
-                    {searchQuery && (
-                      <Button size="icon" variant="ghost" onClick={() => setSearchQuery('')} aria-label="Clear search">
-                        <X className="w-3.5 h-3.5" />
-                      </Button>
-                    )}
-                  </div>
-
-                  {/* Emergency Squawk & adsb.lol DB Flag Grid */}
-                  <div className="space-y-1">
-                    <div className="text-[10.5px] font-medium text-muted-foreground flex items-center gap-1">
-                      <ShieldAlert className="w-3 h-3" />
-                      Emergency Squawk &amp; DB Flags
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {(
-                        [
-                          {id: 'all', label: `All (${flights.length})`},
-                          {id: 'emergency', label: `Emergency (${emergencyFlights.length})`},
-                          {id: 'ladd', label: `LADD (${laddCount})`},
-                          {id: 'military', label: `Military (${militaryCount})`},
-                          {id: 'pia', label: `PIA (${piaCount})`},
-                        ] as const
-                      ).map((opt) => (
-                        <Button
-                          key={opt.id}
-                          size="sm"
-                          variant={trafficFilter === opt.id ? 'default' : 'outline'}
-                          onClick={() => setTrafficFilter(opt.id)}
-                          className={`justify-start h-7 text-[11px] ${
-                            opt.id === 'emergency' ? 'col-span-2' : ''
-                          }`}
-                        >
-                          {opt.label}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Phase Toggle */}
-                  <div className="grid grid-cols-3 gap-1 rounded-xl bg-secondary/70 p-1">
-                    {(
-                      [
-                        {id: 'all', label: 'All'},
-                        {id: 'air', label: `Air (${airborneTraffic.length})`},
-                        {id: 'ground', label: `Gnd (${groundTraffic.length})`},
-                      ] as const
-                    ).map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => setPhaseFilter(p.id)}
-                        className={`rounded-lg py-1 text-[11px] font-medium cursor-pointer ${
-                          phaseFilter === p.id
-                            ? 'bg-background text-foreground shadow-xs'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Aircraft Model & Country of Registration Dropdowns */}
-                  <div className="grid grid-cols-1 gap-2">
-                    <label className="space-y-1">
-                      <span className="text-[10.5px] font-medium text-muted-foreground block">
-                        Aircraft Model
-                      </span>
-                      <select
-                        value={modelFilter}
-                        onChange={(e) => setModelFilter(e.target.value)}
-                        aria-label="Filter by aircraft model"
-                        className="w-full h-8 rounded-lg bg-background border border-input px-2.5 text-xs text-foreground cursor-pointer"
-                      >
-                        <option value="all">All Aircraft Models ({availableModels.length})</option>
-                        {availableModels.map((m) => (
-                          <option key={m.code} value={m.code}>
-                            {m.code} — {m.count} live
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="space-y-1">
-                      <span className="text-[10.5px] font-medium text-muted-foreground block">
-                        Country of Registration
-                      </span>
-                      <select
-                        value={countryFilter}
-                        onChange={(e) => setCountryFilter(e.target.value)}
-                        aria-label="Filter by country of origin"
-                        className="w-full h-8 rounded-lg bg-background border border-input px-2.5 text-xs text-foreground cursor-pointer"
-                      >
-                        <option value="all">All Countries ({availableCountries.length})</option>
-                        {availableCountries.map((c) => (
-                          <option key={c.code} value={c.code}>
-                            {c.name} ({c.count})
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                </PopoverContent>
-              </Popover>
-
-              {/* Compact ADS-B Count & Traffic Drawer Trigger */}
-              <Popover>
-                <PopoverTrigger
-                  className="inline-flex h-8 items-center gap-1 rounded-full border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:bg-accent tabular-nums cursor-pointer whitespace-nowrap shrink-0"
-                  aria-label="View ADS-B feed status and sector traffic"
-                >
-                  <span className="font-semibold">{filteredFlights.length}</span>
-                  <span className="hidden lg:inline text-muted-foreground">ADS-B</span>
-                </PopoverTrigger>
-                <PopoverContent side="top" align="center" className="w-80 rounded-2xl p-4 space-y-3 shadow-xl">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <h3 className="text-xs font-semibold text-foreground">Live ADS-B &amp; Web Feeds</h3>
-                      <p className="text-[11px] text-muted-foreground">
-                        {airborneTraffic.length} air · {groundTraffic.length} gnd · {laddCount} LADD
-                        {estimatedCount > 0 ? ` · ${estimatedCount} DR` : ''}
-                      </p>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => {
-                        setActiveView('radar');
-                        setShowTrafficSheet((v) => !v);
-                      }}
-                    >
-                      <ListFilter className="w-3.5 h-3.5" />
-                      Table
-                    </Button>
-                  </div>
-                  <Separator />
-                  <div className="divide-y divide-border text-[11px] font-mono max-h-56 overflow-y-auto">
-                    {providers.length === 0 ? (
-                      <div className="py-2 text-muted-foreground">Polling live receivers…</div>
-                    ) : (
-                      providers.map((p) => (
-                        <div key={p.provider} className="py-2 flex items-center justify-between gap-2">
-                          <div>
-                            <div className="font-semibold text-foreground">{p.provider.toUpperCase()}</div>
-                            <div className="text-muted-foreground">
-                              {p.ok ? `${p.count} contacts · ${p.latencyMs}ms` : p.note || 'Unavailable'}
-                            </div>
-                          </div>
-                          <Badge variant={p.ok ? 'success' : 'warning'}>{p.ok ? 'LIVE' : 'WAF/IDLE'}</Badge>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </PopoverContent>
-              </Popover>
-
-              {/* Compact Multi-Select & Ops Drawer Trigger (FOV · Weather · LiveATC · Playback · Updates · Safety) */}
+              {/* Selected-Aircraft Flight Trails Toggle */}
               <Button
                 size="sm"
-                variant={multiSelectMode || selectedFlightIds.length > 0 ? 'default' : 'outline'}
-                onClick={() => setMultiSelectMode((v) => !v)}
-                aria-label="Toggle multi-select mode"
-                title="Toggle multi-select mode (or Shift+Click any aircraft)"
-                className="shrink-0 h-8 px-2 whitespace-nowrap"
-              >
-                <Layers className="w-3.5 h-3.5" />
-                {selectedFlightIds.length > 0 && <span>{selectedFlightIds.length}</span>}
-              </Button>
-
-              <Button
-                size="sm"
-                variant={opsDrawerOpen && activeView === 'radar' ? 'default' : 'outline'}
-                onClick={() => {
-                  setShowTrafficSheet(false);
-                  setActiveView('radar');
-                  setOpsDrawerOpen((v) => !v);
-                }}
-                aria-label="Open flight operations drawer (FOV, Weather, LiveATC, Playback)"
+                variant={selectedTrailsEnabled ? 'default' : 'outline'}
+                onClick={toggleFlightTrails}
+                title="Toggle altitude-gradient flight trail polyline for selected aircraft"
                 className="shrink-0 h-8 px-2.5 whitespace-nowrap"
               >
-                <Activity className="w-3.5 h-3.5" />
-                <span>
-                  Ops{playbackState.enabled ? ` · ${Math.round(playbackState.progress * 100)}%` : liveUpdates.length > 0 ? ` (${liveUpdates.length})` : ''}
-                </span>
+                <Route className="w-3.5 h-3.5" />
+                <span>Flight Trails</span>
               </Button>
 
-              {/* Settings Inside Compact Dock */}
-              <RadarSettingsPopover
-                settings={radarSettings}
-                onUpdateSettings={updateRadarSettings}
-                onResetSettings={resetRadarSettings}
-              />
+              {/* Live Contact Count -> Opens Traffic Tab in Right Dashboard */}
+              <button
+                type="button"
+                onClick={() => {
+                  navigateView('radar');
+                  setDashboardTab('traffic');
+                  setRightDashboardOpen(true);
+                }}
+                aria-label="Open sector traffic in right dashboard"
+                className="inline-flex h-8 items-center gap-1 rounded-full border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:bg-accent tabular-nums cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <span className="font-semibold">{filteredFlights.length}</span>
+                <span className="hidden lg:inline text-muted-foreground">ADS-B</span>
+              </button>
 
-              {/* Compact Icon Theme Toggle */}
+              {/* Theme Toggle */}
               <Button
                 size="icon"
                 variant="outline"
@@ -2379,35 +1850,30 @@ export default function App() {
                 {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
               </Button>
 
-              {/* Manual Refresh */}
+              {/* Right Dashboard Window Toggle */}
               <Button
-                size="icon"
-                variant="outline"
-                onClick={() => fetchLiveFlights(bounds, activeRegion.id)}
-                aria-label="Refresh live ADS-B traffic"
-                title="Refresh traffic"
-                className="shrink-0 h-8 w-8"
+                size="sm"
+                variant={rightDashboardOpen && activeView === 'radar' ? 'default' : 'outline'}
+                onClick={() => {
+                  navigateView('radar');
+                  setRightDashboardOpen((v) => !v);
+                }}
+                aria-label="Toggle right operations dashboard"
+                className="shrink-0 h-8 px-2.5 whitespace-nowrap"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${flightsLoading ? 'animate-spin' : ''}`} />
-              </Button>
-
-              {/* Legal Attributions & Credits */}
-              <Button
-                size="icon"
-                variant="outline"
-                onClick={() => setCreditsOpen(true)}
-                aria-label="Credits and data attributions"
-                title="Credits & Attributions"
-                className="shrink-0 h-8 w-8"
-              >
-                <Scale className="w-3.5 h-3.5" />
+                {rightDashboardOpen && activeView === 'radar' ? (
+                  <PanelRightClose className="w-3.5 h-3.5" />
+                ) : (
+                  <PanelRightOpen className="w-3.5 h-3.5" />
+                )}
+                <span>Dashboard</span>
               </Button>
 
               <div className="hidden xl:block shrink-0">
                 <PWAInstallButton onFallbackSync={() => fetchLiveFlights(bounds, activeRegion.id)} />
               </div>
 
-              {/* Collapse Dock Button */}
+              {/* Collapse Dock */}
               <Button
                 size="icon"
                 variant="ghost"

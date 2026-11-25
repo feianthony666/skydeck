@@ -1,4 +1,5 @@
 import {AIRPORT_CATALOG} from '../data/aviationCatalog';
+import {loadNavCache, saveNavCache} from './offlineStore';
 import type {
   AircraftPhoto,
   AirfieldPolygonFeature,
@@ -106,6 +107,9 @@ const browserWxLayersCache = new Map<string, {ts: number; data: WeatherLayersRes
 let workerCooldownUntil = 0;
 let relayQueue: Promise<void> = Promise.resolve();
 let flightPollCycle = 0;
+let lastStaticOverpassAt = 0;
+let staticOverpassCooldownUntil = 0;
+const browserPlaybackCache = new Map<string, {ts: number; trail: TrailPoint[]; source: string}>();
 
 export const DEFAULT_CF_WORKER_URL = 'https://royal-cherry-f2c2.feianthony666.workers.dev';
 
@@ -319,11 +323,6 @@ async function fetchTextViaCorsRelay(targetUrl: string, timeoutMs = 8000): Promi
 }
 
 async function fetchJsonViaCorsRelay<T>(targetUrl: string, timeoutMs = 8000): Promise<T | null> {
-  // 0. Same-origin snapshot published by the scheduled GitHub Action (no proxy, no CORS)
-  if (isStaticHostingMode()) {
-    const snap = await snapshotForUrl<T>(targetUrl);
-    if (snap) return snap;
-  }
   // 1. User's Cloudflare Worker CORS Proxy (skipped if No-Worker mode or cooldown active)
   const cfWorker = Date.now() >= workerCooldownUntil ? getCloudflareWorkerUrl() : '';
   if (cfWorker) {
@@ -765,85 +764,7 @@ async function getBrowserGlobalRunways(): Promise<Map<string, DirectAipRunwayEnt
   return directRunwaysPromise;
 }
 
-// ---- Same-origin data snapshots (written by the scheduled GitHub Action, see scripts/fetch-snapshots.mjs) ----
-// On static hosts (GitHub Pages) the browser cannot call most aviation APIs because they send no CORS headers.
-// The Action fetches them server-side and publishes them next to the site, so no worker/proxy is needed.
-const SNAPSHOT_MAX_AGE_MS = 90 * 60 * 1000;
-const snapshotMem = new Map<string, {ts: number; value: unknown | null}>();
-
-async function loadSnapshot<T>(name: string): Promise<T | null> {
-  const hit = snapshotMem.get(name);
-  if (hit && Date.now() - hit.ts < 60000) return hit.value as T | null;
-  let value: unknown | null = null;
-  try {
-    const res = await fetch(`./data/${name}.json`, {signal: AbortSignal.timeout(6000), cache: 'no-cache'});
-    const ct = (res.headers.get('content-type') ?? '').toLowerCase();
-    if (res.ok && !ct.includes('text/html')) {
-      const wrapped = (await res.json()) as {generatedAt?: number; data?: unknown};
-      if (wrapped && typeof wrapped.generatedAt === 'number' && Date.now() - wrapped.generatedAt < SNAPSHOT_MAX_AGE_MS) {
-        value = wrapped.data ?? null;
-      }
-    }
-  } catch {
-    value = null;
-  }
-  snapshotMem.set(name, {ts: Date.now(), value});
-  return value as T | null;
-}
-
-async function snapshotForUrl<T>(targetUrl: string): Promise<T | null> {
-  let u: URL;
-  try {
-    u = new URL(targetUrl);
-  } catch {
-    return null;
-  }
-  const fmt = u.searchParams.get('format');
-  if (u.hostname === 'aviationweather.gov') {
-    const m = u.pathname.match(/\/api\/data\/(airsigmet|isigmet|gairmet)$/);
-    if (m && (fmt === 'geojson' || fmt === 'json') && !u.searchParams.has('bbox')) {
-      return loadSnapshot<T>(`${m[1]}-${fmt}`);
-    }
-    if (u.pathname.endsWith('/api/data/metar') && u.searchParams.has('ids') && fmt === 'json') {
-      const wanted = (u.searchParams.get('ids') ?? '').toUpperCase().split(',').filter(Boolean);
-      const rows = await loadSnapshot<Array<Record<string, unknown>>>('metar-hubs');
-      if (!Array.isArray(rows) || wanted.length === 0) return null;
-      const set = new Set(wanted);
-      const picked = rows.filter((r) => set.has(String(r.icaoId ?? '').toUpperCase()));
-      const covered = new Set(picked.map((r) => String(r.icaoId ?? '').toUpperCase()));
-      let hit = 0;
-      for (const w of wanted) if (covered.has(w)) hit++;
-      return hit >= wanted.length * 0.5 ? (picked as unknown as T) : null;
-    }
-  }
-  if (u.hostname === 'api.adsb.lol') {
-    if (u.pathname === '/v2/ladd') return loadSnapshot<T>('adsb-ladd');
-    if (u.pathname === '/v2/mil') return loadSnapshot<T>('adsb-mil');
-  }
-  return null;
-}
-
-/** Endpoints that never send CORS headers: on a static host calling them only produces console errors. */
-function isBrowserBlockedEndpoint(url: string): boolean {
-  try {
-    const u = new URL(url);
-    if (u.hostname === 'opensky-network.org') return true;
-    if (u.hostname === 'api.adsb.lol' && /^\/v2\/(all|ladd|mil)$/.test(u.pathname)) return true;
-    if (u.hostname === 'opendata.adsb.fi' && u.pathname === '/api/v2/all') return true;
-    if (u.hostname === 'aviationweather.gov') return true;
-    if (u.hostname.endsWith('overpass-api.de') || u.hostname.includes('overpass.')) return true;
-  } catch {
-    // ignore
-  }
-  return false;
-}
-
 async function fetchNativeCorsJson<T>(url: string, timeoutMs = 6500): Promise<T | null> {
-  if (isStaticHostingMode()) {
-    const snap = await snapshotForUrl<T>(url);
-    if (snap) return snap;
-    if (isBrowserBlockedEndpoint(url)) return null;
-  }
   try {
     const res = await fetch(url, {signal: AbortSignal.timeout(timeoutMs)});
     if (!res.ok) return null;
@@ -1774,13 +1695,28 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     }
   }
 
+  const wantDetail = params.get('detail') === '1';
   const cacheKey = `${icao || `${lat.toFixed(3)},${lon.toFixed(3)}`}`;
   const existing = browserSurfaceCache.get(cacheKey);
   const existingTtl =
     existing && existing.data.source === 'osm-overpass' && existing.data.taxiways.length > 0
       ? 86400000
       : 45000;
-  if (existing && Date.now() - existing.ts < existingTtl) return existing.data;
+  if (existing && Date.now() - existing.ts < existingTtl) {
+    if (!wantDetail || existing.data.taxiways.length > 0) return existing.data;
+  }
+
+  const idbSurface = await loadNavCache<AirfieldSurfaceData>(`surface:${cacheKey}`, 7 * 86400_000);
+  if (
+    idbSurface &&
+    idbSurface.source === 'osm-overpass' &&
+    idbSurface.taxiways.length > 0 &&
+    !idbSurface.taxiways.some((t) => t.id.startsWith('syn-twy-')) &&
+    !idbSurface.labeledAprons?.some((a) => a.id === 'syn-apron-main')
+  ) {
+    browserSurfaceCache.set(cacheKey, {ts: Date.now(), data: idbSurface});
+    return idbSurface;
+  }
 
   let aprons: Array<Array<[number, number]>> = [];
   let labeledAprons: AirfieldPolygonFeature[] = [];
@@ -1793,67 +1729,76 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
   let osmSucceeded = false;
 
   const overpassPromise = (async () => {
-    if (isStaticHostingMode()) {
-      // Static host: use the airfield geometry baked by the GitHub Action (same origin, no CORS).
-      try {
-        const res = await fetch(`./data/surface/${encodeURIComponent(icao)}.json`, {signal: AbortSignal.timeout(8000)});
-        const ct = (res.headers.get('content-type') ?? '').toLowerCase();
-        if (!res.ok || ct.includes('text/html')) return;
-        const wrapped = (await res.json()) as {generatedAt?: number; data?: ReturnType<typeof parseOverpassAirfieldElements>};
-        const d = wrapped?.data;
-        if (!d || !Array.isArray(d.taxiways)) return;
-        osmRunways = d.osmRunways ?? [];
-        taxiways = d.taxiways;
-        aprons = d.aprons ?? [];
-        labeledAprons = d.labeledAprons ?? [];
-        terminals = d.terminals ?? [];
-        stands = d.stands ?? [];
-        holdingPositions = d.holdingPositions ?? [];
-        gates = d.gates ?? [];
-        osmSucceeded = osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
-      } catch {
-        // fall back to AIP + synthesized geometry
-      }
+    const isStatic = isStaticHostingMode();
+    if (isStatic && !wantDetail) return;
+    if (isStatic && (Date.now() < staticOverpassCooldownUntil || Date.now() - lastStaticOverpassAt < 2500)) {
       return;
     }
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) return;
     const q = buildOverpassAirfieldQuery(lat, lon);
-    const endpoints = GLOBAL_OVERPASS_MIRRORS.slice(1, 3);
+    if (isStatic) lastStaticOverpassAt = Date.now();
 
     try {
-      const json = await Promise.any(
-        endpoints.map(async (ep) => {
-          const osmRes = await fetch(ep, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              Accept: 'application/json',
-            },
-            body: `data=${encodeURIComponent(q)}`,
-            signal: AbortSignal.timeout(8000),
-          });
-          if (!osmRes.ok) throw new Error(`HTTP ${osmRes.status}`);
-          const parsed = (await osmRes.json()) as {elements?: OverpassElement[]};
-          if (!Array.isArray(parsed.elements) || parsed.elements.length === 0) {
-            throw new Error('Empty Overpass payload');
-          }
-          return parsed;
-        }),
-      );
+      let json: {elements?: OverpassElement[]} | null = null;
+      if (isStatic) {
+        const ep = 'https://overpass-api.de/api/interpreter';
+        const directRes = await fetch(ep, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+          },
+          body: `data=${encodeURIComponent(q)}`,
+          signal: AbortSignal.timeout(9000),
+        }).catch(() => null);
+        if (directRes?.status === 429) {
+          staticOverpassCooldownUntil = Date.now() + 60_000;
+        } else if (directRes?.ok) {
+          json = (await directRes.json()) as {elements?: OverpassElement[]};
+        } else {
+          json = await fetchJsonViaCorsRelay<{elements?: OverpassElement[]}>(
+            `${ep}?data=${encodeURIComponent(q)}`,
+            9000,
+          );
+        }
+      } else {
+        const endpoints = GLOBAL_OVERPASS_MIRRORS.slice(1, 3);
+        json = await Promise.any(
+          endpoints.map(async (ep) => {
+            const osmRes = await fetch(ep, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                Accept: 'application/json',
+              },
+              body: `data=${encodeURIComponent(q)}`,
+              signal: AbortSignal.timeout(8000),
+            });
+            if (!osmRes.ok) throw new Error(`HTTP ${osmRes.status}`);
+            const parsed = (await osmRes.json()) as {elements?: OverpassElement[]};
+            if (!Array.isArray(parsed.elements) || parsed.elements.length === 0) {
+              throw new Error('Empty Overpass payload');
+            }
+            return parsed;
+          }),
+        );
+      }
 
-      const parsed = parseOverpassAirfieldElements(json.elements ?? []);
-      osmRunways = parsed.osmRunways;
-      taxiways = parsed.taxiways.slice(0, 2600);
-      aprons = parsed.aprons;
-      labeledAprons = parsed.labeledAprons;
-      terminals = parsed.terminals;
-      stands = parsed.stands;
-      holdingPositions = parsed.holdingPositions;
-      gates = parsed.gates;
-      osmSucceeded =
-        osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
+      if (json && Array.isArray(json.elements) && json.elements.length > 0) {
+        const parsed = parseOverpassAirfieldElements(json.elements);
+        osmRunways = parsed.osmRunways;
+        taxiways = parsed.taxiways.slice(0, 3200);
+        aprons = parsed.aprons;
+        labeledAprons = parsed.labeledAprons;
+        terminals = parsed.terminals;
+        stands = parsed.stands;
+        holdingPositions = parsed.holdingPositions;
+        gates = parsed.gates;
+        osmSucceeded =
+          osmRunways.length > 0 || taxiways.length > 0 || aprons.length > 0 || terminals.length > 0;
+      }
     } catch {
-      // fall back to AIP + curated & synthesized geometry
+      // fall back cleanly to curated/AIP runways without synthetic placeholder boxes
     }
   })();
 
@@ -1918,65 +1863,6 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
 
   runways = applyDisplacedThresholds(catalog?.icao ?? icao, runways);
 
-  if (taxiways.length === 0 && runways.length > 0) {
-    runways.forEach((rw, idx) => {
-      if (rw.coords.length < 2) return;
-      const p1 = rw.coords[0];
-      const p2 = rw.coords[rw.coords.length - 1];
-      const cosLat = Math.max(0.2, Math.cos((p1[0] * Math.PI) / 180));
-      const dLat = p2[0] - p1[0];
-      const dLon = (p2[1] - p1[1]) * cosLat;
-      const len = Math.max(1e-5, Math.hypot(dLat, dLon));
-      const sideSign = idx % 2 === 0 ? 1 : -1;
-      const perpLat = (-dLon / len) * 0.0024 * sideSign;
-      const perpLon = ((dLat / len) * 0.0024 * sideSign) / cosLat;
-      const twyRef = ['A', 'B', 'C', 'L', 'G', 'H'][idx % 6];
-      const t1: [number, number] = [p1[0] + perpLat, p1[1] + perpLon];
-      const t2: [number, number] = [p2[0] + perpLat, p2[1] + perpLon];
-      taxiways.push({
-        id: `syn-twy-${rw.id}-par`,
-        kind: 'taxiway',
-        ref: twyRef,
-        widthM: 22,
-        coords: [t1, t2],
-      });
-      [0.08, 0.34, 0.66, 0.92].forEach((frac, cIdx) => {
-        const rx = p1[0] + (p2[0] - p1[0]) * frac;
-        const ry = p1[1] + (p2[1] - p1[1]) * frac;
-        const tx = t1[0] + (t2[0] - t1[0]) * frac;
-        const ty = t1[1] + (t2[1] - t1[1]) * frac;
-        taxiways.push({
-          id: `syn-twy-${rw.id}-ex-${cIdx}`,
-          kind: 'taxiway',
-          ref: `${twyRef}${cIdx + 1}`,
-          widthM: 18,
-          coords: [
-            [rx, ry],
-            [tx, ty],
-          ],
-        });
-      });
-    });
-  }
-
-  if (aprons.length === 0 && !osmSucceeded) {
-    const aLat = catalog?.lat ?? lat;
-    const aLon = catalog?.lon ?? lon;
-    const box: Array<[number, number]> = [
-      [aLat - 0.0025, aLon - 0.0038],
-      [aLat + 0.0025, aLon - 0.0038],
-      [aLat + 0.0025, aLon + 0.0038],
-      [aLat - 0.0025, aLon + 0.0038],
-    ];
-    aprons.push(box);
-    labeledAprons.push({
-      id: 'syn-apron-main',
-      ref: 'MAIN APRON',
-      coords: box,
-      center: [aLat, aLon],
-    });
-  }
-
   const result: AirfieldSurfaceData = {
     icao: catalog?.icao ?? icao,
     iata: catalog?.iata ?? iata,
@@ -1993,6 +1879,9 @@ async function fetchDirectSurface(params: URLSearchParams): Promise<AirfieldSurf
     source: osmSucceeded ? 'osm-overpass' : 'catalog',
   };
   browserSurfaceCache.set(cacheKey, {ts: Date.now(), data: result});
+  if (osmSucceeded && taxiways.length > 0) {
+    void saveNavCache(`surface:${cacheKey}`, result);
+  }
   return result;
 }
 
@@ -2223,8 +2112,95 @@ async function fetchDirectPastFlights(params: URLSearchParams): Promise<{query: 
   }
 
   items.sort((a, b) => (b.actualDep ?? b.scheduledDep ?? 0) - (a.actualDep ?? a.scheduledDep ?? 0));
-  browserPastCache.set(cacheKey, {ts: Date.now(), items});
-  return {query: rawQuery || icao24Param, items: items.slice(0, 24), fetchedAt: Date.now()};
+  const trimmed = items.slice(0, 24);
+  browserPastCache.set(cacheKey, {ts: Date.now(), items: trimmed});
+  if (trimmed.length > 0) {
+    void saveNavCache(`past:${cacheKey}`, trimmed);
+  }
+  return {query: rawQuery || icao24Param, items: trimmed, fetchedAt: Date.now()};
+}
+
+async function fetchDirectFlightPlayback(
+  params: URLSearchParams,
+): Promise<{flightId: string; trail: TrailPoint[]; source: string}> {
+  const flightId = (params.get('flightId') ?? '').trim();
+  const icao24 = (params.get('icao24') ?? '').trim().toLowerCase();
+  const timeSec = Number.parseInt(params.get('time') ?? '0', 10) || 0;
+  const cacheKey = `${flightId}|${icao24}|${timeSec}`;
+  const cached = browserPlaybackCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 600_000) {
+    return {flightId: flightId || icao24, trail: cached.trail, source: cached.source};
+  }
+  const idbHit = await loadNavCache<{trail: TrailPoint[]; source: string}>(`playback:${cacheKey}`, 24 * 3600_000);
+  if (idbHit && idbHit.trail.length > 0) {
+    browserPlaybackCache.set(cacheKey, {ts: Date.now(), ...idbHit});
+    return {flightId: flightId || icao24, ...idbHit};
+  }
+
+  const trail: TrailPoint[] = [];
+  let source = 'unavailable';
+
+  if (flightId && !flightId.startsWith('os-') && !flightId.startsWith('live-')) {
+    const json = await fetchJsonViaCorsRelay<{
+      result?: {
+        response?: {
+          data?: {
+            flight?: {
+              track?: Array<{
+                latitude?: number;
+                longitude?: number;
+                altitude?: {feet?: number};
+                speed?: {kts?: number};
+                heading?: number;
+                timestamp?: number;
+              }>;
+            };
+          };
+        };
+      };
+    }>(`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${encodeURIComponent(flightId)}`, 7500);
+
+    const pts = json?.result?.response?.data?.flight?.track ?? [];
+    for (const p of pts) {
+      if (!Number.isFinite(Number(p.latitude)) || !Number.isFinite(Number(p.longitude))) continue;
+      trail.push({
+        lat: Number(p.latitude),
+        lon: Number(p.longitude),
+        altFt: Math.max(0, Math.round(Number(p.altitude?.feet ?? 0) || 0)),
+        speedKts: Math.max(0, Math.round(Number(p.speed?.kts ?? 0) || 0)),
+        trackDeg: Math.round(Number(p.heading ?? 0) || 0),
+        ts: Number(p.timestamp ?? 0) || 0,
+      });
+    }
+    if (trail.length > 0) source = 'fr24-playback';
+  }
+
+  if (trail.length === 0 && icao24 && !isNoWorkerModePreferred()) {
+    const osJson = await fetchJsonViaCorsRelay<{
+      path?: Array<[number, number | null, number | null, number | null, number | null, boolean?]>;
+    }>(`https://opensky-network.org/api/tracks/all?icao24=${encodeURIComponent(icao24)}&time=${timeSec || 0}`, 6500);
+    const pathRows = osJson?.path ?? [];
+    for (const wp of pathRows) {
+      const lat = wp[1];
+      const lon = wp[2];
+      if (lat == null || lon == null) continue;
+      trail.push({
+        lat,
+        lon,
+        altFt: Math.max(0, Math.round((wp[3] ?? 0) * 3.28084)),
+        speedKts: 0,
+        trackDeg: Math.round(wp[4] ?? 0),
+        ts: wp[0] ?? 0,
+      });
+    }
+    if (trail.length > 0) source = 'opensky-track';
+  }
+
+  if (trail.length > 0) {
+    browserPlaybackCache.set(cacheKey, {ts: Date.now(), trail, source});
+    void saveNavCache(`playback:${cacheKey}`, {trail, source});
+  }
+  return {flightId: flightId || icao24, trail, source};
 }
 
 function classifyDirectHazardCategory(hazard: string, rawText: string): HazardCategory {
@@ -2358,6 +2334,11 @@ async function getBrowserAtcBoundaries(): Promise<AtcBoundaryFeature[]> {
   if (browserAtcPromise) return browserAtcPromise;
 
   browserAtcPromise = (async () => {
+    const idbHit = await loadNavCache<AtcBoundaryFeature[]>('nav:atc-boundaries', 7 * 86400_000);
+    if (idbHit && idbHit.length > 0) {
+      cachedBrowserAtc = {ts: Date.now(), boundaries: idbHit};
+      return idbHit;
+    }
     try {
       const [geoRes, datRes] = await Promise.allSettled([
         fetch('https://raw.githubusercontent.com/vatsimnetwork/vatspy-data-project/master/Boundaries.geojson', {
@@ -2374,6 +2355,7 @@ async function getBrowserAtcBoundaries(): Promise<AtcBoundaryFeature[]> {
         const out = parseAtcBoundariesFromVatsim(json, datText);
         if (out.length > 0) {
           cachedBrowserAtc = {ts: Date.now(), boundaries: out};
+          void saveNavCache('nav:atc-boundaries', out);
           return out;
         }
       }
@@ -2395,6 +2377,11 @@ async function getBrowserTimeZones(): Promise<TimeZoneBoundaryFeature[]> {
   if (browserTzPromise) return browserTzPromise;
 
   browserTzPromise = (async () => {
+    const idbHit = await loadNavCache<TimeZoneBoundaryFeature[]>('nav:timezones', 14 * 86400_000);
+    if (idbHit && idbHit.length > 0) {
+      cachedBrowserTz = {ts: Date.now(), timezones: idbHit};
+      return idbHit;
+    }
     try {
       const res = await fetch(
         'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_time_zones.geojson',
@@ -2405,6 +2392,7 @@ async function getBrowserTimeZones(): Promise<TimeZoneBoundaryFeature[]> {
         const out = parseTimeZonesFromGeoJson(json);
         if (out.length > 0) {
           cachedBrowserTz = {ts: Date.now(), timezones: out};
+          void saveNavCache('nav:timezones', out);
           return out;
         }
       }
@@ -2429,6 +2417,16 @@ async function getBrowserGlobalNavaids(): Promise<{
   if (browserNavaidsPromise) return browserNavaidsPromise;
 
   browserNavaidsPromise = (async () => {
+    const idbList = await loadNavCache<NavWaypointSpec[]>('nav:global-navaids', 7 * 86400_000);
+    if (idbList && idbList.length > 0) {
+      const byIdent = new Map<string, NavWaypointSpec>();
+      for (const n of idbList) {
+        if (!byIdent.has(n.ident)) byIdent.set(n.ident, n);
+      }
+      cachedBrowserNavaids = {ts: Date.now(), list: idbList, byIdent};
+      return {list: idbList, byIdent};
+    }
+
     let parsed = buildBuiltinFixNavaids();
     try {
       const res = await fetch('https://davidmegginson.github.io/ourairports-data/navaids.csv', {
@@ -2439,6 +2437,7 @@ async function getBrowserGlobalNavaids(): Promise<{
         const csvParsed = parseNavaidsCsv(csv);
         if (csvParsed.list.length > 0) {
           parsed = csvParsed;
+          void saveNavCache('nav:global-navaids', csvParsed.list);
         }
       }
     } catch {
@@ -2460,6 +2459,12 @@ async function getBrowserOceanicTracks(): Promise<OceanicTrackSpec[]> {
   if (browserOceanicPromise) return browserOceanicPromise;
 
   browserOceanicPromise = (async () => {
+    const idbHit = await loadNavCache<OceanicTrackSpec[]>('nav:oceanic-tracks', 3600_000);
+    if (idbHit && idbHit.length > 0) {
+      cachedBrowserOceanic = {ts: Date.now(), tracks: idbHit};
+      return idbHit;
+    }
+
     const tracks: OceanicTrackSpec[] = [];
     const {byIdent} = await getBrowserGlobalNavaids().catch(() => buildBuiltinFixNavaids());
     try {
@@ -2478,6 +2483,7 @@ async function getBrowserOceanicTracks(): Promise<OceanicTrackSpec[]> {
     }
     tracks.push(...BUILTIN_PACOTS);
     cachedBrowserOceanic = {ts: Date.now(), tracks};
+    void saveNavCache('nav:oceanic-tracks', tracks);
     return tracks;
   })().finally(() => {
     browserOceanicPromise = null;
@@ -2584,6 +2590,9 @@ async function handleStaticRoute(path: string, params: URLSearchParams): Promise
   }
   if (path === '/api/past-flights') {
     return fetchDirectPastFlights(params);
+  }
+  if (path === '/api/flight-playback') {
+    return fetchDirectFlightPlayback(params);
   }
   if (path === '/api/surface') {
     return fetchDirectSurface(params);

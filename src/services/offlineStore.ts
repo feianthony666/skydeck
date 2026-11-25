@@ -30,13 +30,21 @@ interface SkyDeckDB extends DBSchema {
     key: string;
     value: SavedFlightPlan;
   };
+  navCache: {
+    key: string;
+    value: {
+      key: string;
+      data: unknown;
+      savedAt: number;
+    };
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<SkyDeckDB>> | null = null;
 
 function getDb() {
   if (!dbPromise) {
-    dbPromise = openDB<SkyDeckDB>('skydeck-offline-v1', 1, {
+    dbPromise = openDB<SkyDeckDB>('skydeck-offline-v1', 2, {
       upgrade(db) {
         if (!db.objectStoreNames.contains('snapshots')) {
           db.createObjectStore('snapshots', {keyPath: 'key'});
@@ -50,10 +58,34 @@ function getDb() {
         if (!db.objectStoreNames.contains('flightPlans')) {
           db.createObjectStore('flightPlans', {keyPath: 'id'});
         }
+        if (!db.objectStoreNames.contains('navCache')) {
+          db.createObjectStore('navCache', {keyPath: 'key'});
+        }
       },
     });
   }
   return dbPromise;
+}
+
+export async function saveNavCache<T>(key: string, data: T): Promise<void> {
+  try {
+    const db = await getDb();
+    await db.put('navCache', {key, data, savedAt: Date.now()});
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export async function loadNavCache<T>(key: string, maxAgeMs: number): Promise<T | null> {
+  try {
+    const db = await getDb();
+    const rec = await db.get('navCache', key);
+    if (!rec) return null;
+    if (Date.now() - rec.savedAt > maxAgeMs) return null;
+    return rec.data as T;
+  } catch {
+    return null;
+  }
 }
 
 export async function saveFlightSnapshot(key: string, flights: LiveFlight[], fetchedAt: number) {

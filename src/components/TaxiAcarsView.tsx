@@ -521,7 +521,7 @@ export const TaxiAcarsView: React.FC<TaxiAcarsViewProps> = ({
         resolveFr24ModelClass(f.aircraftType, f.callsign),
         22,
         color,
-        '#0B0E14',
+        '#141923',
       );
       const icon = L.divIcon({
         className: 'skydeck-taxi-icon',

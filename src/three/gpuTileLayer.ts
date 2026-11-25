@@ -1,3 +1,4 @@
+import {openDB, type DBSchema, type IDBPDatabase} from 'idb';
 import * as THREE from 'three';
 import {
   isStaticHostingMode,
@@ -58,8 +59,58 @@ interface MvtCacheEntry {
 const MAX_TEX_CACHE = 460;
 const MAX_MVT_CACHE = 220;
 const MAX_CONCURRENT_MVT_FETCHES = 6;
+const TILE_CACHE_TTL_MS = 14 * 86400_000;
 const MAPTILER_V4_DIRECT_TPL =
   'https://api.maptiler.com/tiles/v4/{z}/{x}/{y}?key=dpyD4FwxbBpi1ejajPmX';
+
+interface TileBufferDB extends DBSchema {
+  mvt: {
+    key: string;
+    value: {
+      key: string;
+      buf: ArrayBuffer;
+      savedAt: number;
+    };
+  };
+}
+
+let tileDbPromise: Promise<IDBPDatabase<TileBufferDB>> | null = null;
+
+function getTileDb() {
+  if (!tileDbPromise && typeof indexedDB !== 'undefined') {
+    tileDbPromise = openDB<TileBufferDB>('skydeck-tile-cache-v1', 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains('mvt')) {
+          db.createObjectStore('mvt', {keyPath: 'key'});
+        }
+      },
+    });
+  }
+  return tileDbPromise;
+}
+
+async function loadCachedMvtBuffer(key: string): Promise<ArrayBuffer | null> {
+  try {
+    const db = await getTileDb();
+    if (!db) return null;
+    const row = await db.get('mvt', key);
+    if (!row) return null;
+    if (Date.now() - row.savedAt > TILE_CACHE_TTL_MS) return null;
+    return row.buf;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCachedMvtBuffer(key: string, buf: ArrayBuffer): Promise<void> {
+  try {
+    const db = await getTileDb();
+    if (!db) return;
+    await db.put('mvt', {key, buf, savedAt: Date.now()});
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 export class GpuTileManager {
   private group = new THREE.Group();
@@ -84,6 +135,8 @@ export class GpuTileManager {
   private preloadedThemes = new Set<string>();
   private fallbackTextures = new Map<string, THREE.CanvasTexture>();
   private rasterizedThisFrame = 0;
+  private deferredRasterize = false;
+  private pendingContinueRaf = false;
 
   constructor(maxAnisotropy: number, onTileReady: () => void) {
     this.maxAnisotropy = Math.min(4, maxAnisotropy);
@@ -147,37 +200,51 @@ export class GpuTileManager {
     const entry = this.mvtCache.get(key);
     if (!entry) return;
 
-    const directUrl = MAPTILER_V4_DIRECT_TPL.replace('{z}', String(z))
-      .replace('{x}', String(x))
-      .replace('{y}', String(y));
-
-    const tryUrls = isStaticHostingMode()
-      ? [directUrl]
-      : [`./api/vtile/${z}/${x}/${y}`, directUrl];
-
     let parsed: ParsedMvtTile | null = null;
-    for (const url of tryUrls) {
+    const cachedBuf = await loadCachedMvtBuffer(key);
+    if (cachedBuf) {
       try {
-        const res = await fetch(url, {signal: AbortSignal.timeout(6500)});
-        if (res.status === 204) {
-          parsed = new Map();
-          break;
-        }
-        const ct = (res.headers.get('content-type') ?? '').toLowerCase();
-        if (url.startsWith('./api/') && (res.status === 404 || ct.includes('text/html'))) {
-          markStaticHostingDetected();
-          continue;
-        }
-        if (!res.ok) continue;
-        const buf = await res.arrayBuffer();
-        if (buf.byteLength === 0) {
-          parsed = new Map();
-          break;
-        }
-        parsed = await parseMvtBuffer(buf);
-        break;
+        parsed = cachedBuf.byteLength === 0 ? new Map() : await parseMvtBuffer(cachedBuf);
       } catch {
-        // try next
+        parsed = null;
+      }
+    }
+
+    if (!parsed) {
+      const directUrl = MAPTILER_V4_DIRECT_TPL.replace('{z}', String(z))
+        .replace('{x}', String(x))
+        .replace('{y}', String(y));
+
+      const tryUrls = isStaticHostingMode()
+        ? [directUrl]
+        : [`./api/vtile/${z}/${x}/${y}`, directUrl];
+
+      for (const url of tryUrls) {
+        try {
+          const res = await fetch(url, {signal: AbortSignal.timeout(6500)});
+          if (res.status === 204) {
+            parsed = new Map();
+            void saveCachedMvtBuffer(key, new ArrayBuffer(0));
+            break;
+          }
+          const ct = (res.headers.get('content-type') ?? '').toLowerCase();
+          if (url.startsWith('./api/') && (res.status === 404 || ct.includes('text/html'))) {
+            markStaticHostingDetected();
+            continue;
+          }
+          if (!res.ok) continue;
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength === 0) {
+            parsed = new Map();
+            void saveCachedMvtBuffer(key, buf);
+            break;
+          }
+          parsed = await parseMvtBuffer(buf);
+          void saveCachedMvtBuffer(key, buf);
+          break;
+        } catch {
+          // try next
+        }
       }
     }
 
@@ -264,7 +331,8 @@ export class GpuTileManager {
     const mvtEntry = this.ensureMvtLoaded(srcZ, srcX, srcY, priority, shouldPin);
 
     if (mvtEntry.status === 'ready' && mvtEntry.tile) {
-      if (this.rasterizedThisFrame >= 3 && !shouldPin) {
+      if (this.rasterizedThisFrame >= 6 && !shouldPin) {
+        this.deferredRasterize = true;
         return null;
       }
       this.rasterizedThisFrame++;
@@ -427,6 +495,7 @@ export class GpuTileManager {
     } = params;
 
     this.rasterizedThisFrame = 0;
+    this.deferredRasterize = false;
     this.preloadWorldAndRegion(style, centerMx, centerMy, zoom);
 
     let baseZ = Math.max(2, Math.min(18, Math.round(zoom)));
@@ -646,6 +715,14 @@ export class GpuTileManager {
         (mesh.material as THREE.Material).dispose();
         this.activeMeshes.delete(k);
       }
+    }
+
+    if (this.deferredRasterize && !this.pendingContinueRaf) {
+      this.pendingContinueRaf = true;
+      requestAnimationFrame(() => {
+        this.pendingContinueRaf = false;
+        this.onTileReady();
+      });
     }
   }
 

@@ -676,6 +676,6 @@ export interface RadarSettings {
   apiBaseUrl?: string;
 }
 
-export type AppView = 'radar' | 'taxi' | 'planner';
+export type AppView = 'radar' | 'history' | 'taxi' | 'planner';
 export type CockpitCameraPreset = 'captain' | 'hud' | 'overhead' | 'pedestal';
 
