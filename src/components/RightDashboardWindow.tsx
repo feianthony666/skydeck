@@ -446,12 +446,12 @@ export const RightDashboardWindow: React.FC<RightDashboardWindowProps> = ({
 
   return (
     <aside
-      aria-label="SkyDeck right dashboard window"
+      aria-label="SkyDeck left dashboard window"
       data-no-map-wheel
       className={
         isPortraitMobile
           ? 'fixed inset-x-2 top-[58px] bottom-[72px] z-[565] rounded-2xl border border-border bg-card shadow-2xl flex flex-col overflow-hidden'
-          : 'fixed top-3 right-3 bottom-[72px] z-[565] w-[min(436px,calc(100vw-24px))] rounded-2xl border border-border bg-card shadow-2xl flex flex-col overflow-hidden'
+          : 'fixed top-3 left-3 bottom-[72px] z-[565] w-[min(420px,calc(100vw-24px))] rounded-2xl border border-border bg-card shadow-2xl flex flex-col overflow-hidden'
       }
     >
       {/* Window Chrome Header */}

@@ -349,7 +349,7 @@ const PALETTES: Record<VectorTheme, PaletteSpec> = {
   },
 };
 
-function tracePolygons(
+function tracePolygonsAppend(
   ctx: CanvasRenderingContext2D,
   rings: Array<Array<[number, number]>>,
   sx: number,
@@ -357,7 +357,6 @@ function tracePolygons(
   sy: number,
   oy: number,
 ) {
-  ctx.beginPath();
   for (const ring of rings) {
     if (ring.length < 3) continue;
     ctx.moveTo(ring[0][0] * sx - ox, ring[0][1] * sy - oy);
@@ -365,6 +364,23 @@ function tracePolygons(
       ctx.lineTo(ring[i][0] * sx - ox, ring[i][1] * sy - oy);
     }
     ctx.closePath();
+  }
+}
+
+function traceLinesAppend(
+  ctx: CanvasRenderingContext2D,
+  rings: Array<Array<[number, number]>>,
+  sx: number,
+  ox: number,
+  sy: number,
+  oy: number,
+) {
+  for (const line of rings) {
+    if (line.length < 2) continue;
+    ctx.moveTo(line[0][0] * sx - ox, line[0][1] * sy - oy);
+    for (let i = 1; i < line.length; i++) {
+      ctx.lineTo(line[i][0] * sx - ox, line[i][1] * sy - oy);
+    }
   }
 }
 
@@ -377,13 +393,7 @@ function traceLines(
   oy: number,
 ) {
   ctx.beginPath();
-  for (const line of rings) {
-    if (line.length < 2) continue;
-    ctx.moveTo(line[0][0] * sx - ox, line[0][1] * sy - oy);
-    for (let i = 1; i < line.length; i++) {
-      ctx.lineTo(line[i][0] * sx - ox, line[i][1] * sy - oy);
-    }
-  }
+  traceLinesAppend(ctx, rings, sx, ox, sy, oy);
 }
 
 /**
@@ -417,7 +427,7 @@ export function renderMvtTileToCanvas(
   const mapLayer = (name: string) => mvt.get(name);
   const scaleFactor = (ext: number) => (size * overScale) / ext;
 
-  // 1. Landcover & Parks & Landuse (MapTiler v4 + OpenMapTiles aliases)
+  // 1. Landcover & Parks & Landuse (Batched per style group for 10x faster Canvas2D rasterization)
   {
     for (const lname of [
       'residential',
@@ -441,31 +451,66 @@ export function renderMvtTileToCanvas(
         lname === 'forest' ||
         lname === 'wetland' ||
         lname === 'park';
-      ctx.fillStyle = isGreen ? pal.park : pal.landuse;
+
+      let hasPark = false;
+      let hasUse = false;
       for (const f of lyr.features) {
         if (f.type !== 3) continue;
         const cls = String(f.props.class ?? '');
         if (lname === 'landcover' && cls !== 'wood' && cls !== 'grass' && cls !== 'wetland') continue;
         if (lname === 'landuse' && cls === 'residential') continue;
-        ctx.fillStyle =
-          isGreen || cls === 'wood' || cls === 'grass' ? pal.park : pal.landuse;
-        tracePolygons(ctx, f.rings, sf, subX, sf, subY);
+        if (isGreen || cls === 'wood' || cls === 'grass') hasPark = true;
+        else hasUse = true;
+      }
+      if (hasPark) {
+        ctx.beginPath();
+        for (const f of lyr.features) {
+          if (f.type !== 3) continue;
+          const cls = String(f.props.class ?? '');
+          if (lname === 'landcover' && cls !== 'wood' && cls !== 'grass' && cls !== 'wetland') continue;
+          if (lname === 'landuse' && cls === 'residential') continue;
+          if (isGreen || cls === 'wood' || cls === 'grass') {
+            tracePolygonsAppend(ctx, f.rings, sf, subX, sf, subY);
+          }
+        }
+        ctx.fillStyle = pal.park;
+        ctx.fill('evenodd');
+      }
+      if (hasUse) {
+        ctx.beginPath();
+        for (const f of lyr.features) {
+          if (f.type !== 3) continue;
+          const cls = String(f.props.class ?? '');
+          if (lname === 'landcover' && cls !== 'wood' && cls !== 'grass' && cls !== 'wetland') continue;
+          if (lname === 'landuse' && cls === 'residential') continue;
+          if (!(isGreen || cls === 'wood' || cls === 'grass')) {
+            tracePolygonsAppend(ctx, f.rings, sf, subX, sf, subY);
+          }
+        }
+        ctx.fillStyle = pal.landuse;
         ctx.fill('evenodd');
       }
     }
 
-    // 2. Water bodies & Rivers
+    // 2. Water bodies & Rivers (Batched fill + stroke)
     const waterLyr = mapLayer('water');
     if (waterLyr) {
       const sf = scaleFactor(waterLyr.extent);
-      ctx.fillStyle = pal.water;
-      ctx.strokeStyle = pal.waterStroke;
-      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      let anyWater = false;
       for (const f of waterLyr.features) {
         if (f.type !== 3) continue;
-        tracePolygons(ctx, f.rings, sf, subX, sf, subY);
+        tracePolygonsAppend(ctx, f.rings, sf, subX, sf, subY);
+        anyWater = true;
+      }
+      if (anyWater) {
+        ctx.fillStyle = pal.water;
         ctx.fill('evenodd');
-        if (z >= 7) ctx.stroke();
+        if (z >= 7) {
+          ctx.strokeStyle = pal.waterStroke;
+          ctx.lineWidth = 1.0;
+          ctx.stroke();
+        }
       }
     }
 
@@ -475,51 +520,94 @@ export function renderMvtTileToCanvas(
       ctx.strokeStyle = pal.water;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
+      ctx.beginPath();
+      let anyRiver = false;
       for (const f of waterwayLyr.features) {
-        if (f.type !== 2) continue;
-        const cls = String(f.props.class ?? '');
-        ctx.lineWidth = cls === 'river' ? Math.max(1.8, (z - 5) * 0.8) : Math.max(1.0, (z - 9) * 0.5);
-        traceLines(ctx, f.rings, sf, subX, sf, subY);
+        if (f.type !== 2 || String(f.props.class ?? '') !== 'river') continue;
+        traceLinesAppend(ctx, f.rings, sf, subX, sf, subY);
+        anyRiver = true;
+      }
+      if (anyRiver) {
+        ctx.lineWidth = Math.max(1.8, (z - 5) * 0.8);
         ctx.stroke();
       }
-    }
-
-    // 3. Global Aeroway / Aviation Layer
-    for (const aeroName of ['aviation', 'aviation_line', 'aeroway']) {
-      const aeroLyr = mapLayer(aeroName);
-      if (!aeroLyr || z < 6) continue;
-      const sf = scaleFactor(aeroLyr.extent);
-      for (const f of aeroLyr.features) {
-        const cls = String(f.props.class ?? '');
-        if (f.type === 3) {
-          ctx.fillStyle = cls === 'runway' ? pal.aerowayRunway : pal.aerowayApron;
-          tracePolygons(ctx, f.rings, sf, subX, sf, subY);
-          ctx.fill('evenodd');
-        } else if (f.type === 2) {
-          ctx.strokeStyle = pal.aerowayRunway;
-          ctx.lineCap = 'butt';
-          ctx.lineWidth =
-            cls === 'runway'
-              ? Math.max(2.2, Math.pow(2, z - 12) * 5.5)
-              : Math.max(1.2, Math.pow(2, z - 12) * 2.4);
-          traceLines(ctx, f.rings, sf, subX, sf, subY);
+      if (z >= 9) {
+        ctx.beginPath();
+        let anyStream = false;
+        for (const f of waterwayLyr.features) {
+          if (f.type !== 2 || String(f.props.class ?? '') === 'river') continue;
+          traceLinesAppend(ctx, f.rings, sf, subX, sf, subY);
+          anyStream = true;
+        }
+        if (anyStream) {
+          ctx.lineWidth = Math.max(1.0, (z - 9) * 0.5);
           ctx.stroke();
         }
       }
     }
 
-    // 4. Buildings (z >= 13)
+    // 3. Global Aeroway / Aviation Layer (Batched)
+    for (const aeroName of ['aviation', 'aviation_line', 'aeroway']) {
+      const aeroLyr = mapLayer(aeroName);
+      if (!aeroLyr || z < 6) continue;
+      const sf = scaleFactor(aeroLyr.extent);
+      ctx.beginPath();
+      let hasPolyRwy = false;
+      for (const f of aeroLyr.features) {
+        if (f.type === 3 && String(f.props.class ?? '') === 'runway') {
+          tracePolygonsAppend(ctx, f.rings, sf, subX, sf, subY);
+          hasPolyRwy = true;
+        }
+      }
+      if (hasPolyRwy) {
+        ctx.fillStyle = pal.aerowayRunway;
+        ctx.fill('evenodd');
+      }
+      ctx.beginPath();
+      let hasPolyApron = false;
+      for (const f of aeroLyr.features) {
+        if (f.type === 3 && String(f.props.class ?? '') !== 'runway') {
+          tracePolygonsAppend(ctx, f.rings, sf, subX, sf, subY);
+          hasPolyApron = true;
+        }
+      }
+      if (hasPolyApron) {
+        ctx.fillStyle = pal.aerowayApron;
+        ctx.fill('evenodd');
+      }
+      for (const f of aeroLyr.features) {
+        if (f.type !== 2) continue;
+        const cls = String(f.props.class ?? '');
+        ctx.strokeStyle = pal.aerowayRunway;
+        ctx.lineCap = 'butt';
+        ctx.lineWidth =
+          cls === 'runway'
+            ? Math.max(2.2, Math.pow(2, z - 12) * 5.5)
+            : Math.max(1.2, Math.pow(2, z - 12) * 2.4);
+        traceLines(ctx, f.rings, sf, subX, sf, subY);
+        ctx.stroke();
+      }
+    }
+
+    // 4. Buildings (z >= 13, single batched path per tile)
     const bldgLyr = mapLayer('building');
     if (bldgLyr && z >= 13) {
       const sf = scaleFactor(bldgLyr.extent);
-      ctx.fillStyle = pal.buildingFill;
-      ctx.strokeStyle = pal.buildingStroke;
-      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      let anyBldg = false;
       for (const f of bldgLyr.features) {
         if (f.type !== 3) continue;
-        tracePolygons(ctx, f.rings, sf, subX, sf, subY);
+        tracePolygonsAppend(ctx, f.rings, sf, subX, sf, subY);
+        anyBldg = true;
+      }
+      if (anyBldg) {
+        ctx.fillStyle = pal.buildingFill;
         ctx.fill('evenodd');
-        if (z >= 14) ctx.stroke();
+        if (z >= 14) {
+          ctx.strokeStyle = pal.buildingStroke;
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
       }
     }
   }
@@ -605,10 +693,11 @@ export function renderMvtTileToCanvas(
       if (b.order <= 2 && z < 12) continue;
       ctx.strokeStyle = b.casingColor;
       ctx.lineWidth = b.casingWidth;
+      ctx.beginPath();
       for (const item of b.lines) {
-        traceLines(ctx, item.rings, item.sf, subX, item.sf, subY);
-        ctx.stroke();
+        traceLinesAppend(ctx, item.rings, item.sf, subX, item.sf, subY);
       }
+      ctx.stroke();
     }
 
     for (const b of sortedBuckets) {
@@ -618,18 +707,20 @@ export function renderMvtTileToCanvas(
         ctx.setLineDash([5, 5]);
         ctx.strokeStyle = b.color;
         ctx.lineWidth = b.width;
+        ctx.beginPath();
         for (const item of b.lines) {
-          traceLines(ctx, item.rings, item.sf, subX, item.sf, subY);
-          ctx.stroke();
+          traceLinesAppend(ctx, item.rings, item.sf, subX, item.sf, subY);
         }
+        ctx.stroke();
         ctx.restore();
       } else {
         ctx.strokeStyle = b.color;
         ctx.lineWidth = b.width;
+        ctx.beginPath();
         for (const item of b.lines) {
-          traceLines(ctx, item.rings, item.sf, subX, item.sf, subY);
-          ctx.stroke();
+          traceLinesAppend(ctx, item.rings, item.sf, subX, item.sf, subY);
         }
+        ctx.stroke();
       }
     }
   }

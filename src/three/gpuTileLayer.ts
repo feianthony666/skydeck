@@ -331,7 +331,7 @@ export class GpuTileManager {
     const mvtEntry = this.ensureMvtLoaded(srcZ, srcX, srcY, priority, shouldPin);
 
     if (mvtEntry.status === 'ready' && mvtEntry.tile) {
-      if (this.rasterizedThisFrame >= 6 && !shouldPin) {
+      if (this.rasterizedThisFrame >= 2 && !shouldPin) {
         this.deferredRasterize = true;
         return null;
       }

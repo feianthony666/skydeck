@@ -6,8 +6,8 @@ import {
   LocateFixed,
   Moon,
   Navigation,
-  PanelRightClose,
-  PanelRightOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
   Radar,
   Radio,
   Route,
@@ -407,6 +407,10 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  const airportDirSaveTimerRef = useRef<number | null>(null);
+  const airportDirCountRef = useRef<number>(0);
+  const boundsEmitTimerRef = useRef<number | null>(null);
+
   const fetchAirportsInView = useCallback(
     async (targetBounds = boundsRef.current, zoom = activeRegion.zoom) => {
       if (!navigator.onLine) return;
@@ -426,13 +430,30 @@ export default function App() {
           ac.signal,
         );
         if (!ac.signal.aborted && Array.isArray(data.airports)) {
+          let latestMerged: AirportMarker[] | null = null;
           setMapAirports((prev) => {
             const byIcao = new Map(prev.map((a) => [a.icao, a]));
-            for (const a of data.airports!) byIcao.set(a.icao, a);
+            let changed = false;
+            for (const a of data.airports!) {
+              const ex = byIcao.get(a.icao);
+              if (!ex || ex.tier !== a.tier) {
+                byIcao.set(a.icao, a);
+                changed = true;
+              }
+            }
+            if (!changed) return prev;
             const merged = Array.from(byIcao.values());
-            void saveCachedAirportDirectory(merged);
+            latestMerged = merged;
             return merged;
           });
+          if (latestMerged && (latestMerged as AirportMarker[]).length > airportDirCountRef.current) {
+            const snapshot = latestMerged as AirportMarker[];
+            airportDirCountRef.current = snapshot.length;
+            if (airportDirSaveTimerRef.current) window.clearTimeout(airportDirSaveTimerRef.current);
+            airportDirSaveTimerRef.current = window.setTimeout(() => {
+              void saveCachedAirportDirectory(snapshot);
+            }, 3500);
+          }
         }
       } catch {
         // retain previous viewport airports or ignore aborted request
@@ -1198,9 +1219,16 @@ export default function App() {
           onSelectFlight={handleSelectFlight}
           onSelectAirport={(ap) => void handleSelectAirport(ap)}
           onBoundsChange={(newBounds, zoom) => {
-            setBounds(newBounds);
-            fetchLiveFlights(newBounds, activeRegion.id);
-            fetchAirportsInView(newBounds, zoom);
+            boundsRef.current = newBounds;
+            if (boundsEmitTimerRef.current !== null) {
+              window.clearTimeout(boundsEmitTimerRef.current);
+            }
+            boundsEmitTimerRef.current = window.setTimeout(() => {
+              boundsEmitTimerRef.current = null;
+              setBounds(newBounds);
+              void fetchLiveFlights(newBounds, activeRegion.id);
+              void fetchAirportsInView(newBounds, zoom);
+            }, 420);
           }}
         />
       </main>
@@ -1288,8 +1316,12 @@ export default function App() {
         phaseFilter !== 'all' ||
         (selectedAirport && airportTrafficFilter !== 'none')) && (
         <div
-          className={`fixed z-[520] flex flex-wrap items-center gap-1.5 transition-all duration-200 ${
-            isPortraitMobile ? 'top-[62px] left-2 right-12' : 'top-3 left-3 max-w-[min(560px,calc(100vw-480px))]'
+          className={`fixed z-[520] flex flex-wrap items-center gap-1.5 transition-[left] duration-200 ${
+            isPortraitMobile
+              ? 'top-[62px] left-2 right-12'
+              : rightDashboardOpen && activeView === 'radar'
+                ? 'top-3 left-[444px] max-w-[min(560px,calc(100vw-600px))]'
+                : 'top-3 left-3 max-w-[min(560px,calc(100vw-280px))]'
           }`}
         >
           {emergencyFlights.slice(0, 3).map((ef) => {
@@ -1670,7 +1702,7 @@ export default function App() {
               {
                 id: 'dashboard',
                 label: 'Dashboard',
-                icon: <PanelRightOpen className="w-5 h-5" />,
+                icon: <PanelLeftOpen className="w-5 h-5" />,
                 active: activeView === 'radar' && rightDashboardOpen,
                 onClick: () => {
                   navigateView('radar');
@@ -1823,7 +1855,7 @@ export default function App() {
                 <span>Flight Trails</span>
               </Button>
 
-              {/* Live Contact Count -> Opens Traffic Tab in Right Dashboard */}
+              {/* Live Contact Count -> Opens Traffic Tab in Left Dashboard */}
               <button
                 type="button"
                 onClick={() => {
@@ -1831,7 +1863,7 @@ export default function App() {
                   setDashboardTab('traffic');
                   setRightDashboardOpen(true);
                 }}
-                aria-label="Open sector traffic in right dashboard"
+                aria-label="Open sector traffic in left dashboard"
                 className="inline-flex h-8 items-center gap-1 rounded-full border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:bg-accent tabular-nums cursor-pointer whitespace-nowrap shrink-0"
               >
                 <span className="font-semibold">{filteredFlights.length}</span>
@@ -1850,7 +1882,7 @@ export default function App() {
                 {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
               </Button>
 
-              {/* Right Dashboard Window Toggle */}
+              {/* Left Dashboard Window Toggle */}
               <Button
                 size="sm"
                 variant={rightDashboardOpen && activeView === 'radar' ? 'default' : 'outline'}
@@ -1858,13 +1890,13 @@ export default function App() {
                   navigateView('radar');
                   setRightDashboardOpen((v) => !v);
                 }}
-                aria-label="Toggle right operations dashboard"
+                aria-label="Toggle left operations dashboard"
                 className="shrink-0 h-8 px-2.5 whitespace-nowrap"
               >
                 {rightDashboardOpen && activeView === 'radar' ? (
-                  <PanelRightClose className="w-3.5 h-3.5" />
+                  <PanelLeftClose className="w-3.5 h-3.5" />
                 ) : (
-                  <PanelRightOpen className="w-3.5 h-3.5" />
+                  <PanelLeftOpen className="w-3.5 h-3.5" />
                 )}
                 <span>Dashboard</span>
               </Button>

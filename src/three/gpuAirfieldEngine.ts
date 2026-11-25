@@ -95,8 +95,13 @@ async function loadCachedSurface(icao: string): Promise<AirfieldSurfaceData | nu
     ) {
       return null;
     }
-    const ttl =
-      row.data.source === 'osm-overpass' && row.data.taxiways.length > 0 ? 7 * 86400_000 : 120_000;
+    const hasOsmGeom =
+      row.data.source === 'osm-overpass' &&
+      (row.data.taxiways.length > 0 ||
+        row.data.runways.length > 0 ||
+        row.data.aprons.length > 0 ||
+        (row.data.terminals?.length ?? 0) > 0);
+    const ttl = hasOsmGeom ? 14 * 86400_000 : 60_000;
     if (Date.now() - row.savedAt > ttl) return null;
     return row.data;
   } catch {
@@ -105,6 +110,7 @@ async function loadCachedSurface(icao: string): Promise<AirfieldSurfaceData | nu
 }
 
 async function saveCachedSurface(icao: string, data: AirfieldSurfaceData): Promise<void> {
+  if (data.source !== 'osm-overpass' && data.taxiways.length === 0) return;
   try {
     const db = await getDb();
     if (!db) return;
@@ -1534,9 +1540,22 @@ export function buildGpuAirfieldGroup(
  * 2) IndexedDB persisted cache lookup for ALL catalog airports on site entry
  * 3) Sequential/prioritized background `/api/surface` fetch + upgrade
  */
+interface AirfieldLoadJob {
+  key: string;
+  iata: string;
+  lat: number;
+  lon: number;
+  detail: boolean;
+  priority: number;
+}
+
 export class PersistentAirfieldStore {
   private memCache = new Map<string, AirfieldSurfaceData>();
   private inFlight = new Set<string>();
+  private queuedKeys = new Set<string>();
+  private loadQueue: AirfieldLoadJob[] = [];
+  private activeWorkers = 0;
+  private retryAfter = new Map<string, number>();
   private preloadStarted = false;
   private onUpdated: () => void;
 
@@ -1579,14 +1598,12 @@ export class PersistentAirfieldStore {
         Math.hypot(b.lat - priorityLat, b.lon - priorityLon),
     );
 
-    // 1) Seed all catalog airports immediately in memory & hydrate IndexedDB hits immediately
+    // 1) Seed curated runways synchronously & hydrate IndexedDB hits immediately (zero Overpass flood on boot)
     for (const ap of sorted) {
       this.getInstant(ap.icao, ap.lat, ap.lon);
     }
 
-    // 2) Hydrate IndexedDB cache for all catalog hubs, then smoothly fetch missing OSM surfaces (concurrency=2)
     void (async () => {
-      const missing: typeof sorted = [];
       await Promise.all(
         sorted.map(async (ap) => {
           const hit = await loadCachedSurface(ap.icao);
@@ -1595,40 +1612,30 @@ export class PersistentAirfieldStore {
               ...hit,
               runways: applyDisplacedThresholds(ap.icao, hit.runways),
             });
-          } else {
-            missing.push(ap);
           }
         }),
       );
       this.onUpdated();
-
-      // Persist and warm all catalog airfields cleanly in background without unloading cached surfaces
-      const queue = [...missing];
-      const workers = [0, 1].map(async () => {
-        while (queue.length > 0) {
-          const ap = queue.shift();
-          if (!ap) break;
-          await this.ensureLoaded(ap.icao, ap.iata, ap.lat, ap.lon);
-          await new Promise((r) => setTimeout(r, 90));
-        }
-      });
-      await Promise.all(workers);
     })();
   }
 
-  public async ensureLoaded(
-    icao: string,
-    iata: string,
-    lat: number,
-    lon: number,
-    detail = false,
-  ): Promise<void> {
-    const key = (icao || iata).toUpperCase();
-    const existing = this.memCache.get(key);
-    if (existing && existing.source === 'osm-overpass' && existing.taxiways.length > 0) return;
-    if (this.inFlight.has(key)) return;
-    this.inFlight.add(key);
+  private pumpQueue(): void {
+    while (this.activeWorkers < 2 && this.loadQueue.length > 0) {
+      this.loadQueue.sort((a, b) => a.priority - b.priority);
+      const job = this.loadQueue.shift()!;
+      this.queuedKeys.delete(job.key);
+      if (this.inFlight.has(job.key)) continue;
+      this.activeWorkers++;
+      void this.runSurfaceLoad(job).finally(() => {
+        this.activeWorkers = Math.max(0, this.activeWorkers - 1);
+        this.pumpQueue();
+      });
+    }
+  }
 
+  private async runSurfaceLoad(job: AirfieldLoadJob): Promise<void> {
+    const {key, lat, lon, detail} = job;
+    this.inFlight.add(key);
     try {
       const idbHit = await loadCachedSurface(key);
       if (idbHit && (idbHit.runways.length > 0 || idbHit.taxiways.length > 0)) {
@@ -1637,7 +1644,7 @@ export class PersistentAirfieldStore {
           runways: applyDisplacedThresholds(key, idbHit.runways),
         });
         this.onUpdated();
-        if (idbHit.source === 'osm-overpass' && idbHit.taxiways.length > 0) {
+        if (idbHit.source === 'osm-overpass') {
           return;
         }
       }
@@ -1649,7 +1656,7 @@ export class PersistentAirfieldStore {
       });
       if (detail) qs.set('detail', '1');
       const fetched = await apiFetchJson<AirfieldSurfaceData>(`/api/surface?${qs.toString()}`);
-      if (fetched && (fetched.runways.length > 0 || fetched.taxiways.length > 0)) {
+      if (fetched && (fetched.runways.length > 0 || fetched.taxiways.length > 0 || fetched.aprons.length > 0)) {
         const cleanData: AirfieldSurfaceData = {
           ...fetched,
           runways: applyDisplacedThresholds(key, fetched.runways),
@@ -1668,14 +1675,51 @@ export class PersistentAirfieldStore {
           cleanData.lon = c[1] || lon;
         }
         this.memCache.set(key, cleanData);
-        await saveCachedSurface(key, cleanData);
+        if (cleanData.source === 'osm-overpass') {
+          await saveCachedSurface(key, cleanData);
+          this.retryAfter.delete(key);
+        } else {
+          this.retryAfter.set(key, Date.now() + 14_000);
+        }
         this.onUpdated();
+      } else {
+        this.retryAfter.set(key, Date.now() + 14_000);
       }
     } catch {
-      // Retain seed geometry if offline or timed out
+      this.retryAfter.set(key, Date.now() + 14_000);
     } finally {
       this.inFlight.delete(key);
     }
+  }
+
+  public async ensureLoaded(
+    icao: string,
+    iata: string,
+    lat: number,
+    lon: number,
+    detail = false,
+    priority = 10,
+  ): Promise<void> {
+    const key = (icao || iata).toUpperCase();
+    if (!key) return;
+    const existing = this.memCache.get(key);
+    if (existing && existing.source === 'osm-overpass') return;
+    const cooldown = this.retryAfter.get(key) ?? 0;
+    if (Date.now() < cooldown) return;
+    if (this.inFlight.has(key)) return;
+
+    if (this.queuedKeys.has(key)) {
+      const idx = this.loadQueue.findIndex((j) => j.key === key);
+      if (idx >= 0) {
+        if (detail) this.loadQueue[idx].detail = true;
+        if (priority < this.loadQueue[idx].priority) this.loadQueue[idx].priority = priority;
+      }
+      return;
+    }
+
+    this.queuedKeys.add(key);
+    this.loadQueue.push({key, iata, lat, lon, detail, priority});
+    this.pumpQueue();
   }
 
   public getAllLoaded(): AirfieldSurfaceData[] {
